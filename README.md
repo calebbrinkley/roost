@@ -1,4 +1,4 @@
-# Roost
+# <img width="2086" height="754" alt="image" src="https://github.com/user-attachments/assets/49f910f3-7ac7-4eeb-a569-921525177ce5" />
 
 A private web app for chatting with your Hermes agent and managing its scheduled work.
 
