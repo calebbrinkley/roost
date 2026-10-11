@@ -13,6 +13,16 @@ function el(tag, className, text) {
 
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
+// The agent's display name comes from the server (ROOST_AGENT_NAME); the markup holds templates for it.
+function agent() { return state.agentName || "Agent"; }
+
+function applyAgentName(name) {
+  if (name) state.agentName = name;
+  for (const node of document.querySelectorAll("[data-agent-text]")) node.textContent = node.dataset.agentText.replaceAll("{agent}", agent());
+  for (const node of document.querySelectorAll("[data-agent-placeholder]")) node.placeholder = node.dataset.agentPlaceholder.replaceAll("{agent}", agent());
+  for (const node of document.querySelectorAll("[data-agent-initial]")) node.textContent = agent().charAt(0).toUpperCase();
+}
+
 // While a reply is on its way, the label rotates through these instead of always saying "typing".
 const WORKING_VERBS = ["thinking", "pondering", "mulling it over", "digging in", "connecting the dots",
                        "drafting", "weighing options", "putting it together", "double-checking", "typing"];
@@ -24,13 +34,13 @@ function nextWorkingVerb() {
 
 function workingLabel(ellipsis = false) {
   const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
-  label.textContent = `Wren is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
+  label.textContent = `${agent()} is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
   return label;
 }
 
 function refreshWorkingLabels() {
   for (const label of document.querySelectorAll(".working-label")) {
-    label.textContent = `Wren is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
+    label.textContent = `${agent()} is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
   }
 }
 // Line icons in one style (24 px grid, 2 px round strokes, current text colour).
@@ -269,7 +279,7 @@ function renderConversations() {
   const list = $("conversation-list"); list.replaceChildren();
   const rows = state.conversations.filter((item) =>
     (sessionName(item) + " " + (item.preview || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
-  if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : "No conversations yet. Start one with Wren."));
+  if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
   for (const item of rows) {
     const id = item.session_id || item.id;
     if (!id) continue;
@@ -279,7 +289,7 @@ function renderConversations() {
     heading.append(el("span", "conversation-name", sessionName(item)));
     if (item.source && item.source !== "roost") heading.append(el("span", "source-tag", item.source));
     const preview = el("span", "row-preview" + (state.pending?.id === id ? " live" : ""));
-    preview.append(state.pending?.id === id ? workingLabel(true) : (item.preview || "Conversation with Wren"));
+    preview.append(state.pending?.id === id ? workingLabel(true) : (item.preview || `Conversation with ${agent()}`));
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
@@ -344,7 +354,7 @@ function finishLoadingConversations(data, rows, more) {
 function renderWelcome() {
   const transcript = $("transcript"); transcript.replaceChildren();
   const card = el("div", "welcome-card");
-  card.append(el("div", "welcome-symbol", "W"), el("h2", "", "Message Wren"),
+  card.append(el("div", "welcome-symbol", agent().charAt(0).toUpperCase()), el("h2", "", `Message ${agent()}`),
               el("p", "", "A question, an idea, or something to work through. Start wherever you like."));
   transcript.append(card);
   $("chat-title").textContent = "New conversation";
@@ -558,7 +568,7 @@ function updateSchedulePreview() {
 
 function renderJobs() {
   const list = $("sidebar-jobs-list"); list.replaceChildren();
-  if (!state.jobs.length) list.append(el("p", "empty-list", "No jobs yet. Add one for Wren to handle on a schedule."));
+  if (!state.jobs.length) list.append(el("p", "empty-list", `No jobs yet. Add one for ${agent()} to handle on a schedule.`));
   for (const job of state.jobs) {
     const id = job.id || job.job_id;
     if (!id) continue;
@@ -606,12 +616,12 @@ function renderJobDetail() {
   const scrollTop = detail.scrollTop;
   detail.replaceChildren();
   $("job-detail-title").textContent = job ? jobValue(job, "name") || "Untitled job" : "Jobs";
-  $("job-detail-subtitle").textContent = job ? jobScheduleLabel(job) : "Scheduled work with Wren";
+  $("job-detail-subtitle").textContent = job ? jobScheduleLabel(job) : `Scheduled work with ${agent()}`;
   show("job-detail-actions", Boolean(job));
   if (!job) {
     const welcome = el("div", "job-welcome welcome-card");
-    welcome.append(el("div", "welcome-symbol", "◷"), el("h2", "", state.jobs.length ? "Choose a job" : "Give Wren a job"),
-                   el("p", "", state.jobs.length ? "Select a job to see its schedule, instructions, and recent runs." : "Set up something Wren can take care of on a schedule."));
+    welcome.append(el("div", "welcome-symbol", "◷"), el("h2", "", state.jobs.length ? "Choose a job" : `Give ${agent()} a job`),
+                   el("p", "", state.jobs.length ? "Select a job to see its schedule, instructions, and recent runs." : `Set up something ${agent()} can take care of on a schedule.`));
     detail.append(welcome);
     return;
   }
@@ -630,10 +640,10 @@ function renderJobDetail() {
   // Hermes keeps no report on the job itself; its newest run's preview is the last report.
   const latestRun = state.jobRuns[job.id || job.job_id]?.[0];
   summary.append(el("div", "job-report", job.last_run_preview || job.last_output || job.last_report || latestRun?.preview ||
-                    "No report yet. Wren’s next run will appear here."));
+                    `No report yet. ${agent()}’s next run will appear here.`));
   detail.append(summary);
   const instructions = el("section", "job-detail-section");
-  instructions.append(el("h2", "", "What Wren will do"), el("p", "job-prompt", jobValue(job, "prompt") || "No instructions provided."));
+  instructions.append(el("h2", "", `What ${agent()} will do`), el("p", "job-prompt", jobValue(job, "prompt") || "No instructions provided."));
   detail.append(instructions);
   const history = el("section", "job-detail-section job-history");
   const historyHeading = el("div", "job-history-heading");
@@ -684,7 +694,7 @@ async function loadJobs() {
 async function jobAction(id, action) {
   try {
     await api(`/jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
-    notice(action === "trigger" ? "Wren is running this Job." : `Job ${action === "pause" ? "paused" : "resumed"}.`);
+    notice(action === "trigger" ? `${agent()} is running this Job.` : `Job ${action === "pause" ? "paused" : "resumed"}.`);
     await loadJobs();
     if (action === "trigger") { delete state.jobRuns[id]; await loadJobRuns(id); }
   } catch (error) { notice(error.message); }
@@ -839,4 +849,4 @@ setInterval(() => {
   else loadJobs().catch(() => {});
 }, 20000);
 
-api("/me").then((data) => data.signed_in ? signedIn() : signedOut()).catch(() => signedOut());
+api("/me").then((data) => { applyAgentName(data.agent); return data.signed_in ? signedIn() : signedOut(); }).catch(() => signedOut());

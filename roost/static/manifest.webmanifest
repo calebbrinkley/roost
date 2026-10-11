@@ -1,1 +1,1 @@
-{"name":"Roost","short_name":"Roost","description":"Conversations with Wren","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#ffffff","icons":[{"src":"/icon.svg?v=forest-green","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
+{"name":"Roost","short_name":"Roost","description":"Conversations with your agent","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#ffffff","icons":[{"src":"/icon.svg?v=forest-green","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

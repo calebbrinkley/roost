@@ -82,10 +82,13 @@ DEVICE_FAILURES, ALL_FAILURES, FAILURE_WINDOW = 5, 20, 300
 
 def client_address(request: web.Request) -> str:
     """The signing-in device. Behind Tailscale Serve every request comes from loopback, and Serve sets
-    (not appends) X-Forwarded-For to the device's tailnet address, so that header names the device."""
+    (not appends) X-Forwarded-For to the device's tailnet address, so that header names the device.
+    In a container the proxy is not loopback, so ROOST_TRUST_FORWARDED=1 trusts the header from any
+    peer; set it only when the proxy is the sole way in."""
     remote = request.remote or "unknown"
     forwarded = request.headers.get("X-Forwarded-For", "").strip()
-    if remote in LOOPBACK and forwarded and "," not in forwarded and len(forwarded) <= 64:
+    trusted = remote in LOOPBACK or request.app["trust_forwarded"]
+    if trusted and forwarded and "," not in forwarded and len(forwarded) <= 64:
         return forwarded
     return remote
 
@@ -128,7 +131,7 @@ async def logout(request: web.Request):
 
 async def me(request: web.Request):
     return web.json_response({"signed_in": request.app["sessions"].valid(request.cookies.get(COOKIE, "")),
-                              "demo": request.app["demo"]})
+                              "demo": request.app["demo"], "agent": request.app["agent_name"]})
 
 
 async def health(request: web.Request):
@@ -279,6 +282,12 @@ def create_app() -> web.Application:
     app = web.Application(middlewares=[guard], client_max_size=64 * 1024)
     app["origin"] = origin
     app["demo"] = os.environ.get("ROOST_DEMO") == "1"
+    # The agent's display name. The page shows it; it is not a secret.
+    agent_name = os.environ.get("ROOST_AGENT_NAME", "").strip() or "Agent"
+    if not agent_name or len(agent_name) > 40 or not agent_name.isprintable():
+        raise ValueError("ROOST_AGENT_NAME must be 1 to 40 printable characters.")
+    app["agent_name"] = agent_name
+    app["trust_forwarded"] = os.environ.get("ROOST_TRUST_FORWARDED") == "1"
     app["secure_cookie"] = origin.startswith("https://")
     app["password_file"] = password_file
     app["login_attempts"] = {}

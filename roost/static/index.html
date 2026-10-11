@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="Roost, a place to talk with Wren.">
+  <meta name="description" content="Roost, a place to talk with your agent.">
   <link rel="icon" href="/icon.svg?v=forest-green" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
   <script src="/theme.js"></script>
@@ -17,7 +17,7 @@
     <form id="login-form" class="login-card">
       <div class="login-icon">R</div>
       <h1>Roost</h1>
-      <p>Messages with Wren, all in one place.</p>
+      <p data-agent-text="Messages with {agent}, all in one place.">Messages with your agent, all in one place.</p>
       <label for="password">Password</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <button class="primary" type="submit">Sign in</button>
@@ -54,8 +54,8 @@
       <section id="messages-view" class="messages-view">
         <header class="chat-header">
           <button id="back-to-list" class="back-button mobile-only" type="button" aria-label="Back to Messages">‹</button>
-          <div class="chat-avatar">W</div>
-          <div class="chat-heading"><strong>Wren</strong><small id="chat-title">Your conversation</small></div>
+          <div class="chat-avatar" data-agent-initial>A</div>
+          <div class="chat-heading"><strong data-agent-text="{agent}">Agent</strong><small id="chat-title">Your conversation</small></div>
           <div class="chat-actions">
             <span id="origin-badge" class="source-tag hidden"></span>
             <span id="presence" class="presence desktop-only"></span>
@@ -64,8 +64,8 @@
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <form id="composer" class="composer">
-          <label class="sr-only" for="message">Message Wren</label>
-          <textarea id="message" rows="1" placeholder="Message Wren" maxlength="16000" required></textarea>
+          <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
+          <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
           <button id="voice-button" class="mic-button" type="button" disabled aria-label="Voice messages are coming later" title="Voice messages are coming later"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
           <button id="send" class="send-button" type="submit" aria-label="Send message">↑</button>
         </form>
@@ -74,7 +74,7 @@
       <section id="jobs-view" class="jobs-view hidden">
         <header class="jobs-header">
           <button id="back-to-jobs" class="back-button mobile-only" type="button" aria-label="Back to Jobs">‹</button>
-          <div class="jobs-heading"><strong id="job-detail-title">Jobs</strong><small id="job-detail-subtitle">Scheduled work with Wren</small></div>
+          <div class="jobs-heading"><strong id="job-detail-title">Jobs</strong><small id="job-detail-subtitle">Scheduled work</small></div>
           <div class="jobs-actions"><button class="theme-toggle theme-icon-only mobile-only" type="button" data-theme-toggle></button><button id="new-job" class="icon-button desktop-only" type="button" aria-label="New job" title="New job">+</button></div>
         </header>
         <div id="job-detail" class="job-detail"></div>
@@ -95,7 +95,7 @@
     <form id="job-form">
       <div class="dialog-heading"><h2 id="job-dialog-title">New job</h2><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
       <label for="job-name">Name</label><input id="job-name" maxlength="500" required placeholder="Morning briefing">
-      <label for="job-prompt">What should Wren do?</label><textarea id="job-prompt" rows="5" maxlength="16000" required placeholder="Give me a clear overview of today's priorities."></textarea>
+      <label for="job-prompt" data-agent-text="What should {agent} do?">What should the agent do?</label><textarea id="job-prompt" rows="5" maxlength="16000" required placeholder="Give me a clear overview of today's priorities."></textarea>
       <label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00.</p>
       <label for="job-deliver">Delivery</label><input id="job-deliver" maxlength="500" value="local" required><p class="field-help">“local” saves the result in Hermes.</p>
       <div id="job-management" class="job-management hidden"><button id="delete-job" class="danger" type="button">Delete job</button></div>
@@ -117,7 +117,7 @@
     </form>
     <div id="sheet-confirm" class="sheet-view hidden">
       <p id="sheet-confirm-title" class="sheet-title" tabindex="-1"></p>
-      <p class="sheet-note">This removes the conversation from Wren’s history for good.</p>
+      <p class="sheet-note"><span data-agent-text="This removes the conversation from {agent}’s history for good.">This removes the conversation from the agent’s history for good.</span></p>
       <p id="sheet-confirm-error" class="error" role="alert"></p>
       <div class="dialog-actions"><button id="sheet-confirm-cancel" class="secondary" type="button">Cancel</button><button id="sheet-confirm-delete" class="danger-button" type="button">Delete</button></div>
     </div>

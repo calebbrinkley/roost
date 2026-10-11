@@ -240,7 +240,7 @@ def mock_hermes():
 
                 async def reply(sid, prompt):
                     await asyncio.sleep(1)
-                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nWren's real answer will appear here when Roost is connected to Hermes."})
+                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nThe agent's real answer will appear here when Roost is connected to Hermes."})
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
 
                 asyncio.create_task(reply(stored_id, text))

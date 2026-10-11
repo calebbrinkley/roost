@@ -48,6 +48,8 @@ Open `http://127.0.0.1:8787`. Set the Roost password using `set-password`; it is
 | `ROOST_HERMES_URL` | Hermes dashboard base URL; required. |
 | `ROOST_HERMES_USERNAME` | Hermes dashboard basic-auth user; required. |
 | `ROOST_HERMES_PASSWORD_FILE` | Readable file containing its password; required. |
+| `ROOST_TRUST_FORWARDED` | `1` to key sign-in lockouts on `X-Forwarded-For` from any peer, for a container whose only way in is a proxy that sets it (such as Tailscale Serve). Off by default: only loopback peers are trusted. |
+| `ROOST_AGENT_NAME` | The agent's display name in the interface; defaults to `Agent`. |
 | `ROOST_STATE_DIR` | Password hash and revocable session database; defaults to `.roost-state`. |
 
 The browser session lasts up to 30 days, uses a server-side revocation table, and is carried by a SameSite Strict, HttpOnly cookie. The cookie is Secure when the public origin uses HTTPS. A new password from `set-password` applies at the next sign-in, with no restart. Sign-in locks a device for five minutes after five wrong passwords (devices behind Tailscale Serve are told apart by the address Serve forwards), with an overall limit of twenty. Changing the Roost password does not automatically revoke existing sessions; sign out on each device or remove the session database while Roost is stopped if you need to revoke all sessions.
@@ -60,7 +62,7 @@ The integration targets the pinned Hermes version in `local-ai-stack` (`v2026.9.
 
 ## Integration with local-ai-stack
 
-Roost's intended stack service is CPU-only. It should join `skynet-internal`, call `http://skynet-hermes:9119`, mount the Hermes dashboard password read-only, and keep its own state at `/srv/skynet-ai/state/roost`. It needs an HTTPS front door on the private tailnet; the browser must never call Hermes directly. The public stack's installer requires a digest-pinned image or a hash-locked artifact, a rendered Quadlet, a generated Roost password secret, an authenticated remote probe, documentation, and host commissioning before deployment. Those installer changes are **not yet implemented**. This repository has no image release or artifact digest to pin yet.
+Roost's intended stack service is CPU-only. It should join `skynet-internal`, call `http://skynet-hermes:9119`, mount the Hermes dashboard password read-only, and keep its own state at `/srv/skynet-ai/state/roost`. It needs an HTTPS front door on the private tailnet; the browser must never call Hermes directly. The public stack's installer requires a digest-pinned image or a hash-locked artifact, a rendered Quadlet, a generated Roost password secret, an authenticated remote probe, documentation, and host commissioning before deployment. Each Roost release attaches a source tarball (`roost-<version>.tar.gz`) with its SHA-256 in the release notes, for the stack to lock as an artifact. The stack's installer changes are separate work in `local-ai-stack`.
 
 ## Preview boundaries
 
