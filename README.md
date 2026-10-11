@@ -50,7 +50,7 @@ Open `http://127.0.0.1:8787`. Set the Roost password using `set-password`; it is
 | `ROOST_HERMES_PASSWORD_FILE` | Readable file containing its password; required. |
 | `ROOST_STATE_DIR` | Password hash and revocable session database; defaults to `.roost-state`. |
 
-The browser session lasts up to 30 days, uses a server-side revocation table, and is carried by a SameSite Strict, HttpOnly cookie. The cookie is Secure when the public origin uses HTTPS. Changing the Roost password does not automatically revoke existing sessions; sign out on each device or remove the session database while Roost is stopped if you need to revoke all sessions.
+The browser session lasts up to 30 days, uses a server-side revocation table, and is carried by a SameSite Strict, HttpOnly cookie. The cookie is Secure when the public origin uses HTTPS. A new password from `set-password` applies at the next sign-in, with no restart. Sign-in locks a device for five minutes after five wrong passwords (devices behind Tailscale Serve are told apart by the address Serve forwards), with an overall limit of twenty. Changing the Roost password does not automatically revoke existing sessions; sign out on each device or remove the session database while Roost is stopped if you need to revoke all sessions.
 
 ## Hermes contract
 

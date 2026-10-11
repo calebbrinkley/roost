@@ -32,6 +32,7 @@ button:disabled { cursor: default; }
 .secondary { color: var(--ink); background: var(--chip); }
 .icon-button { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--accent-text); background: transparent; font-size: 27px; line-height: 1; }
 .icon-button:hover, .back-button:hover { background: var(--chip); }
+.icon-button svg { width: 22px; height: 22px; }
 
 .login { min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
 .login-card { position: relative; width: min(100%, 380px); padding: 32px; border: 1px solid var(--line); border-radius: 18px; background: var(--frame); box-shadow: 0 18px 50px #14192616; }

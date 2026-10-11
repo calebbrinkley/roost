@@ -76,22 +76,44 @@ async def guard(request: web.Request, handler):
     return response
 
 
+LOOPBACK = {"127.0.0.1", "::1"}
+DEVICE_FAILURES, ALL_FAILURES, FAILURE_WINDOW = 5, 20, 300
+
+
+def client_address(request: web.Request) -> str:
+    """The signing-in device. Behind Tailscale Serve every request comes from loopback, and Serve sets
+    (not appends) X-Forwarded-For to the device's tailnet address, so that header names the device."""
+    remote = request.remote or "unknown"
+    forwarded = request.headers.get("X-Forwarded-For", "").strip()
+    if remote in LOOPBACK and forwarded and "," not in forwarded and len(forwarded) <= 64:
+        return forwarded
+    return remote
+
+
 async def login(request: web.Request):
-    address = request.remote or "unknown"
+    address = client_address(request)
     now = time.monotonic()
-    attempts = [t for t in request.app["login_attempts"].get(address, []) if now - t < 300]
-    if len(attempts) >= 5:
-        raise web.HTTPTooManyRequests(text="Try again in a few minutes.")
+    failures = request.app["login_attempts"]
+    for key in list(failures):
+        failures[key] = [t for t in failures[key] if now - t < FAILURE_WINDOW]
+        if not failures[key]:
+            del failures[key]
+    # One device's typos lock only that device; the overall ceiling still bounds guessing from anywhere.
+    if len(failures.get(address, [])) >= DEVICE_FAILURES or sum(map(len, failures.values())) >= ALL_FAILURES:
+        raise web.HTTPTooManyRequests(text="Too many attempts. Try again in a few minutes.")
     data = await json_body(request)
     password = data.get("password")
     if not isinstance(password, str) or len(password) > 1024:
         raise bad("Password is required.")
-    encoded = request.app["password_hash"]
+    # Read on every attempt so `roost set-password` takes effect without a restart.
+    try:
+        encoded = await asyncio.to_thread(request.app["password_file"].read_text, encoding="utf-8")
+    except OSError:
+        raise web.HTTPServiceUnavailable(text="Roost has no password yet. Run `python -m roost set-password`.") from None
     if not await asyncio.to_thread(verify_password, password, encoded):
-        attempts.append(now)
-        request.app["login_attempts"][address] = attempts
+        failures.setdefault(address, []).append(now)
         raise web.HTTPUnauthorized(text="Incorrect password.")
-    request.app["login_attempts"].pop(address, None)
+    failures.pop(address, None)
     response = web.json_response({"signed_in": True, "demo": request.app["demo"]})
     secured_cookie(response, request, request.app["sessions"].issue())
     return response
@@ -252,12 +274,13 @@ def create_app() -> web.Application:
     if (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"})) or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or not parsed.netloc:
         raise ValueError("ROOST_PUBLIC_ORIGIN must be HTTPS or a local HTTP origin.")
     state = Path(os.environ.get("ROOST_STATE_DIR", "./.roost-state"))
-    password_hash = (state / "password.hash").read_text(encoding="utf-8").strip()
+    password_file = state / "password.hash"
+    password_file.read_text(encoding="utf-8")  # fail at startup, not at first sign-in, if it is missing
     app = web.Application(middlewares=[guard], client_max_size=64 * 1024)
     app["origin"] = origin
     app["demo"] = os.environ.get("ROOST_DEMO") == "1"
     app["secure_cookie"] = origin.startswith("https://")
-    app["password_hash"] = password_hash
+    app["password_file"] = password_file
     app["login_attempts"] = {}
     app["sessions"] = Sessions(state / "sessions.sqlite3")
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],

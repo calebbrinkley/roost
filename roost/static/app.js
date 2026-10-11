@@ -33,16 +33,20 @@ function refreshWorkingLabels() {
     label.textContent = `Wren is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
   }
 }
-// The toggle shows where a click takes you: a sun in dark mode, a moon in light mode.
-function themeIcon(name) {
+// Line icons in one style (24 px grid, 2 px round strokes, current text colour).
+const ICONS = {
+  sun: [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }]],
+  moon: [["path", { d: "M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" }]],
+  compose: [["path", { d: "M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" }], ["path", { d: "M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 8.5-8.5z" }]],
+  plus: [["path", { d: "M12 5v14M5 12h14" }]],
+};
+
+function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor");
   svg.setAttribute("stroke-width", "2"); svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
-  const shapes = name === "sun"
-    ? [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }]]
-    : [["path", { d: "M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" }]];
-  for (const [tag, attributes] of shapes) {
+  for (const [tag, attributes] of ICONS[name]) {
     const shape = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [key, value] of Object.entries(attributes)) shape.setAttribute(key, String(value));
     svg.append(shape);
@@ -56,7 +60,8 @@ function refreshThemeControls() {
   for (const button of document.querySelectorAll("[data-theme-toggle]")) {
     button.setAttribute("aria-label", label);
     button.title = label;
-    button.replaceChildren(themeIcon(switchToLight ? "sun" : "moon"));
+    // The toggle shows where a click takes you: a sun in dark mode, a moon in light mode.
+    button.replaceChildren(icon(switchToLight ? "sun" : "moon"));
   }
 }
 for (const button of document.querySelectorAll("[data-theme-toggle]")) {
@@ -111,7 +116,7 @@ function setSection(section) {
   show("conversation-list", section === "messages");
   show("sidebar-jobs-list", section === "jobs");
   $("mobile-list-title").textContent = section === "jobs" ? "Jobs" : "Messages";
-  $("top-action").textContent = section === "jobs" ? "+" : "✎";
+  $("top-action").replaceChildren(icon(section === "jobs" ? "plus" : "compose"));
   $("top-action").setAttribute("aria-label", section === "jobs" ? "New job" : "New conversation");
   $("top-action").title = section === "jobs" ? "New job" : "New conversation";
   if (section === "jobs") show("more-conversations", false);

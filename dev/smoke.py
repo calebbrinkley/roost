@@ -1,10 +1,15 @@
 """Exercise the loopback demo's owner and Hermes integration flows."""
 
 import asyncio
+import secrets
+from pathlib import Path
 
 from aiohttp import ClientSession, CookieJar
 
+from roost.auth import make_password_hash
+
 BASE = "http://127.0.0.1:8787"
+PASSWORD_FILE = Path(__file__).resolve().parents[1] / ".roost-demo-state" / "password.hash"
 HEADERS = {"Origin": BASE, "X-Roost-Request": "1"}
 
 
@@ -13,6 +18,33 @@ async def request(client, method, path, status=200, body=None):
         data = await response.json()
         assert response.status == status, (path, response.status, data)
         return data
+
+
+async def sign_in(device, password):
+    """Sign in as a device behind Tailscale Serve, which forwards the device's address."""
+    async with ClientSession() as client:
+        async with client.post(BASE + "/api/login", headers={**HEADERS, "X-Forwarded-For": device},
+                               json={"password": password}) as response:
+            return response.status
+
+
+async def sign_in_checks():
+    # Fresh device addresses each run, so the smoke check can be repeated against one demo.
+    # Each run still adds six failures toward the overall limit of twenty per five minutes.
+    net = f"100.64.{secrets.randbelow(250)}."
+    # Five wrong passwords lock that device only; another device still signs in.
+    for _ in range(5):
+        assert await sign_in(net + "1", "wrong password") == 401
+    assert await sign_in(net + "1", "roost-demo-only") == 429
+    assert await sign_in(net + "2", "roost-demo-only") == 200
+    # A new password applies at the next sign-in, without restarting Roost.
+    original = PASSWORD_FILE.read_text(encoding="utf-8")
+    try:
+        PASSWORD_FILE.write_text(make_password_hash("a brand new password") + "\n", encoding="utf-8")
+        assert await sign_in(net + "3", "a brand new password") == 200
+        assert await sign_in(net + "4", "roost-demo-only") == 401
+    finally:
+        PASSWORD_FILE.write_text(original, encoding="utf-8")
 
 
 async def main():
@@ -61,7 +93,8 @@ async def main():
         await request(client, "DELETE", f"/api/jobs/{jid}", body={"confirm": True})
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
-    print("PASS: static assets, origin guard, sign-in, seeded conversations, chat turns, Jobs CRUD/actions, confirmed deletion, sign-out")
+    await sign_in_checks()
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, Jobs CRUD/actions, confirmed deletion, sign-out")
 
 
 if __name__ == "__main__":
