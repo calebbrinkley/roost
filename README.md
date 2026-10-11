@@ -4,7 +4,7 @@
 
 A simple, lightweight Progressive Web App (PWA) for chatting with your Hermes agent and managing its scheduled work.
 
-Roost puts conversations and Jobs in one interface. It is an **early preview**: text chat and Jobs are implemented; voice and push notifications are planned.
+Roost puts conversations and jobs in one simple interface. It is an **early preview**: text chat and Jobs are implemented; voice and push notifications are planned.
 
 ## What you can do
 
