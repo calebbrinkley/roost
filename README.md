@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/roost-logo-lowercase.png" alt="roost" width="240">
+  <img src="assets/roost-logo.png" alt="roost" width="240">
 </p>
 
 A private web app for chatting with your Hermes agent and managing its scheduled work.
