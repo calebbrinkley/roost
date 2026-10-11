@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { section: "messages", current: null, selectedJob: null, jobRuns: {}, conversations: [], jobs: [], offset: 0,
+const state = { section: "messages", current: null, selectedJob: null, jobRuns: {}, conversations: [], jobs: [],
                 busy: false, job: null, draft: false, pending: null, search: "" };
 
 function el(tag, className, text) {
@@ -12,15 +12,51 @@ function el(tag, className, text) {
 }
 
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
+
+// While a reply is on its way, the label rotates through these instead of always saying "typing".
+const WORKING_VERBS = ["thinking", "pondering", "mulling it over", "digging in", "connecting the dots",
+                       "drafting", "weighing options", "putting it together", "double-checking", "typing"];
+
+function nextWorkingVerb() {
+  const choices = WORKING_VERBS.filter((verb) => verb !== state.workingVerb);
+  state.workingVerb = choices[Math.floor(Math.random() * choices.length)];
+}
+
+function workingLabel(ellipsis = false) {
+  const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
+  label.textContent = `Wren is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
+  return label;
+}
+
+function refreshWorkingLabels() {
+  for (const label of document.querySelectorAll(".working-label")) {
+    label.textContent = `Wren is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
+  }
+}
+// The toggle shows where a click takes you: a sun in dark mode, a moon in light mode.
+function themeIcon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2"); svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
+  const shapes = name === "sun"
+    ? [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }]]
+    : [["path", { d: "M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" }]];
+  for (const [tag, attributes] of shapes) {
+    const shape = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attributes)) shape.setAttribute(key, String(value));
+    svg.append(shape);
+  }
+  return svg;
+}
+
 function refreshThemeControls() {
   const switchToLight = window.roostTheme.current() === "dark";
   const label = switchToLight ? "Switch to light mode" : "Switch to dark mode";
   for (const button of document.querySelectorAll("[data-theme-toggle]")) {
     button.setAttribute("aria-label", label);
     button.title = label;
-    button.textContent = button.classList.contains("theme-icon-only")
-      ? (switchToLight ? "☀" : "☾")
-      : (switchToLight ? "☀ Light mode" : "☾ Dark mode");
+    button.replaceChildren(themeIcon(switchToLight ? "sun" : "moon"));
   }
 }
 for (const button of document.querySelectorAll("[data-theme-toggle]")) {
@@ -112,8 +148,9 @@ function renderConversations() {
     const heading = el("span", "conversation-heading");
     heading.append(el("span", "conversation-name", sessionName(item)));
     if (item.source && item.source !== "roost") heading.append(el("span", "source-tag", item.source));
-    copy.append(heading, el("span", "row-preview" + (state.pending?.id === id ? " live" : ""),
-                         state.pending?.id === id ? "Wren is typing…" : (item.preview || "Conversation with Wren")));
+    const preview = el("span", "row-preview" + (state.pending?.id === id ? " live" : ""));
+    preview.append(state.pending?.id === id ? workingLabel(true) : (item.preview || "Conversation with Wren"));
+    copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
     meta.append(el("span", "", timeLabel(item.last_active_at || item.last_active || item.updated_at || item.created_at)));
@@ -125,12 +162,33 @@ function renderConversations() {
 }
 
 async function loadConversations(more = false) {
-  const offset = more ? state.offset + 100 : 0;
-  const data = await api(`/conversations?offset=${offset}`);
-  $("presence").textContent = "Online";
-  const rows = Array.isArray(data.sessions) ? data.sessions : [];
-  state.offset = offset;
-  state.conversations = more ? [...state.conversations, ...rows] : rows;
+  const button = $("more-conversations");
+  if (more) {
+    if (button.disabled) return;
+    button.disabled = true; button.textContent = "Loading…";
+  }
+  try {
+    // Page from what is already loaded: Hermes may return fewer rows than Roost asks for.
+    const data = await api(`/conversations?offset=${more ? state.conversations.length : 0}`);
+    $("presence").textContent = "Online";
+    const rows = Array.isArray(data.sessions) ? data.sessions : [];
+    if (more) {
+      const known = new Set(state.conversations.map(conversationId));
+      state.conversations.push(...rows.filter((item) => !known.has(conversationId(item))));
+    } else {
+      // A refresh replaces the first page but keeps older pages already loaded with Load more.
+      const fresh = new Set(rows.map(conversationId));
+      state.conversations = [...rows, ...state.conversations.slice(rows.length).filter((item) => !fresh.has(conversationId(item)))];
+    }
+    finishLoadingConversations(data, rows, more);
+  } finally {
+    if (more) { button.disabled = false; button.textContent = "Load more"; }
+  }
+}
+
+function conversationId(item) { return item.session_id || item.id; }
+
+function finishLoadingConversations(data, rows, more) {
   if (!state.current && !state.draft && !more && rows.length) {
     state.current = rows[0].session_id || rows[0].id;
     $("chat-title").textContent = sessionName(rows[0]);
@@ -138,7 +196,7 @@ async function loadConversations(more = false) {
   }
   renderConversations();
   if (!state.current && !more) renderWelcome();
-  if (data.total !== undefined) show("more-conversations", state.conversations.length < data.total);
+  if (data.total !== undefined) show("more-conversations", state.conversations.length < data.total && (!more || rows.length > 0));
 }
 
 function renderWelcome() {
@@ -159,13 +217,19 @@ function messageText(message) {
   return "";
 }
 
+// Bold, code, then italics. An italic marker must hug its text (`2 * 3 * 4` stays as typed), and
+// underscores count only at word edges, so snake_case and paths are left alone.
+const INLINE = /(\*\*[^*]+\*\*|`[^`]+`|\*(?![\s*])[^*\n]*?[^\s*]\*|\*[^\s*]\*|(?<!\w)_(?![\s_])[^_\n]*?[^\s_]_(?!\w)|(?<!\w)_[^\s_]_(?!\w))/g;
+
 function addInline(parent, value) {
-  for (const piece of value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)) {
-    if (!piece) continue;
-    if (piece.startsWith("**") && piece.endsWith("**")) parent.append(el("strong", "", piece.slice(2, -2)));
-    else if (piece.startsWith("`") && piece.endsWith("`")) parent.append(el("code", "", piece.slice(1, -1)));
-    else parent.append(document.createTextNode(piece));
-  }
+  // split() with one capture group puts the matched markup at odd indexes and plain text at even ones.
+  value.split(INLINE).forEach((piece, index) => {
+    if (!piece) return;
+    if (index % 2 === 0) parent.append(document.createTextNode(piece));
+    else if (piece.startsWith("**")) parent.append(el("strong", "", piece.slice(2, -2)));
+    else if (piece.startsWith("`")) parent.append(el("code", "", piece.slice(1, -1)));
+    else parent.append(el("em", "", piece.slice(1, -1)));
+  });
 }
 
 function addPlainMarkdown(parent, value) {
@@ -228,7 +292,7 @@ function renderMessages(rows) {
     else {
       const typing = el("div", "typing-row");
       const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
-      typing.append(dots, el("span", "", "Wren is typing")); transcript.append(typing);
+      typing.append(dots, workingLabel()); transcript.append(typing);
     }
   }
   renderConversations();
@@ -279,6 +343,7 @@ async function submitMessage(event) {
     state.current = result.session_id;
     state.draft = false;
     state.pending = { id: result.session_id, text, since: Date.now() };
+    nextWorkingVerb();
     await loadConversations();
     await loadMessages();
   } catch (error) {
@@ -512,7 +577,7 @@ $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
-$("new-from-chat").addEventListener("click", newConversation);
+$("new-conversation").addEventListener("click", newConversation);
 $("new-job").addEventListener("click", () => openJob());
 $("back-to-list").addEventListener("click", () => $("app").classList.remove("chat-open"));
 $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
@@ -529,6 +594,7 @@ $("close-dialog").addEventListener("click", () => $("job-dialog").close());
 $("cancel-job").addEventListener("click", () => $("job-dialog").close());
 $("delete-job").addEventListener("click", () => state.job && deleteJob(state.job));
 
+setInterval(() => { if (state.pending) { nextWorkingVerb(); refreshWorkingLabels(); } }, 2600);
 setInterval(() => {
   if ($("app").classList.contains("hidden") || state.section !== "messages" || state.busy) return;
   if (state.current) loadMessages().catch(() => {});

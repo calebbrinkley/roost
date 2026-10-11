@@ -8,6 +8,7 @@
   <link rel="icon" href="/icon.svg?v=forest-green" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
   <script src="/theme.js"></script>
+  <link rel="preload" href="/SpaceGrotesk-Regular.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="stylesheet" href="/style.css">
   <title>Roost</title>
 </head>
@@ -15,7 +16,6 @@
   <div id="login" class="login hidden">
     <form id="login-form" class="login-card">
       <div class="login-icon">R</div>
-      <button class="theme-toggle login-theme" type="button" data-theme-toggle></button>
       <h1>Roost</h1>
       <p>Messages with Wren, all in one place.</p>
       <label for="password">Password</label>
@@ -40,6 +40,7 @@
       <div id="sidebar-search" class="search-wrap">
         <label class="sr-only" for="search">Search conversations</label>
         <input id="search" type="search" placeholder="Search conversations" autocomplete="off">
+        <button id="new-conversation" class="icon-button desktop-only" type="button" aria-label="New conversation" title="New conversation">+</button>
       </div>
       <div id="conversation-list" class="conversation-list" aria-label="Conversations"></div>
       <button id="more-conversations" class="more-button hidden" type="button">Load more</button>
@@ -63,7 +64,6 @@
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <form id="composer" class="composer">
-          <button id="new-from-chat" class="plus-button" type="button" aria-label="New conversation" title="New conversation">+</button>
           <label class="sr-only" for="message">Message Wren</label>
           <textarea id="message" rows="1" placeholder="Message Wren" maxlength="16000" required></textarea>
           <button id="voice-button" class="mic-button" type="button" disabled aria-label="Voice messages are coming later" title="Voice messages are coming later">🎤</button>
