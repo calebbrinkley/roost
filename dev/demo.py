@@ -16,7 +16,7 @@ STATE = ROOT / ".roost-demo-state"
 ROOST_PORT = 8787
 HERMES_PORT = 18719
 DEMO_PASSWORD = "roost-demo-only"
-HERMES_PASSWORD = "demo-hermes-password"
+HERMES_PASSWORD = "example-demo-hermes-password"
 
 
 def schedule(expr):

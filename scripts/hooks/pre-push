@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed by `make hooks`. Blocks a push whose new commits fail the public-content guard:
+# credentials, personal identifiers, private artifacts, and non-no-reply commit identities.
+root=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$root/scripts/check_public_content.py" --pre-push "$@"

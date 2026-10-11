@@ -35,9 +35,9 @@ class Hermes:
             if self.authenticated and not force:
                 return
             try:
-                password = self.password_file.read_text(encoding="utf-8").rstrip("\r\n")
+                stored = self.password_file.read_text(encoding="utf-8").rstrip("\r\n")
                 async with self.http.post(self.base_url + "/auth/password-login", json={
-                    "provider": "basic", "username": self.username, "password": password,
+                    "provider": "basic", "username": self.username, "password": stored,
                 }, allow_redirects=False) as response:
                     if response.status != 200:
                         raise HermesError(502, "Hermes dashboard sign-in failed.")

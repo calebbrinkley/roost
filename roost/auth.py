@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import os
 import secrets
+from secrets import token_urlsafe
 import sqlite3
 import time
 from pathlib import Path
@@ -64,7 +65,7 @@ class Sessions:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def issue(self) -> str:
-        token = secrets.token_urlsafe(32)
+        token = token_urlsafe(32)
         now = int(time.time())
         self.db.execute("DELETE FROM sessions WHERE expires <= ?", (now,))
         self.db.execute("INSERT INTO sessions VALUES (?, ?)", (self._hash(token), now + SESSION_SECONDS))

@@ -1,0 +1,28 @@
+name: Repository checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the public repository revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          # Full history, so the content guard also scans earlier commits and their identities.
+          fetch-depth: 0
+      - name: Check public content, links and tests
+        run: make check
+      - name: Install Roost in an isolated environment
+        run: |
+          python3 -m venv /tmp/roost
+          /tmp/roost/bin/python -m pip install -e .
+      - name: Run the demo smoke check
+        run: make PYTHON=/tmp/roost/bin/python smoke
