@@ -56,7 +56,7 @@ The browser session lasts up to 30 days, uses a server-side revocation table, an
 
 Roost signs into the Hermes dashboard through `/auth/password-login`. It uses session list and transcript REST routes, the cron Jobs REST routes, and a single-use ticket for the dashboard gateway WebSocket. Its server chooses only `session.create`, `session.resume`, and `prompt.submit` RPC calls. A submitted turn continues on Hermes after Roost disconnects; the app polls for the resulting transcript. A long answer can therefore take time to appear.
 
-The integration was drafted against the pinned Hermes version in `local-ai-stack` (`v2026.9.24`). A live dashboard, actual agent turn, and phone browser have **not** been verified yet.
+The integration targets the pinned Hermes version in `local-ai-stack` (`v2026.9.24`). On 2026-10-11 a loopback preview passed against a live dashboard: sign-in, the session list and a transcript, a real two-turn chat (the conversation is listed with source `roost`), and Job create, pause, edit, resume and delete. Live Jobs store `schedule` as an object (`expr` or `run_at`, plus `display`), use `enabled` rather than `paused`, report `last_status` as `ok`, `delivery_failed`, `blocked_config` or `error`, and keep no report on the job; the demo's mock follows those shapes. A phone browser has **not** been verified yet.
 
 ## Integration with local-ai-stack
 

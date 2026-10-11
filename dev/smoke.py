@@ -54,7 +54,7 @@ async def main():
         await request(client, "PUT", f"/api/jobs/{jid}", body={"name": "Demo check updated"})
         await request(client, "POST", f"/api/jobs/{jid}/pause")
         paused = await request(client, "GET", f"/api/jobs/{jid}")
-        assert paused["paused"] is True
+        assert paused["enabled"] is False and paused["schedule"]["expr"] == "0 9 * * *"
         await request(client, "POST", f"/api/jobs/{jid}/resume")
         await request(client, "POST", f"/api/jobs/{jid}/trigger")
         await request(client, "DELETE", f"/api/jobs/{jid}", 400, {"confirm": False})

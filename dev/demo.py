@@ -19,6 +19,16 @@ DEMO_PASSWORD = "roost-demo-only"
 HERMES_PASSWORD = "demo-hermes-password"
 
 
+def schedule(expr):
+    """Hermes stores a parsed schedule; the editable form is `expr`."""
+    return {"kind": "cron", "expr": expr, "display": expr}
+
+
+def job_state(job, enabled):
+    job.update(enabled=enabled, state="scheduled" if enabled else "paused")
+    return job
+
+
 def sample_data():
     now = time.time()
     sessions = [
@@ -57,16 +67,13 @@ def sample_data():
     }
     jobs = [
         {"id": "job_morning", "name": "Morning brief", "prompt": "Give me a clear, friendly overview of today's priorities and calendar.",
-         "schedule": "0 7 * * 1-5", "deliver": "local", "paused": False, "last_status": "completed",
-         "last_run_preview": "Two sample jobs done overnight; disk at 41%; no failed services."},
+         "schedule": schedule("0 7 * * 1-5"), "deliver": "local", "enabled": True, "state": "scheduled", "last_status": "ok"},
         {"id": "job_benchmark", "name": "Full benchmark", "prompt": "Run the full 96K benchmark and report the result.",
-         "schedule": "0 23 * * *", "deliver": "local", "paused": False,
-         "last_run_preview": "Created from your message. The next run is tonight."},
+         "schedule": schedule("0 23 * * *"), "deliver": "local", "enabled": True, "state": "scheduled"},
         {"id": "job_vault", "name": "Vault tidy", "prompt": "Check notes for broken links and report what needs attention.",
-         "schedule": "0 20 * * 0", "deliver": "local", "paused": False, "last_status": "needs_attention",
-         "last_run_preview": "Two sample notes link to pages that no longer exist."},
+         "schedule": schedule("0 20 * * 0"), "deliver": "local", "enabled": True, "state": "scheduled", "last_status": "blocked_config"},
         {"id": "job_backup", "name": "Backup reminder", "prompt": "Remind me to check the latest backup.",
-         "schedule": "0 9 1 * *", "deliver": "local", "paused": True},
+         "schedule": schedule("0 9 1 * *"), "deliver": "local", "enabled": False, "state": "paused"},
     ]
     return sessions, messages, jobs
 
@@ -128,19 +135,25 @@ def mock_hermes():
         if job["id"] == "job_morning":
             return web.json_response({"runs": [{"id": "cron_job_morning_sample", "source": "cron", "title": "Completed · Morning briefing", "started_at": time.time() - 7200,
                                                 "preview": "Your project outline is the main focus today."}]})
+        if job["id"] == "job_vault":
+            return web.json_response({"runs": [{"id": "cron_job_vault_sample", "source": "cron", "title": "Vault tidy", "started_at": time.time() - 3 * 86400,
+                                                "preview": "Two sample notes link to pages that no longer exist."}]})
         return web.json_response({"runs": []})
 
     async def create_job(request):
         require(request)
         data = await request.json()
-        job = {"id": "job_" + secrets.token_hex(4), **data, "paused": False}
+        job = job_state({"id": "job_" + secrets.token_hex(4), **data, "schedule": schedule(data["schedule"])}, True)
         jobs.insert(0, job)
         return web.json_response(job)
 
     async def update_job(request):
         require(request)
         job = find_job(request)
-        job.update((await request.json()).get("updates", {}))
+        updates = (await request.json()).get("updates", {})
+        if "schedule" in updates:
+            updates["schedule"] = schedule(updates["schedule"])
+        job.update(updates)
         return web.json_response(job)
 
     async def job_action(request):
@@ -148,9 +161,9 @@ def mock_hermes():
         job = find_job(request)
         action = request.match_info["action"]
         if action == "pause":
-            job["paused"] = True
+            job_state(job, False)
         elif action == "resume":
-            job["paused"] = False
+            job_state(job, True)
         elif action != "trigger":
             raise web.HTTPNotFound()
         return web.json_response(job)

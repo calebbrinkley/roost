@@ -291,6 +291,22 @@ async function submitMessage(event) {
 
 function jobValue(job, key) { return job[key] == null ? "" : String(job[key]); }
 
+// Hermes stores the schedule as {kind, expr | run_at, display}; the editable form is expr or run_at.
+function jobSchedule(job) {
+  const schedule = job.schedule;
+  if (schedule && typeof schedule === "object") return String(schedule.expr || schedule.run_at || job.schedule_display || schedule.display || "");
+  return jobValue(job, "schedule") || jobValue(job, "schedule_display");
+}
+
+function jobScheduleLabel(job) {
+  const schedule = jobSchedule(job);
+  const label = scheduleLabel(schedule);
+  return label !== schedule ? label : (jobValue(job, "schedule_display") || schedule);
+}
+
+// Hermes treats `enabled` as authoritative; a disabled job is paused.
+function jobPaused(job) { return job.paused === true || job.enabled === false; }
+
 function scheduleLabel(schedule) {
   const match = /^(\d{1,2}) (\d{1,2}) (\*|\d{1,2}) \* (\*|0|1-5)$/.exec(schedule);
   if (!match) return schedule;
@@ -322,7 +338,7 @@ function renderJobs() {
     row.type = "button";
     if (state.selectedJob === id) row.setAttribute("aria-current", "true");
     row.append(el("span", "job-list-name", jobValue(job, "name") || "Untitled job"),
-               el("span", "job-list-schedule", scheduleLabel(jobValue(job, "schedule"))));
+               el("span", "job-list-schedule", jobScheduleLabel(job)));
     const meta = el("span", "job-list-meta");
     const status = jobStatus(job);
     meta.append(el("span", "job-status-dot " + status.kind), el("span", "", status.label));
@@ -334,9 +350,12 @@ function renderJobs() {
 }
 
 function jobStatus(job) {
-  if (job.paused) return { label: "Paused", kind: "paused" };
-  if (job.last_status === "completed") return { label: "Ran recently", kind: "ok" };
-  if (job.last_status === "needs_attention") return { label: "Needs a look", kind: "warn" };
+  if (jobPaused(job)) return { label: "Paused", kind: "paused" };
+  if (["claimed", "running"].includes(job.latest_execution?.status)) return { label: "Running now", kind: "ok" };
+  if (["ok", "completed"].includes(job.last_status)) return { label: "Ran recently", kind: "ok" };
+  if (job.last_status === "delivery_failed") return { label: "Couldn’t deliver", kind: "warn" };
+  if (["blocked_config", "needs_attention"].includes(job.last_status)) return { label: "Needs a look", kind: "warn" };
+  if (job.last_status === "error") return { label: "Failed", kind: "warn" };
   if (job.last_status) return { label: String(job.last_status).replaceAll("_", " "), kind: "warn" };
   return { label: "Not run yet", kind: "paused" };
 }
@@ -359,7 +378,7 @@ function renderJobDetail() {
   const scrollTop = detail.scrollTop;
   detail.replaceChildren();
   $("job-detail-title").textContent = job ? jobValue(job, "name") || "Untitled job" : "Jobs";
-  $("job-detail-subtitle").textContent = job ? scheduleLabel(jobValue(job, "schedule")) : "Scheduled work with Wren";
+  $("job-detail-subtitle").textContent = job ? jobScheduleLabel(job) : "Scheduled work with Wren";
   show("job-detail-actions", Boolean(job));
   if (!job) {
     const welcome = el("div", "job-welcome welcome-card");
@@ -372,14 +391,18 @@ function renderJobDetail() {
   const summary = el("section", "job-detail-section job-summary");
   const top = el("div", "job-detail-top");
   top.append(el("span", "pill " + status.kind, status.label));
-  const toggle = el("button", "job-toggle" + (job.paused ? " off" : ""));
+  const paused = jobPaused(job);
+  const toggle = el("button", "job-toggle" + (paused ? " off" : ""));
   toggle.type = "button"; toggle.setAttribute("role", "switch");
-  toggle.setAttribute("aria-checked", String(!job.paused));
-  toggle.setAttribute("aria-label", (job.paused ? "Resume " : "Pause ") + (jobValue(job, "name") || "job"));
-  toggle.addEventListener("click", () => jobAction(job.id || job.job_id, job.paused ? "resume" : "pause"));
+  toggle.setAttribute("aria-checked", String(!paused));
+  toggle.setAttribute("aria-label", (paused ? "Resume " : "Pause ") + (jobValue(job, "name") || "job"));
+  toggle.addEventListener("click", () => jobAction(job.id || job.job_id, paused ? "resume" : "pause"));
   top.append(toggle);
   summary.append(top, el("h2", "", "Last report"));
-  summary.append(el("div", "job-report", job.last_run_preview || job.last_output || job.last_report || "No report yet. Wren’s next run will appear here."));
+  // Hermes keeps no report on the job itself; its newest run's preview is the last report.
+  const latestRun = state.jobRuns[job.id || job.job_id]?.[0];
+  summary.append(el("div", "job-report", job.last_run_preview || job.last_output || job.last_report || latestRun?.preview ||
+                    "No report yet. Wren’s next run will appear here."));
   detail.append(summary);
   const instructions = el("section", "job-detail-section");
   instructions.append(el("h2", "", "What Wren will do"), el("p", "job-prompt", jobValue(job, "prompt") || "No instructions provided."));
@@ -453,7 +476,7 @@ function openJob(job = null) {
   $("job-dialog-title").textContent = job ? "Edit job" : "New job";
   $("job-name").value = job ? jobValue(job, "name") : "";
   $("job-prompt").value = job ? jobValue(job, "prompt") : "";
-  $("job-schedule").value = job ? jobValue(job, "schedule") : "";
+  $("job-schedule").value = job ? jobSchedule(job) : "";
   updateSchedulePreview();
   $("job-deliver").value = job ? (jobValue(job, "deliver") || "local") : "local";
   show("job-management", Boolean(job));
