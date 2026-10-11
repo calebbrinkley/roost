@@ -62,6 +62,8 @@ REVIEWED_ASSETS = {
     "roost/static/SpaceGrotesk-Regular.ttf": "54f91de389ffe508d384a0a0f7e0ca489f170acf40ceebc458086903cf483bc7",
     "roost/static/SpaceGrotesk-Bold.ttf": "54c4dc92c236f5eca503670045125c77d61ef3a22601c76f2f252cf3cad4a088",
     "assets/roost-logo.png": "d4739d7b3dec098486d6e6e5adb71651e56d7ab457bbf535e5f2f5284020d377",
+    "assets/roost-macbook-light.png": "5b443696cf1fca80141d52287d3ca92e6207c86853c06c133ceac4b8670b9279",
+    "assets/roost-iphone-dark.png": "47bd3737d5d61418207dee8328342223cff6c063ca9ebcc5420ad0b9340f4db0",
 }
 
 
