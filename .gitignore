@@ -1,0 +1,6 @@
+.roost-state/
+.roost-demo-state/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/

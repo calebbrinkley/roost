@@ -1,0 +1,271 @@
+"""Loopback-only Roost preview with a small, disposable Hermes stand-in."""
+
+import asyncio
+import os
+import secrets
+import time
+from pathlib import Path
+
+from aiohttp import WSMsgType, web
+
+from roost.auth import make_password_hash
+from roost.server import create_app
+
+ROOT = Path(__file__).resolve().parents[1]
+STATE = ROOT / ".roost-demo-state"
+ROOST_PORT = 8787
+HERMES_PORT = 18719
+DEMO_PASSWORD = "roost-demo-only"
+HERMES_PASSWORD = "demo-hermes-password"
+
+
+def sample_data():
+    now = time.time()
+    sessions = [
+        {"id": "roost_benchmark", "title": "Benchmark at 96K", "preview": "I made a one-time job for tonight.",
+         "source": "roost", "last_active_at": now - 60},
+        {"id": "desktop_stems", "title": "Stem split: Clair de Lune", "preview": "Both stems are ready. Want the instrumental in your vault?",
+         "source": "desktop", "last_active_at": now - 86400},
+        {"id": "terminal_ntfy", "title": "Fix the ntfy port", "preview": "Moved the listener to 2586.",
+         "source": "terminal", "last_active_at": now - 2 * 86400},
+        {"id": "roost_packing", "title": "Trip packing list", "preview": "Added rain shell and the travel adapter.",
+         "source": "roost", "last_active_at": now - 4 * 86400},
+        {"id": "cron_job_morning_sample", "title": "Morning briefing run", "source": "cron", "last_active_at": now - 7200},
+    ]
+    messages = {
+        "roost_benchmark": [
+            {"role": "user", "content": "Did the 96K benchmark finish? Does it still fit?"},
+            {"role": "assistant", "content": "Sample report: it finished, and the model fits in this fictional demo.\n\n- Generation: 37 tok/s\n- Long-prompt check: passed\n\n```text\nprefill 93,551 tok   164.0 s\ngen     128 tok      29.5 tok/s\n```"},
+            {"role": "user", "content": "Nice. Run the full one tonight after 11?"},
+            {"role": "assistant", "content": "Done. I made a one-time job for 23:00, and I will message you when it finishes."},
+        ],
+        "desktop_stems": [
+            {"role": "user", "content": "How did the stem split turn out?"},
+            {"role": "assistant", "content": "Both stems are ready. Want the instrumental in your vault?"},
+        ],
+        "terminal_ntfy": [
+            {"role": "user", "content": "Can you fix the ntfy port?"},
+            {"role": "assistant", "content": "Moved the listener to 2586; containers drop the capability for low ports."},
+        ],
+        "roost_packing": [
+            {"role": "user", "content": "Add a rain shell to the packing list."},
+            {"role": "assistant", "content": "Added rain shell and the travel adapter."},
+        ],
+        "cron_job_morning_sample": [
+            {"role": "assistant", "content": "Morning briefing\n\n• Your project outline is the main focus today.\n• A short reading break fits after lunch.\n• The evening walk is still on the calendar."},
+        ],
+    }
+    jobs = [
+        {"id": "job_morning", "name": "Morning brief", "prompt": "Give me a clear, friendly overview of today's priorities and calendar.",
+         "schedule": "0 7 * * 1-5", "deliver": "local", "paused": False, "last_status": "completed",
+         "last_run_preview": "Two sample jobs done overnight; disk at 41%; no failed services."},
+        {"id": "job_benchmark", "name": "Full benchmark", "prompt": "Run the full 96K benchmark and report the result.",
+         "schedule": "0 23 * * *", "deliver": "local", "paused": False,
+         "last_run_preview": "Created from your message. The next run is tonight."},
+        {"id": "job_vault", "name": "Vault tidy", "prompt": "Check notes for broken links and report what needs attention.",
+         "schedule": "0 20 * * 0", "deliver": "local", "paused": False, "last_status": "needs_attention",
+         "last_run_preview": "Two sample notes link to pages that no longer exist."},
+        {"id": "job_backup", "name": "Backup reminder", "prompt": "Remind me to check the latest backup.",
+         "schedule": "0 9 1 * *", "deliver": "local", "paused": True},
+    ]
+    return sessions, messages, jobs
+
+
+def mock_hermes():
+    app = web.Application()
+    sessions, messages, jobs = sample_data()
+    tickets = set()
+
+    def require(request):
+        if request.cookies.get("demo_hermes") != "signed-in":
+            raise web.HTTPUnauthorized()
+
+    async def login(request):
+        data = await request.json()
+        if data.get("provider") != "basic" or data.get("username") != "demo" or data.get("password") != HERMES_PASSWORD:
+            raise web.HTTPUnauthorized()
+        response = web.json_response({"ok": True})
+        response.set_cookie("demo_hermes", "signed-in", httponly=True)
+        return response
+
+    async def ticket(request):
+        require(request)
+        value = secrets.token_urlsafe(24)
+        tickets.add(value)
+        return web.json_response({"ticket": value, "ttl_seconds": 30})
+
+    async def session_list(request):
+        require(request)
+        selected = [s for s in sessions if s["source"] != "cron"] if request.query.get("exclude_sources") == "cron" else sessions
+        offset = int(request.query.get("offset", "0"))
+        limit = int(request.query.get("limit", "100"))
+        return web.json_response({"sessions": selected[offset:offset + limit], "total": len(selected), "limit": limit, "offset": offset})
+
+    async def transcript(request):
+        require(request)
+        sid = request.match_info["sid"]
+        if sid not in messages:
+            raise web.HTTPNotFound()
+        return web.json_response({"session_id": sid, "messages": messages[sid], "pagination": {"returned": len(messages[sid])}})
+
+    async def list_jobs(request):
+        require(request)
+        return web.json_response(jobs)
+
+    def find_job(request):
+        for job in jobs:
+            if job["id"] == request.match_info["jid"]:
+                return job
+        raise web.HTTPNotFound()
+
+    async def get_job(request):
+        require(request)
+        return web.json_response(find_job(request))
+
+    async def runs(request):
+        require(request)
+        job = find_job(request)
+        if job["id"] == "job_morning":
+            return web.json_response({"runs": [{"id": "cron_job_morning_sample", "source": "cron", "title": "Completed · Morning briefing", "started_at": time.time() - 7200,
+                                                "preview": "Your project outline is the main focus today."}]})
+        return web.json_response({"runs": []})
+
+    async def create_job(request):
+        require(request)
+        data = await request.json()
+        job = {"id": "job_" + secrets.token_hex(4), **data, "paused": False}
+        jobs.insert(0, job)
+        return web.json_response(job)
+
+    async def update_job(request):
+        require(request)
+        job = find_job(request)
+        job.update((await request.json()).get("updates", {}))
+        return web.json_response(job)
+
+    async def job_action(request):
+        require(request)
+        job = find_job(request)
+        action = request.match_info["action"]
+        if action == "pause":
+            job["paused"] = True
+        elif action == "resume":
+            job["paused"] = False
+        elif action != "trigger":
+            raise web.HTTPNotFound()
+        return web.json_response(job)
+
+    async def delete_job(request):
+        require(request)
+        job = find_job(request)
+        jobs.remove(job)
+        return web.json_response({"deleted": True})
+
+    async def ws(request):
+        ticket_value = request.query.get("ticket")
+        if ticket_value not in tickets:
+            raise web.HTTPUnauthorized()
+        tickets.remove(ticket_value)
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        await socket.send_json({"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready", "payload": {}}})
+        async for message in socket:
+            if message.type != WSMsgType.TEXT:
+                continue
+            frame = message.json()
+            method, params = frame.get("method"), frame.get("params") or {}
+            if method == "session.create":
+                stored_id = "roost_" + secrets.token_hex(5)
+                runtime_id = "runtime_" + secrets.token_hex(5)
+                sessions.insert(0, {"id": stored_id, "title": "New conversation", "preview": "", "source": "roost", "last_active_at": time.time()})
+                messages[stored_id] = []
+                result = {"session_id": runtime_id, "stored_session_id": stored_id}
+                app["runtime_map"][runtime_id] = stored_id
+            elif method == "session.resume":
+                stored_id = params.get("session_id")
+                if stored_id not in messages:
+                    await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
+                    continue
+                runtime_id = "runtime_" + secrets.token_hex(5)
+                app["runtime_map"][runtime_id] = stored_id
+                result = {"session_id": runtime_id, "stored_session_id": stored_id}
+            elif method == "prompt.submit":
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                if not stored_id:
+                    await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
+                    continue
+                text = params.get("text", "")
+                messages[stored_id].append({"role": "user", "content": text})
+                session = next(s for s in sessions if s["id"] == stored_id)
+                session["title"] = text[:42]
+                session["preview"] = text[:80]
+                session["last_active_at"] = time.time()
+
+                async def reply(sid, prompt):
+                    await asyncio.sleep(1)
+                    messages[sid].append({"role": "assistant", "content": f"This is the local demo reply to: “{prompt}”\n\nWren's real answer will appear here when Roost is connected to Hermes."})
+                    next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
+
+                asyncio.create_task(reply(stored_id, text))
+                result = {"status": "accepted"}
+            else:
+                await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
+                continue
+            await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "result": result})
+        return socket
+
+    app["runtime_map"] = {}
+    app.router.add_post("/auth/password-login", login)
+    app.router.add_post("/api/auth/ws-ticket", ticket)
+    app.router.add_get("/api/sessions", session_list)
+    app.router.add_get("/api/sessions/{sid}/messages", transcript)
+    app.router.add_get("/api/cron/jobs", list_jobs)
+    app.router.add_post("/api/cron/jobs", create_job)
+    app.router.add_get("/api/cron/jobs/{jid}", get_job)
+    app.router.add_get("/api/cron/jobs/{jid}/runs", runs)
+    app.router.add_put("/api/cron/jobs/{jid}", update_job)
+    app.router.add_post("/api/cron/jobs/{jid}/{action}", job_action)
+    app.router.add_delete("/api/cron/jobs/{jid}", delete_job)
+    app.router.add_get("/api/ws", ws)
+    return app
+
+
+async def main():
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    password_hash = STATE / "password.hash"
+    if not password_hash.exists():
+        password_hash.write_text(make_password_hash(DEMO_PASSWORD) + "\n", encoding="utf-8")
+        os.chmod(password_hash, 0o600)
+    hermes_password = STATE / "hermes-password.txt"
+    hermes_password.write_text(HERMES_PASSWORD + "\n", encoding="utf-8")
+    os.chmod(hermes_password, 0o600)
+
+    os.environ.update({
+        "ROOST_STATE_DIR": str(STATE),
+        "ROOST_PUBLIC_ORIGIN": f"http://127.0.0.1:{ROOST_PORT}",
+        "ROOST_HERMES_URL": f"http://127.0.0.1:{HERMES_PORT}",
+        "ROOST_HERMES_USERNAME": "demo",
+        "ROOST_HERMES_PASSWORD_FILE": str(hermes_password),
+        "ROOST_DEMO": "1",
+    })
+    mock = web.AppRunner(mock_hermes(), access_log=None)
+    roost = web.AppRunner(create_app(), access_log=None)
+    await mock.setup()
+    try:
+        await web.TCPSite(mock, "127.0.0.1", HERMES_PORT).start()
+        await roost.setup()
+        await web.TCPSite(roost, "127.0.0.1", ROOST_PORT).start()
+        print(f"Roost demo: http://127.0.0.1:{ROOST_PORT}", flush=True)
+        print(f"Demo password: {DEMO_PASSWORD}", flush=True)
+        await asyncio.Event().wait()
+    finally:
+        await roost.cleanup()
+        await mock.cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
