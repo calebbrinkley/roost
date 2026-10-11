@@ -1,73 +1,118 @@
 # Roost
 
-Roost is an owner-only web app for chatting with a Hermes agent. This repository contains the first **internal preview**: password sign-in, a single Messages list for Hermes conversations, and a Jobs interface for scheduled work. Conversations from outside Roost carry a source badge. Jobs can be created, edited, paused, resumed, run immediately, and deleted after confirmation. Conversations can be renamed or deleted: hold one in the list (or right-click it on desktop, or swipe it left on a phone); deleting asks first, because Hermes removes it for good.
+A private web app for chatting with your Hermes agent and managing its scheduled work.
 
-The Python server holds the Hermes dashboard credential. Browser code can call only Roost's narrow conversation and Job routes; it never receives the dashboard credential, inference key, or a raw Hermes gateway socket. Conversation text and Job prompts are rendered through safe DOM nodes, never injected as raw HTML.
+Roost puts conversations and Jobs in one interface, with light and dark themes and layouts for desktop and phone. It is an **early preview**: text chat and Jobs are implemented; voice and push notifications are planned.
 
-The interface follows the approved Roost UI samples: a Messages list and Jobs switch, forest-green owner bubbles, and neutral agent bubbles. Jobs now use the same list-and-detail layout as Messages: select a job in the sidebar to see its schedule, instructions, last report, and run history, with run and edit actions below. On a phone, the Jobs list opens a full job detail with a back button. All text uses Space Grotesk by Florian Karsten, bundled under the SIL Open Font License (`LICENSES/SpaceGrotesk-OFL.txt`). The sun/moon button switches between light and dark; Roost follows the system theme until you choose one, then remembers your choice in this browser. The preview's mic is visibly disabled until voice is implemented; push notification screens remain design references.
+## What you can do
 
-## Try it with sample data
+- Start and continue conversations, including conversations from other Hermes channels.
+- Rename conversations or delete them after confirmation.
+- Create, edit, pause, resume, run and delete scheduled Jobs.
+- View Job status and the run history Hermes provides.
+- Choose an agent display name and switch between light and dark themes.
 
-The local demo runs Roost beside a disposable Hermes stand-in. It binds both services to loopback, seeds conversations from Roost and Telegram plus two Jobs, and generates sample replies. It does not contact a live Hermes agent.
+## Quick start: try the demo
 
-```bash
-.venv/bin/python dev/demo.py
-```
-
-Open `http://127.0.0.1:8787` and sign in with `roost-demo-only`. This is sample data served by a mock Hermes endpoint, not a live agent. The demo uses `.roost-demo-state/`, which is ignored by Git. Stop it with Ctrl+C. With the demo running, `.venv/bin/python dev/smoke.py` exercises sign-in, chat, Jobs, deletion confirmation, and sign-out.
-
-## Run the internal preview
-
-Requirements: Python 3.11 or newer and a reachable Hermes dashboard with its password provider enabled. Installing Roost installs its pinned `aiohttp` dependency. Hermes must be configured to use the desired agent and model. Roost does not start Hermes or a model.
+Requires **Python 3.11+**. The demo uses sample conversations and Jobs with a local Hermes stand-in; it does not contact a live agent.
 
 ```bash
+git clone https://github.com/calebbrinkley/roost.git
 cd roost
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
+.venv/bin/python dev/demo.py
+```
+
+Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**.
+
+Stop the demo with Ctrl+C. Its disposable state lives in `.roost-demo-state/`, which Git ignores.
+
+## Connect your Hermes agent
+
+Install Roost using the first four commands above. You also need a reachable Hermes dashboard with its password provider enabled and the desired agent and model already configured. Roost does not start Hermes or load a model.
+
+### 1. Set your Roost password
+
+```bash
 export ROOST_STATE_DIR="$PWD/.roost-state"
 .venv/bin/python -m roost set-password
 ```
 
-Set these values in the service environment, using your own paths and endpoint. Keep the Hermes password in a readable file that is **outside version control**. The public origin must match the browser's address exactly, with no trailing slash or path.
+This is your Roost sign-in password, separate from the Hermes dashboard password.
+
+### 2. Configure the connection
+
+Store your Hermes dashboard password in a file **outside the checkout**, readable only by the service account. Replace the placeholders below with your dashboard endpoint, username and password-file path.
 
 ```bash
 export ROOST_PUBLIC_ORIGIN="http://127.0.0.1:8787"
 export ROOST_HERMES_URL="https://REPLACE_HERMES_DASHBOARD_HOST:8445"
 export ROOST_HERMES_USERNAME="REPLACE_OPERATOR_USERNAME"
-export ROOST_HERMES_PASSWORD_FILE="REPLACE_PATH_TO_HERMES_PASSWORD_FILE"
+export ROOST_HERMES_PASSWORD_FILE="/REPLACE_PRIVATE_DIRECTORY/hermes-password"
+export ROOST_AGENT_NAME="Agent"
 .venv/bin/python -m roost serve
 ```
 
-Open `http://127.0.0.1:8787`. Set the Roost password using `set-password`; it is separate from the Hermes dashboard password. Roost binds to loopback by default. For access from another device, put the service behind a private HTTPS front door and set `ROOST_PUBLIC_ORIGIN` to its HTTPS origin. Keep the service private; its authenticated routes can submit work to the agent.
+Open **http://127.0.0.1:8787** and sign in with the password you set in step 1.
 
-### Configuration
+### 3. Access it from another device
 
-| Variable | Purpose |
-|---|---|
-| `ROOST_PUBLIC_ORIGIN` | Exact browser origin; required. HTTPS except local HTTP preview. |
-| `ROOST_HERMES_URL` | Hermes dashboard base URL; required. |
-| `ROOST_HERMES_USERNAME` | Hermes dashboard basic-auth user; required. |
-| `ROOST_HERMES_PASSWORD_FILE` | Readable file containing its password; required. |
-| `ROOST_TRUST_FORWARDED` | `1` to key sign-in lockouts on `X-Forwarded-For` from any peer, for a container whose only way in is a proxy that sets it (such as Tailscale Serve). Off by default: only loopback peers are trusted. |
-| `ROOST_AGENT_NAME` | The agent's display name in the interface; defaults to `Agent`. |
-| `ROOST_STATE_DIR` | Password hash and revocable session database; defaults to `.roost-state`. |
+Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and set `ROOST_PUBLIC_ORIGIN` to the exact browser origin, with no path or trailing slash. Keep access restricted to your private network: authenticated users can submit work to the agent.
 
-The browser session lasts up to 30 days, uses a server-side revocation table, and is carried by a SameSite Strict, HttpOnly cookie. The cookie is Secure when the public origin uses HTTPS. A new password from `set-password` applies at the next sign-in, with no restart. Sign-in locks a device for five minutes after five wrong passwords (devices behind Tailscale Serve are told apart by the address Serve forwards), with an overall limit of twenty. Changing the Roost password does not automatically revoke existing sessions; sign out on each device or remove the session database while Roost is stopped if you need to revoke all sessions.
+## Configuration
 
-## Hermes contract
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `ROOST_PUBLIC_ORIGIN` | Exact browser origin; HTTPS required except for local HTTP previews. | Required |
+| `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
+| `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
+| `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
+| `ROOST_AGENT_NAME` | Agent name shown in the interface. | `Agent` |
+| `ROOST_STATE_DIR` | Directory for the password hash and session database. | `.roost-state` |
+| `ROOST_TRUST_FORWARDED` | Set to `1` only when a trusted proxy is the service's sole entry point and controls `X-Forwarded-For`. | Off |
 
-Roost signs into the Hermes dashboard through `/auth/password-login`. It uses session list and transcript REST routes, the cron Jobs REST routes, and a single-use ticket for the dashboard gateway WebSocket. Its server chooses only `session.create`, `session.resume`, and `prompt.submit` RPC calls. A submitted turn continues on Hermes after Roost disconnects; the app polls for the resulting transcript. A long answer can therefore take time to appear.
+The server command also accepts `--host` and `--port`; defaults are `127.0.0.1` and `8787`. With forwarded-header trust off, only loopback peers' forwarded addresses are trusted. Turning it on trusts that header from every peer, so direct access must be blocked.
 
-The integration targets the pinned Hermes version in `local-ai-stack` (`v2026.9.24`). On 2026-10-11 a loopback preview passed against a live dashboard: sign-in, the session list and a transcript, a real two-turn chat (the conversation is listed with source `roost`), and Job create, pause, edit, resume and delete. Live Jobs store `schedule` as an object (`expr` or `run_at`, plus `display`), use `enabled` rather than `paused`, report `last_status` as `ok`, `delivery_failed`, `blocked_config` or `error`, and keep no report on the job; the demo's mock follows those shapes. A phone browser has **not** been verified yet.
+## Security
 
-## Integration with local-ai-stack
+The Python server holds the Hermes dashboard credential. The browser receives only Roost's conversation and Job routes; it does not receive dashboard credentials, inference keys or direct gateway access. Conversation text and Job prompts are rendered without raw HTML injection.
 
-Roost's intended stack service is CPU-only. It should join `skynet-internal`, call `http://skynet-hermes:9119`, mount the Hermes dashboard password read-only, and keep its own state at `/srv/skynet-ai/state/roost`. It needs an HTTPS front door on the private tailnet; the browser must never call Hermes directly. The public stack's installer requires a digest-pinned image or a hash-locked artifact, a rendered Quadlet, a generated Roost password secret, an authenticated remote probe, documentation, and host commissioning before deployment. Each Roost release attaches a source tarball (`roost-<version>.tar.gz`) with its SHA-256 in the release notes, for the stack to lock as an artifact. The stack's installer changes are separate work in `local-ai-stack`.
+Sessions last up to 30 days and use revocable, server-side records with HttpOnly, SameSite Strict cookies. HTTPS enables Secure cookies. Sign-in is rate limited.
 
-## Preview boundaries
+Run `set-password` again to change your Roost password; no restart is needed. **Existing sessions remain valid.** To revoke them, sign out on each device, or stop Roost and remove its session database before restarting.
 
-- Text chat and Jobs are implemented in source. Voice, push notifications, and the direct Hermes plugin are later release work.
-- Job run history displays the data Hermes returns; full report delivery in push belongs to the later notification release.
-- A Jobs schedule is sent to Hermes as entered. Roost does not offer a schedule builder yet.
-- Roost does not call the inference gate directly. Hermes retains model and gaming-gate behavior.
-- No host service, remote front door, or iPhone installation has been changed by this source work.
+Keep credentials, state and conversation data out of version control. For suspected exposure or vulnerabilities, follow [SECURITY.md](SECURITY.md).
+
+## Preview status
+
+The integration targets Hermes **`v2026.9.24`**. The previous README records a successful live loopback check on 2026-10-11 covering sign-in, conversation listing and transcripts, two-turn chat, and Job creation, pause, edit, resume and deletion. Those live checks have not been repeated for this documentation update.
+
+- Phone layouts are implemented; a phone browser has not been verified.
+- Voice, push notifications and a direct Hermes plugin are not implemented.
+- Schedules are sent to Hermes as entered; there is no schedule builder yet.
+- Job history shows what Hermes returns; push delivery of full reports is future work.
+- Replies may take time to appear. Hermes continues submitted turns after Roost disconnects, and Roost polls for the transcript.
+
+Integration with **local-ai-stack** is planned as a CPU-only service. Packaging, installer changes, a private HTTPS front door and host commissioning are separate deployment work. Hermes retains responsibility for model access and the gaming gate.
+
+## Development
+
+Install the pre-push guard once per clone, then run the repository checks:
+
+```bash
+make hooks
+make PYTHON=.venv/bin/python check
+```
+
+For server or interface changes, also run the demo smoke check:
+
+```bash
+make PYTHON=.venv/bin/python smoke
+```
+
+Checks scan the working tree and reachable Git history for public-content issues. The smoke check uses the local stand-in; it does not validate a live Hermes deployment. See [AGENTS.md](AGENTS.md) for contribution rules.
+
+## License
+
+Roost uses the [MIT License](LICENSE). Bundled Space Grotesk fonts by Florian Karsten use the [SIL Open Font License](LICENSES/SpaceGrotesk-OFL.txt).
