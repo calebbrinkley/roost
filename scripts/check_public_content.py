@@ -57,10 +57,11 @@ ASSIGNMENT_PATTERN = re.compile(
 URL_CREDENTIAL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:([^\s/@]{6,})@[^\s/]+")
 ZERO_SHA = re.compile(r"^0+$")
 # Binary files that were reviewed and may be published, pinned by SHA-256 of their content so a
-# replaced or modified file fails again. The fonts are under the SIL Open Font License (LICENSES/).
+# replaced or modified file fails again. Asset licenses are recorded in LICENSES/.
 REVIEWED_ASSETS = {
     "roost/static/SpaceGrotesk-Regular.ttf": "54f91de389ffe508d384a0a0f7e0ca489f170acf40ceebc458086903cf483bc7",
     "roost/static/SpaceGrotesk-Bold.ttf": "54c4dc92c236f5eca503670045125c77d61ef3a22601c76f2f252cf3cad4a088",
+    "assets/roost-logo.png": "d4739d7b3dec098486d6e6e5adb71651e56d7ab457bbf535e5f2f5284020d377",
 }
 
 
