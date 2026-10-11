@@ -6,6 +6,7 @@
   --font: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --desktop-header-height: 62px;
+  --under-line: 15px;
   color-scheme: light;
 }
 :root[data-theme="dark"] {
@@ -57,7 +58,9 @@ button:disabled { cursor: default; }
 .conversation-list { overflow-y: auto; flex: 1; min-height: 0; }
 .conversation-list .empty-list { padding: 28px 22px; text-align: center; }
 .conversation-row { width: calc(100% - 16px); margin: 0 8px; padding: 12px 14px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: center; border: 0; border-radius: 10px; color: var(--ink); background: transparent; text-align: left; }
-.conversation-row + .conversation-row { margin-top: 2px; }
+.swipe-row { position: relative; }
+.swipe-row + .swipe-row { margin-top: 2px; }
+.swipe-delete { display: none; }
 .conversation-row:hover { background: var(--chip); }
 .conversation-row.selected { background: color-mix(in srgb, var(--accent) 17%, transparent); }
 .chat-avatar { display: grid; place-items: center; border-radius: 50%; background: linear-gradient(140deg, #5b7ff2, #3355c9); color: white; font-size: 16px; font-weight: 700; }
@@ -117,7 +120,11 @@ button:disabled { cursor: default; }
 .message-body pre { margin: 7px 0; max-width: 100%; overflow-x: auto; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--frame); color: var(--ink); font: 12px/1.45 var(--mono); white-space: pre; }
 .message-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 13px; }
 .message-body th, .message-body td { padding: 5px 8px; border: 1px solid var(--line); white-space: nowrap; }
-.under { margin: -2px 6px 5px; color: var(--muted); font-size: 11.5px; }
+.under { margin: -2px 6px 5px; color: var(--muted); font-size: 11.5px; line-height: var(--under-line); }
+/* Space above the owner's bubble matches the space below it, which holds the Read/Delivered line:
+   6 px gap - 2 px + the line + 5 px + 6 px gap, minus the 6 px gap already above. */
+.transcript > .message.from-you:not(:first-child) { margin-top: calc(9px + var(--under-line)); }
+.transcript > .day + .message.from-you { margin-top: 0; }
 .under.right { align-self: flex-end; }
 .typing-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; }
 .typing-dots { display: flex; gap: 4px; padding: 10px 13px; border-radius: 18px; background: var(--agent); }
@@ -132,10 +139,13 @@ button:disabled { cursor: default; }
 .composer { display: flex; align-items: end; gap: 8px; min-height: 64px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
 .mic-button, .send-button { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border: 0; border-radius: 50%; font-size: 21px; }
 .mic-button, .send-button { color: var(--accent-ink); background: var(--accent); }
-.mic-button { font-size: 16px; opacity: .62; }
+.mic-button { opacity: .62; }
+.mic-button svg { width: 18px; height: 18px; }
 .send-button { display: none; font-size: 23px; }
+/* A one-line message box is 38 px (20 px line + 16 px padding + 2 px border); 2 px lifts the 34 px buttons to its center. */
+.composer .mic-button, .composer .send-button { margin-bottom: 2px; }
 .composer.has-text .mic-button { display: none; }.composer.has-text .send-button { display: grid; }
-.composer textarea { flex: 1; min-width: 0; min-height: 36px; max-height: 145px; resize: none; padding: 8px 12px; border: 1px solid var(--line); border-radius: 18px; outline: none; background: var(--frame); color: var(--ink); font-size: 15px; line-height: 1.3; }
+.composer textarea { flex: 1; min-width: 0; min-height: 36px; max-height: 145px; resize: none; padding: 8px 12px; border: 1px solid var(--line); border-radius: 18px; outline: none; background: var(--frame); color: var(--ink); font-size: 15px; line-height: 20px; }
 .composer textarea::placeholder { color: var(--muted); }
 
 .jobs-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--frame); }
@@ -154,7 +164,7 @@ button:disabled { cursor: default; }
 .job-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .job-report { padding: 13px 15px; border-radius: 15px; background: var(--agent); font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .job-prompt { margin: 0; font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.job-detail-actions { min-height: 64px; flex: 0 0 64px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
+.job-detail-actions { min-height: 64px; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
 .job-detail-actions .secondary, .job-detail-actions .primary { padding: 9px 15px; }
 .job-history-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .job-toggle { width: 44px; height: 26px; position: relative; flex: 0 0 44px; border: 0; border-radius: 13px; background: var(--good); }
@@ -178,6 +188,24 @@ button:disabled { cursor: default; }
 .job-management { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .job-management button { padding: 7px 10px; border: 0; border-radius: 7px; background: var(--chip); color: var(--accent-text); font-size: 12px; }
 .job-management .danger { color: #c05242; }
+/* Hold-to-act sheet for a conversation: centred on desktop, a bottom sheet on phones. */
+.conversation-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.sheet { width: min(360px, calc(100vw - 24px)); padding: 18px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); background: var(--frame); box-shadow: 0 20px 60px #0005; }
+.sheet::backdrop { background: #1119; }
+.sheet-view { display: grid; gap: 8px; }
+.sheet-title { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.sheet-note { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.4; }
+.sheet-action { width: 100%; padding: 12px; border: 0; border-radius: 10px; background: var(--chip); color: var(--ink); font-size: 15px; font-weight: 500; }
+.sheet-action:hover { background: color-mix(in srgb, var(--chip) 80%, var(--ink)); }
+.sheet-cancel { margin-top: 4px; background: transparent; color: var(--muted); }
+.danger-text { color: #c05242; }
+.danger-button { border: 0; border-radius: 10px; padding: 11px 18px; font-size: 14px; font-weight: 600; color: #fff; background: #c05242; }
+.sheet input { width: 100%; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; outline: none; }
+.sheet input:focus { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.sheet .dialog-actions { margin-top: 6px; }
+.sheet .error:empty { display: none; }
+.sheet-title:focus { outline: none; }
+.sheet button:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .run-row { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .run-row:last-child { border-bottom: 0; }
 .run-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
@@ -188,23 +216,32 @@ button:disabled { cursor: default; }
 @media (max-width: 700px) {
   .desktop-only { display: none !important; }.mobile-only { display: flex; }
   .theme-icon-only.mobile-only { display: grid; }
-  .shell { height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; }
+  .shell { height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: relative;
+           padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  /* iOS zooms into any field under 16 px and stays zoomed, pushing the page past the right edge. */
+  .search-wrap input, .composer textarea, .login-card input, .job-dialog input, .job-dialog textarea { font-size: 16px; }
   .sidebar { width: 100%; min-height: 0; overflow: hidden; flex: 1; border-right: 0; background: var(--frame); }
   .sidebar-top { height: auto; flex: 0 0 auto; display: block; border-bottom: 0; }
   .mobile-list-heading { align-items: center; justify-content: space-between; padding: 18px 16px 7px; }
   .mobile-list-heading h1 { margin: 0; font-size: 30px; letter-spacing: -.03em; }
   .search-wrap { margin: 4px 16px 6px; }
   .conversation-row { width: 100%; margin: 0; padding: 11px 16px; border-radius: 0; gap: 12px; }
-  .conversation-row + .conversation-row { margin-top: 0; border-top: 1px solid var(--line); }
-  .conversation-row.selected { background: transparent; }
+  .swipe-row { overflow: hidden; }
+  .swipe-row + .swipe-row { margin-top: 0; border-top: 1px solid var(--line); }
+  /* The row is opaque so it hides the Delete action until it slides left. */
+  .conversation-row, .conversation-row.selected { position: relative; background: var(--frame); transition: transform .2s ease-out; }
+  .conversation-row.dragging { transition: none; }
+  .swipe-row.revealed .conversation-row { transform: translateX(-88px); }
+  .swipe-delete { position: absolute; inset: 0 0 0 auto; width: 88px; display: grid; place-items: center; border: 0; color: #fff; background: #c05242; font-size: 15px; font-weight: 600; }
   .job-sidebar-list { padding: 0; }
   .job-list-row { width: 100%; margin: 0; padding: 12px 16px; border-radius: 0; }
   .job-list-row + .job-list-row { border-top: 1px solid var(--line); }
   .job-list-row.selected { background: transparent; }
-  .job-list-name { font-size: 15px; }
-  .job-list-schedule { font-size: 14px; }
-  .conversation-name { font-size: 15px; }
-  .row-preview { font-size: 14px; }
+  .job-list-name { font-size: 16px; }
+  .job-list-schedule { font-size: 15px; }
+  .conversation-name { font-size: 16px; }
+  .row-preview { font-size: 15px; }
+  .row-meta { font-size: 12px; }
   .sidebar-footer { border-top: 1px solid var(--line); }
   .main { display: none; min-height: 0; flex: 1; }
   .mobile-tabbar { flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; padding: 7px 0 calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--frame); }
@@ -218,19 +255,32 @@ button:disabled { cursor: default; }
   .back-button { align-items: center; justify-content: center; width: 30px; height: 36px; padding: 0; border: 0; background: transparent; color: var(--accent-text); font-size: 38px; }
   .chat-avatar { display: grid; }
   .chat-heading { display: grid; gap: 0; }
-  .chat-heading strong { font-size: 14px; }
-  .chat-heading small { font-size: 11px; }
+  .chat-heading strong { font-size: 16px; }
+  .chat-heading small { font-size: 13px; }
   .chat-heading small::before { content: ""; }
   .chat-header .source-tag { margin-left: 0; }
   .transcript { padding: 12px 12px 14px; }
   .message { max-width: 88%; }
-  .message-body { font-size: 15px; }
+  .message-body { font-size: 17px; }
+  .message-body code, .message-body pre, .message-body table { font-size: 14px; }
+  .day, .under, .typing-row { font-size: 13px; }
+  .shell { --under-line: 17px; }
   .composer { padding: 8px 12px calc(14px + env(safe-area-inset-bottom)); }
   .jobs-header { height: 66px; flex-basis: 66px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 8px; padding: 3px 12px; }
   .jobs-heading { display: grid; gap: 0; }
-  .jobs-heading strong { font-size: 14px; }
-  .jobs-heading small { font-size: 11px; }
+  .jobs-heading strong { font-size: 16px; }
+  .jobs-heading small { font-size: 13px; }
+  .job-report, .job-prompt { font-size: 17px; }
+  .run-row { font-size: 15px; }
   .jobs-heading small::before { content: ""; }
   .job-detail { padding: 12px 16px 14px; }
   .job-detail-actions { padding: 8px 12px calc(14px + env(safe-area-inset-bottom)); }
+  .sheet { width: 100%; max-width: none; margin: auto 0 0; padding: 18px 16px calc(16px + env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; border-bottom: 0; }
+  .sheet input, .sheet-action { font-size: 16px; }
+  /* Swipe back: the open conversation or job slides right over the list it came from. */
+  .shell.chat-open .main, .shell.section-jobs.job-open .main { position: relative; z-index: 1; }
+  .shell.peek .sidebar { display: flex; position: absolute; inset: 0; z-index: 0; }
+  .main.swiping { box-shadow: -10px 0 30px #0003; }
+  .main.settling { transition: transform .22s ease-out; }
 }
+@media (prefers-reduced-motion: reduce) { .main.settling, .conversation-row { transition: none; } }

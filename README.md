@@ -1,6 +1,6 @@
 # Roost
 
-Roost is an owner-only web app for chatting with a Hermes agent. This repository contains the first **internal preview**: password sign-in, a single Messages list for Hermes conversations, and a Jobs interface for scheduled work. Conversations from outside Roost carry a source badge. Jobs can be created, edited, paused, resumed, run immediately, and deleted after confirmation.
+Roost is an owner-only web app for chatting with a Hermes agent. This repository contains the first **internal preview**: password sign-in, a single Messages list for Hermes conversations, and a Jobs interface for scheduled work. Conversations from outside Roost carry a source badge. Jobs can be created, edited, paused, resumed, run immediately, and deleted after confirmation. Conversations can be renamed or deleted: hold one in the list (or right-click it on desktop, or swipe it left on a phone); deleting asks first, because Hermes removes it for good.
 
 The Python server holds the Hermes dashboard credential. Browser code can call only Roost's narrow conversation and Job routes; it never receives the dashboard credential, inference key, or a raw Hermes gateway socket. Conversation text and Job prompts are rendered through safe DOM nodes, never injected as raw HTML.
 

@@ -55,7 +55,8 @@ class Hermes:
                         await self._login(force=True)
                         continue
                     if response.status >= 300:
-                        raise HermesError(404 if response.status == 404 else 502,
+                        # 400 is Hermes rejecting the request itself (such as a duplicate title), not a fault.
+                        raise HermesError(response.status if response.status in {400, 404} else 502,
                                           "Hermes could not complete that request.")
                     if response.content_length and response.content_length > 8 * 1024 * 1024:
                         raise HermesError(502, "Hermes returned too much data.")

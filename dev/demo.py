@@ -65,6 +65,11 @@ def sample_data():
             {"role": "assistant", "content": "Morning briefing\n\n• Your project outline is the main focus today.\n• A short reading break fits after lunch.\n• The evening walk is still on the calendar."},
         ],
     }
+    # Hermes stamps every message (epoch seconds); space each conversation's messages a few minutes apart.
+    for session in sessions:
+        thread = messages.get(session["id"], [])
+        for back, message in enumerate(reversed(thread)):
+            message["timestamp"] = session["last_active_at"] - back * 240
     jobs = [
         {"id": "job_morning", "name": "Morning brief", "prompt": "Give me a clear, friendly overview of today's priorities and calendar.",
          "schedule": schedule("0 7 * * 1-5"), "deliver": "local", "enabled": True, "state": "scheduled", "last_status": "ok"},
@@ -114,6 +119,25 @@ def mock_hermes():
         if sid not in messages:
             raise web.HTTPNotFound()
         return web.json_response({"session_id": sid, "messages": messages[sid], "pagination": {"returned": len(messages[sid])}})
+
+    async def rename_session(request):
+        require(request)
+        sid, title = request.match_info["sid"], (await request.json()).get("title", "")
+        session = next((s for s in sessions if s["id"] == sid), None)
+        if session is None:
+            raise web.HTTPNotFound()
+        # Hermes refuses a title another conversation already uses.
+        if title and any(s["title"] == title and s["id"] != sid for s in sessions):
+            raise web.HTTPBadRequest(text="Title already in use")
+        session["title"] = title
+        return web.json_response({"ok": True, "title": title})
+
+    async def delete_session(request):
+        require(request)
+        sid = request.match_info["sid"]
+        sessions[:] = [s for s in sessions if s["id"] != sid]
+        messages.pop(sid, None)
+        return web.json_response({"ok": True})
 
     async def list_jobs(request):
         require(request)
@@ -208,7 +232,7 @@ def mock_hermes():
                     await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                     continue
                 text = params.get("text", "")
-                messages[stored_id].append({"role": "user", "content": text})
+                messages[stored_id].append({"role": "user", "content": text, "timestamp": time.time()})
                 session = next(s for s in sessions if s["id"] == stored_id)
                 session["title"] = text[:42]
                 session["preview"] = text[:80]
@@ -216,7 +240,7 @@ def mock_hermes():
 
                 async def reply(sid, prompt):
                     await asyncio.sleep(1)
-                    messages[sid].append({"role": "assistant", "content": f"This is the local demo reply to: “{prompt}”\n\nWren's real answer will appear here when Roost is connected to Hermes."})
+                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nWren's real answer will appear here when Roost is connected to Hermes."})
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
 
                 asyncio.create_task(reply(stored_id, text))
@@ -232,6 +256,8 @@ def mock_hermes():
     app.router.add_post("/api/auth/ws-ticket", ticket)
     app.router.add_get("/api/sessions", session_list)
     app.router.add_get("/api/sessions/{sid}/messages", transcript)
+    app.router.add_patch("/api/sessions/{sid}", rename_session)
+    app.router.add_delete("/api/sessions/{sid}", delete_session)
     app.router.add_get("/api/cron/jobs", list_jobs)
     app.router.add_post("/api/cron/jobs", create_job)
     app.router.add_get("/api/cron/jobs/{jid}", get_job)

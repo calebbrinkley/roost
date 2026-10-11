@@ -142,6 +142,30 @@ async def send_message(request: web.Request):
     return web.json_response({"session_id": stored})
 
 
+async def rename_conversation(request: web.Request):
+    sid = item_id(request, "sid")
+    data = await json_body(request)
+    if set(data) != {"title"}:
+        raise bad("Send only a title.")
+    title = body_text(data.get("title"), "Title", 200, required=False)
+    try:
+        result = await request.app["hermes"].request("PATCH", f"/api/sessions/{sid}", {"title": title})
+    except HermesError as exc:
+        if exc.status == 400:
+            raise HermesError(400, "Hermes didn't accept that name. It may be too long or already used by another conversation.") from None
+        raise
+    return web.json_response(result)
+
+
+async def delete_conversation(request: web.Request):
+    sid = item_id(request, "sid")
+    data = await json_body(request)
+    if data != {"confirm": True}:
+        raise bad("Confirm conversation deletion.")
+    result = await request.app["hermes"].request("DELETE", f"/api/sessions/{sid}")
+    return web.json_response(result)
+
+
 def job_fields(data: dict, *, create: bool) -> dict:
     if set(data) - JOB_FIELDS:
         raise bad("Unsupported job field.")
@@ -248,6 +272,8 @@ def create_app() -> web.Application:
     app.router.add_post("/api/conversations", create_conversation)
     app.router.add_get("/api/conversations/{sid}", conversation)
     app.router.add_post("/api/conversations/{sid}/messages", send_message)
+    app.router.add_patch("/api/conversations/{sid}", rename_conversation)
+    app.router.add_delete("/api/conversations/{sid}", delete_conversation)
     app.router.add_get("/api/jobs", jobs)
     app.router.add_post("/api/jobs", create_job)
     app.router.add_get("/api/jobs/{jid}", get_job)

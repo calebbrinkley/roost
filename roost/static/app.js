@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { section: "messages", current: null, selectedJob: null, jobRuns: {}, conversations: [], jobs: [],
+const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: {}, conversations: [], jobs: [],
                 busy: false, job: null, draft: false, pending: null, search: "" };
 
 function el(tag, className, text) {
@@ -131,8 +131,133 @@ function timeLabel(value) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// A message's full time for its tap-to-reveal line: "2:14 PM", "Yesterday 2:14 PM" or "Oct 9, 2:14 PM".
+function messageTime(value) {
+  if (!value) return "";
+  const date = typeof value === "number" ? new Date(value > 1e11 ? value : value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date(), yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (date.toDateString() === now.toDateString()) return time;
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday " + time;
+  const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) });
+  return day + ", " + time;
+}
+
 function sessionName(item) {
   return item.title || item.name || item.preview || "Conversation";
+}
+
+// Hold a conversation (about half a second) or right-click it to rename or delete it.
+let longPressed = false;
+function consumeLongPress() { const was = longPressed; longPressed = false; return was; }
+
+function holdToAct(node, act) {
+  let timer = null, start = null;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  node.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    start = { x: event.clientX, y: event.clientY };
+    longPressed = false;
+    timer = setTimeout(() => { timer = null; longPressed = true; navigator.vibrate?.(10); act(); }, 500);
+  });
+  node.addEventListener("pointermove", (event) => {
+    if (timer && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) cancel();
+  });
+  for (const type of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(type, cancel);
+  node.addEventListener("contextmenu", (event) => { event.preventDefault(); cancel(); act(); });
+}
+
+// Swipe a conversation left on a phone to reveal Delete, as in Mail or Messages. Deleting is permanent
+// in Hermes, so both the Delete button and a full swipe go through the confirmation sheet.
+const SWIPE_REVEAL = 88;
+const phoneWidth = window.matchMedia("(max-width: 700px)");
+
+function setSwipeOpen(id) {
+  state.swipeOpenId = id;
+  for (const row of document.querySelectorAll(".swipe-row")) row.classList.toggle("revealed", row.dataset.id === id);
+}
+
+function confirmDeleteConversation(item) {
+  openConversationSheet(item);
+  $("sheet-delete").click();
+}
+
+function swipeToDelete(wrapper, row, item) {
+  let drag = null;
+  row.addEventListener("touchstart", (event) => {
+    if (!phoneWidth.matches || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    drag = { x: touch.clientX, y: touch.clientY, base: wrapper.classList.contains("revealed") ? -SWIPE_REVEAL : 0, active: false, offset: 0 };
+  }, { passive: true });
+  row.addEventListener("touchmove", (event) => {
+    if (!drag) return;
+    const dx = event.touches[0].clientX - drag.x, dy = event.touches[0].clientY - drag.y;
+    if (!drag.active) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { drag = null; return; }
+      if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      drag.active = true; row.classList.add("dragging");
+      if (state.swipeOpenId && state.swipeOpenId !== wrapper.dataset.id) setSwipeOpen(null);
+    }
+    event.preventDefault();
+    drag.offset = Math.min(0, drag.base + dx);
+    row.style.transform = `translateX(${drag.offset}px)`;
+  }, { passive: false });
+  const end = () => {
+    if (!drag) return;
+    const { active, offset } = drag; drag = null;
+    if (!active) return;
+    row.classList.remove("dragging"); row.style.transform = "";
+    // Swallow the click a drag may produce, but never the next real tap.
+    row.dataset.swiped = "1"; setTimeout(() => delete row.dataset.swiped, 350);
+    if (offset < -wrapper.clientWidth * 0.6) { setSwipeOpen(null); confirmDeleteConversation(item); }
+    else setSwipeOpen(offset < -SWIPE_REVEAL / 2 ? wrapper.dataset.id : null);
+  };
+  row.addEventListener("touchend", end);
+  row.addEventListener("touchcancel", end);
+}
+
+// A tap anywhere outside the open row closes it.
+document.addEventListener("touchstart", (event) => {
+  if (state.swipeOpenId && !event.target.closest(".swipe-row.revealed")) setSwipeOpen(null);
+}, { passive: true });
+
+function sheetView(name) {
+  for (const view of ["sheet-actions", "sheet-rename-form", "sheet-confirm"]) show(view, view === name);
+}
+
+function openConversationSheet(item) {
+  state.sheetItem = item;
+  $("sheet-title").textContent = sessionName(item);
+  $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = "";
+  sheetView("sheet-actions");
+  if (!$("conversation-sheet").open) $("conversation-sheet").showModal();
+  $("sheet-title").focus();
+}
+
+async function renameConversation(event) {
+  event.preventDefault();
+  const item = state.sheetItem, id = item && conversationId(item);
+  if (!id) return;
+  const title = $("sheet-name").value.trim();
+  try {
+    const result = await api(`/conversations/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    item.title = result.title ?? title;
+    if (state.current === id) $("chat-title").textContent = sessionName(item);
+    $("conversation-sheet").close(); renderConversations(); notice("Conversation renamed.");
+  } catch (error) { $("sheet-error").textContent = error.message; }
+}
+
+async function deleteConversation() {
+  const item = state.sheetItem, id = item && conversationId(item);
+  if (!id) return;
+  try {
+    await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    state.conversations = state.conversations.filter((row) => conversationId(row) !== id);
+    if (state.swipeOpenId === id) state.swipeOpenId = null;
+    if (state.current === id) { state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
+    $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
+  } catch (error) { $("sheet-confirm-error").textContent = error.message; }
 }
 
 function renderConversations() {
@@ -156,8 +281,20 @@ function renderConversations() {
     meta.append(el("span", "", timeLabel(item.last_active_at || item.last_active || item.updated_at || item.created_at)));
     if (state.pending?.id === id) meta.append(el("span", "unread-dot"));
     button.append(meta);
-    button.addEventListener("click", () => selectConversation(id, item.source));
-    list.append(button);
+    const wrapper = el("div", "swipe-row" + (state.swipeOpenId === id ? " revealed" : ""));
+    wrapper.dataset.id = id;
+    const remove = el("button", "swipe-delete", "Delete");
+    remove.type = "button";
+    remove.addEventListener("click", () => { setSwipeOpen(null); confirmDeleteConversation(item); });
+    button.addEventListener("click", () => {
+      if (consumeLongPress() || button.dataset.swiped) { delete button.dataset.swiped; return; }
+      if (state.swipeOpenId) { setSwipeOpen(null); return; }
+      selectConversation(id, item.source);
+    });
+    holdToAct(button, () => openConversationSheet(item));
+    swipeToDelete(wrapper, button, item);
+    wrapper.append(remove, button);
+    list.append(wrapper);
   }
 }
 
@@ -273,15 +410,36 @@ function addMarkdown(parent, value) {
 }
 
 function renderMessages(rows) {
-  const transcript = $("transcript"); transcript.replaceChildren();
+  const transcript = $("transcript");
+  // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
+  const fresh = state.renderedConversation !== state.current;
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  const keepScroll = transcript.scrollTop;
+  state.renderedConversation = state.current;
+  if (fresh) state.shownTimes = new Set();
+  transcript.replaceChildren();
   const visible = rows.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
+    const key = String(row.id ?? index), time = messageTime(row.timestamp);
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-wren"));
     const body = el("div", "message-body"); addMarkdown(body, messageText(row)); wrapper.append(body);
     transcript.append(wrapper);
-    if (row.role === "user") transcript.append(el("div", "under right", visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered"));
+    const shown = time && state.shownTimes.has(key);
+    if (row.role === "user") {
+      const status = visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
+      transcript.append(el("div", "under right", shown ? `${status} · ${time}` : status));
+    } else if (shown) transcript.append(el("div", "under", time));
+    if (time) {
+      body.classList.add("has-time");
+      body.addEventListener("click", (event) => {
+        // Selecting text or following a link is not a request for the time.
+        if (event.target.closest("a") || String(window.getSelection())) return;
+        if (state.shownTimes.has(key)) state.shownTimes.delete(key); else state.shownTimes.add(key);
+        renderMessages(rows);
+      });
+    }
   }
   if (state.pending?.id === state.current) {
     let ownMessage = -1;
@@ -296,7 +454,7 @@ function renderMessages(rows) {
     }
   }
   renderConversations();
-  transcript.scrollTop = transcript.scrollHeight;
+  transcript.scrollTop = fresh || atBottom ? transcript.scrollHeight : keepScroll;
 }
 
 async function selectConversation(id, source) {
@@ -581,11 +739,82 @@ $("new-conversation").addEventListener("click", newConversation);
 $("new-job").addEventListener("click", () => openJob());
 $("back-to-list").addEventListener("click", () => $("app").classList.remove("chat-open"));
 $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
+
+// Swipe right on a phone to leave a conversation or job, like iOS's back gesture (which installed
+// web apps don't get). The list shows underneath while the view follows the finger.
+(() => {
+  const main = document.querySelector(".main"), app = $("app");
+  const phone = window.matchMedia("(max-width: 700px)");
+  let drag = null;
+  const open = () => phone.matches && (app.classList.contains("chat-open") ||
+                                       (app.classList.contains("section-jobs") && app.classList.contains("job-open")));
+  const scrollsSideways = (node) => {
+    for (; node && node !== main; node = node.parentElement) if (node.scrollWidth > node.clientWidth + 1 && getComputedStyle(node).overflowX !== "visible") return true;
+    return false;
+  };
+  const settle = (to, done) => {
+    main.classList.add("settling");
+    main.style.transform = to;
+    let finished = false;
+    const finish = () => {
+      if (finished) return; finished = true;
+      main.classList.remove("settling", "swiping"); app.classList.remove("peek"); main.style.transform = "";
+      if (done) done();
+    };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return finish();
+    main.addEventListener("transitionend", finish, { once: true });
+    setTimeout(finish, 320);  // in case no transition runs
+  };
+  main.addEventListener("touchstart", (event) => {
+    if (!open() || event.touches.length !== 1 || event.target.closest("textarea, input, dialog") || scrollsSideways(event.target)) return;
+    const touch = event.touches[0];
+    drag = { x: touch.clientX, y: touch.clientY, time: Date.now(), active: false };
+  }, { passive: true });
+  main.addEventListener("touchmove", (event) => {
+    if (!drag) return;
+    const dx = event.touches[0].clientX - drag.x, dy = event.touches[0].clientY - drag.y;
+    if (!drag.active) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { drag = null; return; }
+      if (dx < 12 || dx < Math.abs(dy) * 1.5) return;
+      drag.active = true; app.classList.add("peek"); main.classList.add("swiping");
+    }
+    event.preventDefault();
+    main.style.transform = `translateX(${Math.max(0, dx)}px)`;
+  }, { passive: false });
+  const end = (event) => {
+    if (!drag) return;
+    const { x, time, active } = drag; drag = null;
+    if (!active) return;
+    const dx = (event.changedTouches[0]?.clientX ?? x) - x;
+    const flung = dx / Math.max(1, Date.now() - time) > 0.5 && dx > 40;
+    if (event.type === "touchend" && (dx > main.clientWidth * 0.35 || flung)) {
+      settle("translateX(100%)", () => (app.classList.contains("chat-open") ? $("back-to-list") : $("back-to-jobs")).click());
+    } else settle("translateX(0)");
+  };
+  main.addEventListener("touchend", end);
+  main.addEventListener("touchcancel", end);
+})();
 $("run-selected-job").addEventListener("click", () => state.selectedJob && jobAction(state.selectedJob, "trigger"));
 $("edit-selected-job").addEventListener("click", () => currentJob() && openJob(currentJob()));
 $("search").addEventListener("input", () => { state.search = $("search").value.trim().toLowerCase(); renderConversations(); });
 $("more-conversations").addEventListener("click", () => loadConversations(true).catch((error) => notice(error.message)));
 $("composer").addEventListener("submit", submitMessage);
+$("sheet-rename").addEventListener("click", () => {
+  $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
+  sheetView("sheet-rename-form"); $("sheet-name").focus();
+});
+$("sheet-delete").addEventListener("click", () => {
+  $("sheet-confirm-title").textContent = `Delete “${sessionName(state.sheetItem || {})}”?`;
+  sheetView("sheet-confirm"); $("sheet-confirm-title").focus();
+});
+$("sheet-rename-form").addEventListener("submit", renameConversation);
+$("sheet-confirm-delete").addEventListener("click", deleteConversation);
+for (const id of ["sheet-cancel", "sheet-rename-cancel", "sheet-confirm-cancel"]) $(id).addEventListener("click", () => $("conversation-sheet").close());
+// A tap on the dimmed backdrop (outside the sheet) closes it.
+$("conversation-sheet").addEventListener("click", (event) => {
+  const box = $("conversation-sheet").getBoundingClientRect();
+  if (event.target === $("conversation-sheet") && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) $("conversation-sheet").close();
+});
 $("message").addEventListener("input", () => $("composer").classList.toggle("has-text", Boolean($("message").value.trim())));
 $("message").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("composer").requestSubmit(); } });
 $("job-form").addEventListener("submit", saveJob);
