@@ -1629,8 +1629,25 @@ setInterval(() => {
   else if (state.section === "jobs") loadJobs().catch(() => {});
 }, 20000);
 
-api("/me").then((data) => {
+// iOS reloads a home-screen app that sat in the background, often before the network (or VPN) is
+// back. Until Roost answers, say so and keep trying, rather than leaving a blank page or signing out.
+const boot = { done: false, running: false, timer: null, delay: 2000 };
+async function start() {
+  if (boot.done || boot.running) return;
+  boot.running = true; clearTimeout(boot.timer);
+  let data;
+  try {
+    data = await api("/me", { signal: AbortSignal.timeout(10000) });
+  } catch {
+    $("connecting").textContent = "Can’t reach Roost yet. Retrying…";
+    boot.timer = setTimeout(start, boot.delay); boot.delay = Math.min(boot.delay * 2, 30000);
+    return;
+  } finally { boot.running = false; }
+  boot.done = true; show("connecting", false);
   applyAgentName(data.agent);
   state.passkeysAvailable = Boolean(data.passkeys);
   return data.signed_in ? signedIn() : signedOut();
-}).catch(() => signedOut());
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { boot.delay = 2000; start(); } });
+window.addEventListener("online", () => { boot.delay = 2000; start(); });
+start();

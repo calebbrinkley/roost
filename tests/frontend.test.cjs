@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function fixture() {
+function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: false})})) {
   const nodes = new Map();
   function node() {
     const classes = new Set();
@@ -24,7 +24,7 @@ function fixture() {
     querySelectorAll: () => [], querySelector: () => get('main'), addEventListener() {} };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
-    fetch: async () => ({ok: true, json: async () => ({signed_in: false})}), Date, Math, atob, btoa });
+    fetch, AbortSignal, Date, Math, atob, btoa });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
   return {context, get, run: code => vm.runInContext(code, context)};
 }
@@ -591,4 +591,19 @@ test('Settings › Account adds a named passkey and removes one after confirming
   assert.equal(remove().textContent, 'Confirm remove');
   await remove().events.click(); await tick();
   assert.ok(f.run('sent').some(([method, path, body]) => method === 'DELETE' && path === '/passkeys/old' && body.confirm === true));
+});
+
+test('an unreachable server at start shows Connecting and retries, never a blank page or a sign-out', async () => {
+  let calls = 0, respond, answer = () => Promise.reject(new TypeError('Load failed'));
+  const f = fixture(() => { calls++; return answer(); }); await tick();
+  assert.equal(f.run('state.authEpoch'), 0);
+  assert.equal(f.get('connecting').classList.contains('hidden'), false);
+  assert.match(f.get('connecting').textContent, /Retrying/);
+  // A resume while a check is in flight does not start a second one.
+  answer = () => new Promise(resolve => { respond = resolve; });
+  f.run('start(); start();'); assert.equal(calls, 2);
+  respond({ok: true, json: async () => ({signed_in: false})}); await tick(); await tick();
+  assert.equal(f.get('connecting').classList.contains('hidden'), true);
+  assert.equal(f.run('state.authEpoch'), 1);
+  f.run('start();'); assert.equal(calls, 2);
 });
