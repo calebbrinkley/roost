@@ -110,10 +110,28 @@ async def checks():
         await request(client, "POST", f"/api/jobs/{jid}/trigger")
         await request(client, "DELETE", f"/api/jobs/{jid}", 400, {"confirm": False})
         await request(client, "DELETE", f"/api/jobs/{jid}", body={"confirm": True})
+
+        # The agent's name: Hermes's profile name until Roost's own setting overrides it.
+        assert (await request(client, "GET", "/api/me"))["agent"] == "Kestrel"
+        settings = await request(client, "PATCH", "/api/settings", body={"agent_name": "Robin", "accent": "ocean"})
+        assert settings["agent_name"] == "Robin" and settings["hermes_agent_name"] == "Kestrel" and settings["accent"] == "ocean"
+        assert (await request(client, "GET", "/api/me"))["agent"] == "Robin"
+        await request(client, "PATCH", "/api/settings", body={"agent_name": ""})
+        assert (await request(client, "GET", "/api/me"))["agent"] == "Kestrel"
+        await request(client, "PATCH", "/api/settings", 400, {"accent": "neon"})
+        await request(client, "PUT", "/api/settings/soul", body={"content": "Be brief."})
+        assert (await request(client, "GET", "/api/settings/soul"))["content"] == "Be brief."
+        await request(client, "POST", "/api/service/restart-agent")
+        await request(client, "DELETE", "/api/jobs", 400, {"confirm": True})
+        assert (await request(client, "DELETE", "/api/jobs", body={"confirm": "DELETE"}))["deleted"] >= 2
+        assert await request(client, "GET", "/api/jobs") == []
+        assert (await request(client, "DELETE", "/api/conversations", body={"confirm": "DELETE"}))["deleted"] >= 1
+        left = await request(client, "GET", "/api/conversations")
+        assert not left["sessions"] and left["total"] == 0
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

@@ -331,3 +331,71 @@ test('Jobs share the sidebar search and + button with Messages', async () => {
   assert.equal(f.get('search').value, '');
   assert.equal(f.get('search').placeholder, 'Search conversations');
 });
+
+function settingsFixture() {
+  const f = fixture();
+  Object.assign(f.context.window.roostTheme, { mode: 'system', accent: 'forest',
+    choice() { return this.mode; }, set(mode) { this.mode = mode; }, setAccent(name) { this.accent = name; } });
+  return f;
+}
+const SETTINGS = "{agent_name:'', hermes_agent_name:'Kestrel', accent:'forest', accents:['forest','ocean','violet','rose','amber','slate']}";
+const text = n => (n.textContent || '') + (n.children?.map(text).join('') || '');
+const find = (n, test) => test(n) ? n : n.children?.map(c => find(c, test)).find(Boolean);
+
+test('Settings opens on Appearance with no search field', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
+  f.run(`setSection('settings')`); await tick();
+  assert.equal(f.get('sidebar-search').classList.contains('hidden'), true);
+  assert.equal(f.get('sidebar-settings-list').classList.contains('hidden'), false);
+  assert.equal(f.get('settings-title').textContent, 'Appearance');
+  assert.match(text(f.get('settings-detail')), /System.*Light.*Dark/);
+});
+
+test('choosing an accent saves it for every device and applies it here', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.sent = []; api = async (path, options = {}) => {
+    if (options.method === 'PATCH') { sent.push(JSON.parse(options.body)); return {...${SETTINGS}, accent:'ocean'}; }
+    return ${SETTINGS}; };`);
+  f.run(`setSection('settings')`); await tick();
+  const swatch = find(f.get('settings-detail'), n => n.className === 'swatch swatch-ocean');
+  await swatch.events.click(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{accent:'ocean'}]);
+  assert.equal(f.context.window.roostTheme.accent, 'ocean');
+});
+
+test('delete all stays disabled until DELETE is typed, then sends that confirmation', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.calls = []; api = async (path, options = {}) => {
+    if (options.method === 'DELETE') { calls.push([path, JSON.parse(options.body)]); return {deleted: 3}; }
+    return ${SETTINGS}; };
+    state.conversations = [{id:'a'}]; state.current = 'a'; renderConversations = () => {}; renderWelcome = () => {};`);
+  f.run(`setSection('settings'); selectSettingsGroup('data')`); await tick();
+  const input = find(f.get('settings-detail'), n => n.id === 'confirm-conversations');
+  const button = find(f.get('settings-detail'), n => n.textContent === 'Delete all conversations' && n.className === 'danger-button');
+  assert.equal(button.disabled, true);
+  input.value = 'delete'; input.events.input();
+  assert.equal(button.disabled, true);
+  input.value = 'DELETE'; input.events.input();
+  assert.equal(button.disabled, false);
+  await button.events.click(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls'))), [['/conversations', {confirm:'DELETE'}]]);
+  assert.equal(f.run('state.conversations.length'), 0); assert.equal(f.run('state.current'), null);
+  assert.equal(f.get('notice').textContent, 'Deleted 3 conversations.');
+});
+
+test('saving an agent name applies the name the server now reports', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`api = async (path, options = {}) => {
+    if (path === '/me') return {signed_in: true, agent: 'Robin', accent: 'forest'};
+    if (options.method === 'PATCH') return {...${SETTINGS}, agent_name: 'Robin'};
+    if (path === '/settings/soul') return {content: 'Be brief.'};
+    return ${SETTINGS}; };`);
+  f.run(`setSection('settings'); selectSettingsGroup('agent')`); await tick(); await tick();
+  const input = find(f.get('settings-detail'), n => n.id === 'settings-agent-name');
+  assert.equal(input.placeholder, 'Kestrel');
+  assert.equal(find(f.get('settings-detail'), n => n.id === 'settings-soul').value, 'Be brief.');
+  input.value = 'Robin'; input.events.input();
+  await find(f.get('settings-detail'), n => n.textContent === 'Save name').events.click(); await tick();
+  assert.equal(f.run('agent()'), 'Robin');
+});

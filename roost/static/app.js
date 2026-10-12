@@ -15,7 +15,8 @@ function records(rows) { return rows.filter((row) => row && typeof row === "obje
 
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
-// The agent's display name comes from the server (ROOST_AGENT_NAME); the markup holds templates for it.
+// The agent's name comes from the server: Roost's own setting, else Hermes's name for it, else "Agent".
+// The markup holds templates for it.
 function agent() { return state.agentName || "Agent"; }
 
 function applyAgentName(name) {
@@ -112,9 +113,10 @@ function signedOut() {
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
-  $("app").classList.remove("chat-open", "job-open", "peek");
+  Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined });
+  $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
-  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail"]) $(id).replaceChildren();
+  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
   for (const id of ["job-dialog", "conversation-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("more-conversations").disabled = false; $("more-conversations").textContent = "Load more";
@@ -128,18 +130,34 @@ async function signedIn() {
   $("password").value = "";
   $("login-error").textContent = "";
   setSection("messages");
+  refreshIdentity();
   try { await loadConversations(); } catch (error) { notice(error.message); }
+}
+
+// The agent's name and the synced accent, as the signed-in server sees them.
+async function refreshIdentity() {
+  const epoch = state.authEpoch;
+  try {
+    const data = await api("/me");
+    if (epoch !== state.authEpoch || !data.signed_in) return;
+    applyAgentName(data.agent);
+    window.roostTheme.setAccent(data.accent);
+  } catch { /* The defaults stay until the next sign-in or settings visit. */ }
 }
 
 function setSection(section) {
   state.section = section;
   $("app").classList.toggle("section-jobs", section === "jobs");
-  $("app").classList.remove("chat-open", "job-open");
-  show("messages-view", section === "messages"); show("jobs-view", section === "jobs");
-  $("nav-messages").classList.toggle("active", section === "messages");
-  $("nav-jobs").classList.toggle("active", section === "jobs");
-  $("mobile-nav-messages").classList.toggle("active", section === "messages");
-  $("mobile-nav-jobs").classList.toggle("active", section === "jobs");
+  $("app").classList.toggle("section-settings", section === "settings");
+  $("app").classList.remove("chat-open", "job-open", "settings-open");
+  show("messages-view", section === "messages"); show("jobs-view", section === "jobs"); show("settings-view", section === "settings");
+  for (const name of ["messages", "jobs", "settings"]) {
+    $("nav-" + name).classList.toggle("active", section === name);
+    $("mobile-nav-" + name).classList.toggle("active", section === name);
+  }
+  show("sidebar-search", section !== "settings");
+  show("top-action", section !== "settings");
+  show("sidebar-settings-list", section === "settings");
   // Both sections share the sidebar's search field and + button; each keeps its own query.
   const jobs = section === "jobs", noun = jobs ? "jobs" : "conversations", create = jobs ? "New job" : "New conversation";
   $("search").value = jobs ? state.jobSearch : state.search;
@@ -147,13 +165,14 @@ function setSection(section) {
   $("sidebar-new").setAttribute("aria-label", create); $("sidebar-new").title = create;
   show("conversation-list", section === "messages");
   show("sidebar-jobs-list", section === "jobs");
-  $("mobile-list-title").textContent = section === "jobs" ? "Jobs" : "Messages";
+  $("mobile-list-title").textContent = { jobs: "Jobs", settings: "Settings" }[section] || "Messages";
   $("top-action").replaceChildren(icon(section === "jobs" ? "plus" : "compose"));
   $("top-action").setAttribute("aria-label", section === "jobs" ? "New job" : "New conversation");
   $("top-action").title = section === "jobs" ? "New job" : "New conversation";
-  if (section === "jobs") show("more-conversations", false);
+  if (section !== "messages") show("more-conversations", false);
   else renderConversations();
   if (section === "jobs") loadJobs().catch((error) => notice(error.message));
+  if (section === "settings") loadSettings();
 }
 
 function timeLabel(value) {
@@ -882,6 +901,236 @@ async function saveJob(event) {
   }
 }
 
+// Settings: a list of groups in the sidebar and the selected group in the main pane, like Jobs.
+function settingsGroups() {
+  return [["appearance", "Appearance", "Theme and accent colour"], ["agent", agent(), "Name and instructions"],
+          ["data", "Data", "Delete conversations or jobs"], ["service", "Service", `Restart Roost or ${agent()}`]];
+}
+
+async function loadSettings() {
+  const epoch = state.authEpoch;
+  if (!state.settingsGroup && !phoneWidth.matches) state.settingsGroup = "appearance";
+  renderSettings();
+  try {
+    const data = await api("/settings");
+    if (epoch !== state.authEpoch) return;
+    state.settings = data;
+    window.roostTheme.setAccent(data.accent);
+    renderSettings();
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  if (state.settingsGroup === "agent") loadSoul();
+}
+
+function selectSettingsGroup(id) {
+  state.settingsGroup = id;
+  $("app").classList.add("settings-open");
+  renderSettings();
+  $("settings-detail").scrollTop = 0;
+  if (id === "agent") loadSoul();
+}
+
+function renderSettings() {
+  const list = $("sidebar-settings-list"); list.replaceChildren();
+  for (const [id, label, hint] of settingsGroups()) {
+    const row = el("button", "job-list-row" + (state.settingsGroup === id ? " selected" : ""));
+    row.type = "button";
+    if (state.settingsGroup === id) row.setAttribute("aria-current", "true");
+    row.append(el("span", "job-list-name", label), el("span", "settings-row-hint", hint));
+    row.addEventListener("click", () => selectSettingsGroup(id));
+    list.append(row);
+  }
+  const group = settingsGroups().find(([id]) => id === state.settingsGroup);
+  $("settings-title").textContent = group ? group[1] : "Settings";
+  $("settings-subtitle").textContent = group ? group[2] : "";
+  const detail = $("settings-detail"); detail.replaceChildren();
+  if (!group) return;
+  if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
+  ({ appearance: renderAppearance, agent: renderAgentSettings, data: renderDataSettings, service: renderServiceSettings })[group[0]](detail);
+}
+
+function settingsSection(parent, heading, text) {
+  const section = el("section", "job-detail-section");
+  section.append(el("h2", "", heading));
+  if (text) section.append(el("p", "", text));
+  parent.append(section);
+  return section;
+}
+
+function settingsButton(className, text, action) {
+  const button = el("button", className, text);
+  button.type = "button";
+  button.disabled = state.settingsBusy;
+  button.addEventListener("click", action);
+  return button;
+}
+
+function renderAppearance(detail) {
+  const theme = settingsSection(detail, "Theme", "Applies to this device. System follows the device's light or dark setting.");
+  const choices = el("div", "choice-row");
+  choices.setAttribute("role", "radiogroup"); choices.setAttribute("aria-label", "Theme");
+  for (const [mode, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]]) {
+    const chosen = window.roostTheme.choice() === mode;
+    const button = el("button", "segment" + (chosen ? " active" : ""), label);
+    button.type = "button"; button.setAttribute("role", "radio"); button.setAttribute("aria-checked", String(chosen));
+    button.addEventListener("click", () => { window.roostTheme.set(mode); renderSettings(); });
+    choices.append(button);
+  }
+  theme.append(choices);
+  const accent = settingsSection(detail, "Accent colour", "Used for your messages, buttons and highlights on every device you sign in on.");
+  const swatches = el("div", "swatches");
+  swatches.setAttribute("role", "radiogroup"); swatches.setAttribute("aria-label", "Accent colour");
+  for (const name of state.settings.accents) {
+    const label = name.charAt(0).toUpperCase() + name.slice(1);
+    const swatch = el("button", "swatch swatch-" + name);
+    swatch.type = "button"; swatch.title = label; swatch.disabled = state.settingsBusy;
+    swatch.setAttribute("role", "radio"); swatch.setAttribute("aria-label", label);
+    swatch.setAttribute("aria-checked", String(state.settings.accent === name));
+    swatch.addEventListener("click", () => saveSettings({ accent: name }, label + " accent saved."));
+    swatches.append(swatch);
+  }
+  accent.append(swatches);
+}
+
+function renderAgentSettings(detail) {
+  const hermesName = state.settings.hermes_agent_name;
+  const name = settingsSection(detail, "Name", hermesName ?
+    `Leave empty to use the name Hermes gives it: ${hermesName}.` :
+    "Hermes has no name for it, so Roost shows “Agent” when this is empty.");
+  const label = el("label", "", "Name shown in Roost"); label.htmlFor = "settings-agent-name";
+  const input = el("input"); input.id = "settings-agent-name"; input.maxLength = 40; input.autocomplete = "off";
+  input.value = state.nameDraft ?? state.settings.agent_name; input.placeholder = hermesName || "Agent";
+  input.addEventListener("input", () => { state.nameDraft = input.value; });
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("primary", "Save name", async () => {
+    if (await saveSettings({ agent_name: input.value.trim() }, "Name saved.")) { state.nameDraft = undefined; await refreshIdentity(); renderSettings(); }
+  }));
+  name.append(label, input, actions);
+
+  const soul = settingsSection(detail, "Instructions",
+    `What ${agent()} should know and how it should behave, everywhere it works: Roost, the desktop app and scheduled jobs. Hermes keeps these in its SOUL.md file.`);
+  const soulLabel = el("label", "", "Instructions"); soulLabel.htmlFor = "settings-soul";
+  const area = el("textarea"); area.id = "settings-soul"; area.maxLength = 16000;
+  const loaded = state.soul !== undefined;
+  area.value = loaded ? (state.soulDraft ?? state.soul) : ""; area.disabled = !loaded;
+  area.placeholder = loaded ? `For example: Keep answers short. Call me by my first name.` : "Loading…";
+  area.addEventListener("input", () => { state.soulDraft = area.value; });
+  const soulActions = el("div", "settings-actions");
+  const save = settingsButton("primary", "Save instructions", saveSoul);
+  save.disabled = state.settingsBusy || !loaded;
+  soulActions.append(save);
+  soul.append(soulLabel, area, soulActions);
+}
+
+function renderDataSettings(detail) {
+  for (const [kind, heading, text] of [
+    ["conversations", "Delete all conversations", `Removes every conversation in Messages, whatever started it, from ${agent()}’s history for good. Job run history stays with its jobs.`],
+    ["jobs", "Delete all jobs", `Removes every scheduled job and stops it running. This can’t be undone.`]]) {
+    const section = settingsSection(detail, heading, text);
+    const label = el("label", "", "Type DELETE to confirm"); label.htmlFor = "confirm-" + kind;
+    const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "characters";
+    const actions = el("div", "settings-actions");
+    const button = settingsButton("danger-button", heading, () => deleteEverything(kind, input));
+    button.disabled = true;
+    input.addEventListener("input", () => { button.disabled = state.settingsBusy || input.value.trim() !== "DELETE"; });
+    actions.append(button);
+    section.append(label, input, actions);
+  }
+}
+
+function renderServiceSettings(detail) {
+  const agentSection = settingsSection(detail, `Restart ${agent()}`,
+    `Restarts the Hermes gateway: its messaging platforms and the job scheduler. A reply that is being written may stop.`);
+  const agentActions = el("div", "settings-actions");
+  agentActions.append(settingsButton("secondary", `Restart ${agent()}`, () =>
+    serviceAction("/service/restart-agent", `${agent()} is restarting. Replies may take a minute.`)));
+  agentSection.append(agentActions);
+  const roostSection = settingsSection(detail, "Restart Roost", "Restarts this web app. You stay signed in.");
+  const roostActions = el("div", "settings-actions");
+  roostActions.append(settingsButton("secondary", "Restart Roost", restartRoost));
+  roostSection.append(roostActions);
+}
+
+async function withSettingsBusy(work) {
+  if (state.settingsBusy) return false;
+  const epoch = state.authEpoch;
+  state.settingsBusy = true; renderSettings();
+  try { await work(epoch); return epoch === state.authEpoch; }
+  catch (error) { if (epoch === state.authEpoch) notice(error.message); return false; }
+  finally { if (epoch === state.authEpoch) { state.settingsBusy = false; renderSettings(); } }
+}
+
+function saveSettings(changes, message) {
+  return withSettingsBusy(async (epoch) => {
+    const data = await api("/settings", { method: "PATCH", body: JSON.stringify(changes) });
+    if (epoch !== state.authEpoch) return;
+    state.settings = data;
+    window.roostTheme.setAccent(data.accent);
+    notice(message);
+  });
+}
+
+async function loadSoul() {
+  if (state.soul !== undefined || state.soulLoading) return;
+  const epoch = state.authEpoch;
+  state.soulLoading = true;
+  try {
+    const data = await api("/settings/soul");
+    if (epoch !== state.authEpoch) return;
+    state.soul = data.content;
+    if (state.settingsGroup === "agent") renderSettings();
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  finally { state.soulLoading = false; }
+}
+
+function saveSoul() {
+  const content = $("settings-soul").value;
+  return withSettingsBusy(async (epoch) => {
+    await api("/settings/soul", { method: "PUT", body: JSON.stringify({ content }) });
+    if (epoch !== state.authEpoch) return;
+    state.soul = content; state.soulDraft = undefined;
+    notice("Instructions saved.");
+  });
+}
+
+function deleteEverything(kind, input) {
+  if (input.value.trim() !== "DELETE") return;
+  return withSettingsBusy(async (epoch) => {
+    const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
+    if (epoch !== state.authEpoch) return;
+    if (kind === "conversations") {
+      Object.assign(state, { conversations: [], current: null, pending: null, conversationOffset: 0, conversationsMore: false });
+      state.viewEpoch++; renderConversations(); renderWelcome();
+    } else {
+      Object.assign(state, { jobs: [], selectedJob: null, jobPatches: Object.create(null), jobRuns: Object.create(null), jobRunsError: Object.create(null) });
+      renderJobs();
+    }
+    const count = Number(result.deleted) || 0;
+    notice(`Deleted ${count} ${kind === "jobs" ? (count === 1 ? "job" : "jobs") : (count === 1 ? "conversation" : "conversations")}.`);
+  });
+}
+
+function serviceAction(path, message) {
+  return withSettingsBusy(async (epoch) => {
+    await api(path, { method: "POST" });
+    if (epoch === state.authEpoch) notice(message);
+  });
+}
+
+function restartRoost() {
+  return withSettingsBusy(async (epoch) => {
+    await api("/service/restart-roost", { method: "POST" });
+    if (epoch !== state.authEpoch) return;
+    notice("Roost is restarting…");
+    // Wait for the old process to go, then for the new one to answer.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try { if ((await fetch("/api/health", { cache: "no-store" })).ok) { notice("Roost is back."); return; } } catch { /* still starting */ }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    notice("Roost hasn’t come back yet. Reload the page in a minute.");
+  });
+}
+
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -899,6 +1148,9 @@ $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
+$("nav-settings").addEventListener("click", () => setSection("settings"));
+$("mobile-nav-settings").addEventListener("click", () => setSection("settings"));
+$("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("sidebar-new").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("back-to-list").addEventListener("click", () => $("app").classList.remove("chat-open"));
@@ -911,7 +1163,8 @@ $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job
   const phone = window.matchMedia("(max-width: 700px)");
   let drag = null;
   const open = () => phone.matches && (app.classList.contains("chat-open") ||
-                                       (app.classList.contains("section-jobs") && app.classList.contains("job-open")));
+                                       (app.classList.contains("section-jobs") && app.classList.contains("job-open")) ||
+                                       (app.classList.contains("section-settings") && app.classList.contains("settings-open")));
   const scrollsSideways = (node) => {
     for (; node && node !== main; node = node.parentElement) if (node.scrollWidth > node.clientWidth + 1 && getComputedStyle(node).overflowX !== "visible") return true;
     return false;
@@ -952,7 +1205,8 @@ $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job
     const dx = (event.changedTouches[0]?.clientX ?? x) - x;
     const flung = dx / Math.max(1, Date.now() - time) > 0.5 && dx > 40;
     if (event.type === "touchend" && (dx > main.clientWidth * 0.35 || flung)) {
-      settle("translateX(100%)", () => (app.classList.contains("chat-open") ? $("back-to-list") : $("back-to-jobs")).click());
+      const back = app.classList.contains("chat-open") ? "back-to-list" : app.classList.contains("section-settings") ? "back-to-settings" : "back-to-jobs";
+      settle("translateX(100%)", () => $(back).click());
     } else settle("translateX(0)");
   };
   main.addEventListener("touchend", end);
@@ -998,7 +1252,7 @@ setInterval(() => {
 setInterval(() => {
   if ($("app").classList.contains("hidden")) return;
   if (state.section === "messages") loadConversations().catch(() => {});
-  else loadJobs().catch(() => {});
+  else if (state.section === "jobs") loadJobs().catch(() => {});
 }, 20000);
 
 api("/me").then((data) => { applyAgentName(data.agent); return data.signed_in ? signedIn() : signedOut(); }).catch(() => signedOut());

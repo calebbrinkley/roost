@@ -252,6 +252,72 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("error", await response.json())
             self.assertEqual(self.app["login_inflight"], {})
 
+    async def signed_in(self):
+        response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
+        self.assertEqual(response.status, 200)
+        # The cookie is Secure and this test server is plain HTTP, so hand it back explicitly.
+        self.client.session.cookie_jar.update_cookies({server.COOKIE: response.cookies[server.COOKIE].value})
+
+    async def test_restart_roost_answers_then_exits_for_the_service_manager(self):
+        await self.signed_in()
+        exits = []
+        self.app["exit"] = exits.append
+        response = await self.client.post("/api/service/restart-roost", headers=self.headers)
+        self.assertEqual(response.status, 200)
+        await asyncio.sleep(0.7)
+        # Non-zero, so systemd's Restart=on-failure starts Roost again.
+        self.assertEqual(exits, [server.RESTART_EXIT])
+        self.assertNotEqual(server.RESTART_EXIT, 0)
+
+    async def test_settings_are_validated_and_survive_a_corrupt_file(self):
+        await self.signed_in()
+        for body in ({"agent_name": "x" * 41}, {"agent_name": "line\nbreak"}, {"accent": "neon"}, {"theme": "dark"}, {}):
+            response = await self.client.patch("/api/settings", headers=self.headers, json=body)
+            self.assertEqual(response.status, 400, body)
+        (self.state / "settings.json").write_text("{not json")
+        self.assertEqual(server.load_settings(self.app), {"agent_name": "", "accent": "forest"})
+        response = await self.client.patch("/api/settings", headers=self.headers, json={"agent_name": "  Robin  ", "accent": "rose"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(server.load_settings(self.app), {"agent_name": "Robin", "accent": "rose"})
+        self.assertEqual(oct((self.state / "settings.json").stat().st_mode & 0o777), "0o600")
+
+    async def test_delete_all_needs_the_typed_word_and_stops_on_rows_hermes_keeps(self):
+        await self.signed_in()
+        for confirm in (True, "delete", None):
+            response = await self.client.delete("/api/conversations", headers=self.headers, json={"confirm": confirm})
+            self.assertEqual(response.status, 400)
+        self.app["hermes"].request.assert_not_awaited()
+        # Hermes acknowledges every delete but keeps listing the same row: Roost must not loop.
+        self.app["hermes"].request = AsyncMock(side_effect=lambda method, path, *rest: (
+            {"sessions": [{"id": "stuck"}]} if method == "GET" else {"ok": True}))
+        response = await self.client.delete("/api/conversations", headers=self.headers, json={"confirm": "DELETE"})
+        self.assertEqual((response.status, await response.json()), (200, {"deleted": 1}))
+
+    async def test_profile_names_from_hermes_cannot_reach_other_routes(self):
+        await self.signed_in()
+        calls = []
+
+        async def request(method, path, *rest):
+            calls.append((method, path))
+            return {"current": "../config"} if path == "/api/profiles/active" else {"content": "soul"}
+        self.app["hermes"].request = request
+        response = await self.client.get("/api/settings/soul")
+        self.assertEqual(response.status, 200)
+        self.assertIn(("GET", "/api/profiles/default/soul"), calls)
+
+    async def test_agent_name_is_asked_of_hermes_right_after_boot(self):
+        await self.signed_in()
+
+        async def request(method, path, *rest):
+            if path == "/api/profiles/active":
+                return {"current": "default"}
+            return {"profiles": [{"name": "default", "display_name": "Kestrel"}]}
+        self.app["hermes"].request = request
+        # A host that has just booted reports a small monotonic clock.
+        with patch.object(server.time, "monotonic", return_value=5.0):
+            response = await self.client.get("/api/me")
+        self.assertEqual((await response.json())["agent"], "Kestrel")
+
     async def test_ipv6_loopback_origin_and_invalid_port(self):
         config = {"ROOST_STATE_DIR": str(self.state), "ROOST_HERMES_URL": "http://127.0.0.1:1",
                   "ROOST_HERMES_USERNAME": "demo", "ROOST_HERMES_PASSWORD_FILE": str(self.state / "password")}
