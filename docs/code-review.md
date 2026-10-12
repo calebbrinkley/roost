@@ -10,7 +10,7 @@ Reviewed on 2026-10-11. This record describes reproduced issues and regression c
 | Input validation | Very long offsets raised an exception, dot identifiers could change upstream paths, and JSON numeric `1` passed deletion confirmation. | Offsets and identifiers are bounded before forwarding; deletion requires boolean `true`. |
 | Chat resume | URL encoding was applied to a stored ID inside a WebSocket RPC. | HTTP paths are encoded; RPC IDs retain their original value. |
 | Origin configuration | Uppercase schemes and default ports did not match browser origins; uppercase HTTP bypassed the CLI binding check. | Origins are normalized, invalid ports/hosts are rejected, IPv6 loopback is supported, and all HTTP previews bind only to loopback. |
-| Hermes responses | Chunked bodies escaped the response-size check; invalid JSON and RPC shapes raised uncaught exceptions. | Response bodies are limited to 8 MiB while reading; malformed data produces a safe upstream error. |
+| Hermes responses | Chunked bodies escaped the response-size check; invalid JSON and RPC shapes raised uncaught exceptions. | Response bodies are limited to 8 MiB while reading; malformed data produces a safe upstream error. Invalid list rows are skipped without breaking valid UI content. |
 | Chat deadline | Unrelated gateway events restarted the receive timeout indefinitely. | Each RPC has a fixed deadline, including sends and intervening events. |
 | Message submission | A failed refresh restored an already accepted message; request completion switched the selected conversation or overwrote a newer draft. | Accepted sends remain accepted, and completion respects the current view and draft. |
 | Polling | Older responses could replace newer transcripts or repopulate state after sign-out. | Request ordering and sign-in generations reject stale responses. |
@@ -23,7 +23,7 @@ Reviewed on 2026-10-11. This record describes reproduced issues and regression c
 
 ## Verification
 
-- `make check`: 47 Python tests and 17 JavaScript tests, plus public-content/history scans and documentation checks.
+- `make check`: 47 Python tests and 18 JavaScript tests, plus public-content/history scans and documentation checks.
 - `make smoke`: isolated loopback Hermes stand-in; sign-in, origin rejection, per-device lockout, password replacement without restart, multi-turn chat, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion and session revocation.
 - Headless Chrome with fake demo data at 320×740, 390×844, 1024×768 and 1440×900 in light and dark themes: phone and desktop layouts, chat submission with forced refresh failure, Job creation/pause/deletion, notices and sign-out. Screenshots were inspected locally and are not published as device-validation evidence.
 - GitHub’s advisory API returned no published advisory affecting `aiohttp==3.14.4` at review time. This query does not establish that every transitive dependency is vulnerability-free.

@@ -11,6 +11,8 @@ function el(tag, className, text) {
   return node;
 }
 
+function records(rows) { return rows.filter((row) => row && typeof row === "object" && !Array.isArray(row)); }
+
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
 // The agent's display name comes from the server (ROOST_AGENT_NAME); the markup holds templates for it.
@@ -405,7 +407,7 @@ function messageText(message) {
   const value = message.display_content ?? message.content;
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : (part?.text || part?.type || "")).join("\n");
-  if (value && typeof value === "object") return value.text || JSON.stringify(value);
+  if (value && typeof value === "object") return typeof value.text === "string" ? value.text : JSON.stringify(value);
   return "";
 }
 
@@ -473,7 +475,7 @@ function renderMessages(rows) {
   state.renderedConversation = state.current;
   if (fresh) state.shownTimes = new Set();
   transcript.replaceChildren();
-  const visible = rows.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
+  const visible = records(rows).filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
@@ -752,7 +754,7 @@ async function loadJobRuns(id) {
     const data = await api(`/jobs/${encodeURIComponent(id)}/runs`);
     if (epoch !== state.authEpoch) return;
     delete state.jobRunsError[id];
-    state.jobRuns[id] = Array.isArray(data) ? data : (Array.isArray(data.runs) ? data.runs : []);
+    state.jobRuns[id] = records(Array.isArray(data) ? data : (Array.isArray(data.runs) ? data.runs : []));
     if (state.selectedJob === id) renderJobDetail();
   } catch (error) {
     if (epoch === state.authEpoch) { state.jobRunsError[id] = true; if (state.selectedJob === id) renderJobDetail(); }
@@ -765,7 +767,7 @@ async function loadJobs() {
   const serial = state.jobsRequest = (state.jobsRequest || 0) + 1;
   const data = await api("/jobs");
   if (epoch !== state.authEpoch || serial !== state.jobsRequest) return;
-  state.jobs = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+  state.jobs = records(Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []));
   if (!state.selectedJob || !state.jobs.some((job) => (job.id || job.job_id) === state.selectedJob)) {
     state.selectedJob = state.jobs[0]?.id || state.jobs[0]?.job_id || null;
   }

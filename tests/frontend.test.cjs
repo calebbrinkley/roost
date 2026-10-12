@@ -192,3 +192,14 @@ test('cancelled touch gesture cannot open deletion confirmation', async () => {
   f.context.row.events.touchcancel(event('touchcancel',40));
   assert.equal(f.run('confirmations'),0);
 });
+
+test('malformed transcript and Job rows do not crash the remaining valid content', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; renderMessages([null,{role:'user',content:'valid message'},{role:'assistant',content:{text:7}}]);`);
+  const text = n => (n.textContent || '') + (n.children?.map(text).join('') || '');
+  assert.match(text(f.get('transcript')),/valid message/);
+  f.run(`api = async path => path === '/jobs' ? [null,{id:'one',name:'valid job'}] : {runs:[null,{preview:'valid run'}]};`);
+  await f.run('loadJobs()');
+  assert.match(text(f.get('sidebar-jobs-list')),/valid job/);
+  assert.match(text(f.get('job-detail')),/valid run/);
+});
