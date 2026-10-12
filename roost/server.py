@@ -585,7 +585,8 @@ async def delete_job(request: web.Request):
 
 async def static(request: web.Request):
     name = request.match_info.get("name") or "index.html"
-    if name not in {"index.html", "app.js", "theme.js", "style.css", "manifest.webmanifest", "icon.svg",
+    if name not in {"index.html", "app.js", "theme.js", "style.css", "manifest.webmanifest",
+                    "icon-192.png", "icon-512.png", "apple-touch-icon.png",
                     "SpaceGrotesk-Regular.ttf", "SpaceGrotesk-Bold.ttf"}:
         raise web.HTTPNotFound()
     return web.FileResponse(STATIC / name, headers={"Cache-Control": "no-store"})
