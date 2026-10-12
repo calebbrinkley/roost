@@ -431,12 +431,13 @@ test('About shows the build, live stats and Hermes, or says Hermes is unreachabl
   f.run(`globalThis.about = {roost:{version:'0.1.0', revision:'e2ebc26784892de5558fd5bb95f589a1d3fe62b4'},
       runtime:{python:'3.14.0', aiohttp:'3.14.4'},
       stats:{uptime_seconds:7260, cpu_percent:1.5, memory_bytes:52428800, memory_limit_bytes:null, process_memory_bytes:41943040,
-             state_bytes:24576, disk_total_bytes:1e12, disk_free_bytes:4e11},
+             app_bytes:2097152, state_bytes:24576, disk_total_bytes:1e12, disk_free_bytes:4e11},
       hermes:{reachable:true, latency_ms:12, version:'2026.9.24', gateway_running:true, active_sessions:2}};
     api = async path => path === '/about' ? about : ${SETTINGS};`);
   f.run(`setSection('settings'); selectSettingsGroup('about')`); await tick(); await tick();
   const shown = text(f.get('settings-detail'));
-  for (const part of [/0\.1\.0/, /e2ebc26/, /2h 1m/, /50 MB/, /Running/, /12 ms/, /Space Grotesk/]) assert.match(shown, part);
+  for (const part of [/0\.1\.0/, /e2ebc26/, /2h 1m/, /50 MB/, /Running/, /12 ms/, /Space Grotesk/, /calebbrinkley/,
+                      /Roost on disk2\.0 MB ?app 2\.0 MB · data 24 KB/, /Free space373 GB ?of 931 GB on the shared drive/]) assert.match(shown, part);
   f.run(`about.hermes = {reachable:false}; loadAbout()`); await tick(); await tick();
   assert.match(text(f.get('settings-detail')), /Unreachable/);
 });

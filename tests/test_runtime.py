@@ -329,6 +329,9 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["hermes"]["version"], "2026.9.24")
         self.assertNotIn("hermes_home", data["hermes"]); self.assertNotIn("gateway_pid", data["hermes"])
         self.assertGreater(data["stats"]["disk_total_bytes"], 0)
+        # Roost's own code (with its fonts) is counted, not the shared volume's usage.
+        self.assertGreater(data["stats"]["app_bytes"], 100_000)
+        self.assertLess(data["stats"]["app_bytes"], 50_000_000)
         self.assertEqual(data["roost"]["revision"], "")
         self.app["hermes"].request = AsyncMock(side_effect=HermesError(503, "Hermes is unavailable."))
         self.assertEqual((await (await self.client.get("/api/about")).json())["hermes"], {"reachable": False})

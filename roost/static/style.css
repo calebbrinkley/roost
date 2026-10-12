@@ -197,6 +197,8 @@ button:disabled { cursor: default; }
 .job-sidebar-list .empty-list { padding: 4px 18px; }
 
 .settings-detail .job-detail-section p { margin: 0 0 12px; color: var(--muted); font-size: calc(14px * var(--text-scale)); line-height: 1.45; max-width: 62ch; }
+/* A note under a control or a stats grid (Now: …, the commit link, Updated …) sits clear of it. */
+.settings-detail select + p, .settings-detail .stats + p { margin-top: 12px; }
 .settings-detail label { display: block; margin: 0 0 7px; font-size: calc(13px * var(--text-scale)); font-weight: 600; }
 .settings-detail input, .settings-detail textarea { width: 100%; max-width: 520px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; outline: none; }
 .settings-detail textarea { max-width: 720px; min-height: 220px; resize: vertical; font: calc(14px * var(--text-scale))/1.5 var(--mono); }
