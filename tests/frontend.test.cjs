@@ -606,6 +606,7 @@ test('an unreachable server at start shows Connecting and retries, never a blank
   assert.equal(f.get('connecting').classList.contains('hidden'), true);
   assert.equal(f.run('state.authEpoch'), 1);
   f.run('start();'); assert.equal(calls, 2);
+});
 
 test('the thinking indicator stays through tool rounds and clears on the final reply', async () => {
   const f = fixture(); await tick();
