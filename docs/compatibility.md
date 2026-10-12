@@ -10,7 +10,7 @@ The integration targets Hermes **`v2026.9.24`**. The project records a successfu
 - Schedules are sent to Hermes as entered; there is no schedule builder yet.
 - Settings uses the dashboard's profile routes (`/api/profiles`, `/api/profiles/active`, `/api/profiles/{name}/soul`), `/api/gateway/restart` and `/api/status` (About shows only its version, gateway state and active sessions), read from the `v2026.9.24` source. The profile name and SOUL routes were checked against a live dashboard on 2026-10-11; the others have not been.
 - Job history shows what Hermes returns; push delivery of full reports is future work.
-- Replies may take time to appear. Hermes continues submitted turns after Roost disconnects, and Roost polls for the transcript.
+- Replies to messages sent from Roost stream as they are written: Roost keeps the dashboard socket open for the turn and passes Hermes's `reasoning.delta` and `message.delta` events (read from the `v2026.9.24` source) to the browser as Server-Sent Events, with the thoughts open while they are written. The transcript stays the record. Turns from other clients, a turn followed for more than 30 minutes, and a turn in progress when Roost restarts appear when Hermes saves them, because Roost polls for the transcript as before. Hermes continues submitted turns after Roost disconnects. Streaming is checked against a local stand-in, not a live agent or a phone.
 
 Integration with **local-ai-stack** is planned as a CPU-only service. Packaging, installer changes, a private HTTPS front door and host commissioning are separate deployment work. Hermes retains responsibility for model access and the gaming gate.
 

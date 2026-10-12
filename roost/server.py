@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__
+from . import __version__, live
 
 from .auth import Sessions, verify_password
 from .hermes import Hermes, HermesError
@@ -88,13 +88,18 @@ async def guard(request: web.Request, handler):
         response = web.json_response({"error": exc.message}, status=exc.status)
     except web.HTTPException as exc:
         response = web.json_response({"error": exc.text or exc.reason}, status=exc.status)
+    if not response.prepared:  # an event stream sent its headers already
+        harden(request, response)
+    return response
+
+
+def harden(request: web.Request, response: web.StreamResponse) -> None:
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'"
-    return response
 
 
 LOOPBACK = {"127.0.0.1", "::1"}
@@ -604,14 +609,35 @@ async def conversations(request: web.Request):
 async def conversation(request: web.Request):
     sid = item_id(request, "sid")
     result = await request.app["hermes"].request("GET", f"/api/sessions/{sid}/messages?inline_images=false")
+    if isinstance(result, dict):
+        # Says a reply is being written that /stream can show before Hermes saves it.
+        result["live"] = item_id(request, "sid", encode=False) in request.app["live"]
     return web.json_response(result)
+
+
+async def stream(request: web.Request):
+    turn = request.app["live"].get(item_id(request, "sid", encode=False))
+    if turn is None:
+        raise web.HTTPNotFound(text="No reply is being written here.")
+    response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    harden(request, response)
+    await response.prepare(request)
+    try:
+        await live.send(response, turn)
+    except ConnectionResetError:
+        pass  # the browser left; it reconnects or reads the transcript
+    return response
+
+
+def following(app: web.Application, text: str):
+    return lambda sid, events: live.follow(app["live"], sid, text, events)
 
 
 async def create_conversation(request: web.Request):
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
     since = time.time()
-    sid = await request.app["hermes"].send_message(text)
+    sid = await request.app["hermes"].send_message(text, follow=following(request.app, text))
     watch_reply(request.app, sid, since)
     return web.json_response({"session_id": sid}, status=201)
 
@@ -622,7 +648,7 @@ async def send_message(request: web.Request):
     text = body_text(data.get("text"), "Message", 16000)
     # The reply to watch for is written after this message is sent.
     since = time.time()
-    stored = await request.app["hermes"].send_message(text, sid)
+    stored = await request.app["hermes"].send_message(text, sid, follow=following(request.app, text))
     watch_reply(request.app, stored, since)
     return web.json_response({"session_id": stored})
 
@@ -729,6 +755,12 @@ async def startup(app: web.Application):
     app["watcher"] = asyncio.create_task(watch_replies(app))
 
 
+async def shutdown(app: web.Application):
+    # Ends open event streams, which would otherwise hold up a restart until their turns finish.
+    for turn in list(app["live"].values()):
+        turn.task.cancel()
+
+
 async def cleanup(app: web.Application):
     app["watcher"].cancel()
     await app["push_http"].close()
@@ -771,10 +803,11 @@ def create_app() -> web.Application:
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
-    app["watches"], app["presence"] = {}, {}
+    app["watches"], app["presence"], app["live"] = {}, {}, {}
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
     app.on_startup.append(startup)
+    app.on_shutdown.append(shutdown)
     app.on_cleanup.append(cleanup)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/me", me)
@@ -783,6 +816,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/conversations", conversations)
     app.router.add_post("/api/conversations", create_conversation)
     app.router.add_get("/api/conversations/{sid}", conversation)
+    app.router.add_get("/api/conversations/{sid}/stream", stream)
     app.router.add_post("/api/conversations/{sid}/messages", send_message)
     app.router.add_patch("/api/conversations/{sid}", rename_conversation)
     app.router.add_delete("/api/conversations/{sid}", delete_conversation)

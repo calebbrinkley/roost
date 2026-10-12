@@ -1,6 +1,7 @@
 """Exercise the loopback demo's owner and Hermes integration flows."""
 
 import asyncio
+import json
 import secrets
 import os
 import socket
@@ -80,6 +81,22 @@ async def checks():
 
         created = await request(client, "POST", "/api/conversations", 201, {"text": "Hello from the smoke check"})
         sid = created["session_id"]
+        # The reply streams while it is written: thoughts, then text, then the end.
+        assert (await request(client, "GET", f"/api/conversations/{sid}"))["live"] is True
+        streamed = {"thoughts": "", "text": ""}
+        async with client.get(BASE + f"/api/conversations/{sid}/stream") as response:
+            assert response.status == 200 and response.content_type == "text/event-stream"
+            async for line in response.content:
+                if line.startswith(b"data: "):
+                    event = json.loads(line[6:])
+                    if event.get("reset"):
+                        assert event["user"] == "Hello from the smoke check"
+                    for field in streamed:
+                        streamed[field] += event.get(field, "")
+                    if event.get("done"):
+                        break
+        assert streamed["thoughts"].startswith("The owner sent a message")
+        assert "local demo reply" in streamed["text"]
         for _ in range(20):
             await asyncio.sleep(0.2)
             transcript = await request(client, "GET", f"/api/conversations/{sid}")
@@ -148,7 +165,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():
