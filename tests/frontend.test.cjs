@@ -286,3 +286,48 @@ test('a conversation refresh started before a deletion cannot bring the row back
   assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['b']);
   assert.equal(f.run('state.conversationOffset'), 1);
 });
+
+test('a created Job appears and stays even when the next list read does not have it yet', async () => {
+  const f = fixture(); await tick();
+  f.run(`api = async (path, options = {}) => {
+      if (options.method === 'POST') return {id:'new', name:'Fresh', enabled:true};
+      if (path === '/jobs') return [];
+      return {runs:[]};
+    };`);
+  await f.run('saveJob({preventDefault() {}})');
+  assert.deepEqual(Array.from(f.run('state.jobs.map(job => job.id)')), ['new']);
+  assert.equal(f.run('state.selectedJob'), 'new');
+  await f.run('loadJobs()');
+  assert.deepEqual(Array.from(f.run('state.jobs.map(job => job.id)')), ['new']);
+});
+
+test('pausing a Job flips its switch from the saved job, not a stale list', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.jobs = [{id:'one', enabled:true}]; state.selectedJob = 'one';
+    api = async (path, options = {}) => {
+      if (path.endsWith('/pause')) return {id:'one', enabled:false};
+      if (path === '/jobs') return [{id:'one', enabled:true}];
+      return {runs:[]};
+    };`);
+  await f.run(`jobAction('one','pause')`);
+  assert.equal(f.run('jobPaused(currentJob())'), true);
+  assert.equal(f.run('state.jobBusy'), false);
+});
+
+test('Jobs share the sidebar search and + button with Messages', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.jobs = [{id:'a', name:'Morning briefing'}, {id:'b', name:'Weekly review'}]; loadJobs = async () => {};
+    globalThis.opened = 0; openJob = () => opened++;`);
+  f.run(`setSection('jobs')`);
+  assert.equal(f.get('sidebar-search').classList.contains('hidden'), false);
+  assert.equal(f.get('search').placeholder, 'Search jobs');
+  f.get('search').value = 'weekly'; f.get('search').events.input();
+  const text = n => (n.textContent || '') + (n.children?.map(text).join('') || '');
+  assert.match(text(f.get('sidebar-jobs-list')), /Weekly review/);
+  assert.doesNotMatch(text(f.get('sidebar-jobs-list')), /Morning briefing/);
+  f.get('sidebar-new').events.click();
+  assert.equal(f.run('opened'), 1);
+  f.run(`renderConversations = () => {}; setSection('messages')`);
+  assert.equal(f.get('search').value, '');
+  assert.equal(f.get('search').placeholder, 'Search conversations');
+});

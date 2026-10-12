@@ -39,9 +39,9 @@
         </div>
       </div>
       <div id="sidebar-search" class="search-wrap">
-        <label class="sr-only" for="search">Search conversations</label>
+        <label id="search-label" class="sr-only" for="search">Search conversations</label>
         <input id="search" type="search" placeholder="Search conversations" autocomplete="off">
-        <button id="new-conversation" class="icon-button desktop-only" type="button" aria-label="New conversation" title="New conversation">+</button>
+        <button id="sidebar-new" class="icon-button desktop-only" type="button" aria-label="New conversation" title="New conversation">+</button>
       </div>
       <div id="conversation-list" class="conversation-list" aria-label="Conversations"></div>
       <button id="more-conversations" class="more-button hidden" type="button">Load more</button>
@@ -75,7 +75,7 @@
         <header class="jobs-header">
           <button id="back-to-jobs" class="back-button mobile-only" type="button" aria-label="Back to Jobs">‹</button>
           <div class="jobs-heading"><strong id="job-detail-title">Jobs</strong><small id="job-detail-subtitle">Scheduled work</small></div>
-          <div class="jobs-actions"><button class="theme-toggle theme-icon-only mobile-only" type="button" data-theme-toggle></button><button id="new-job" class="icon-button desktop-only" type="button" aria-label="New job" title="New job">+</button></div>
+          <div class="jobs-actions"><button class="theme-toggle theme-icon-only mobile-only" type="button" data-theme-toggle></button></div>
         </header>
         <div id="job-detail" class="job-detail"></div>
         <div id="job-detail-actions" class="job-detail-actions hidden">
