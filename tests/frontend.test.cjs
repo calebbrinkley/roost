@@ -20,7 +20,7 @@ function fixture() {
   }
   const get = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   get('app').classList.add('hidden');
-  const document = { getElementById: get, createElement: node, createElementNS: node, createTextNode: text => ({textContent: text}),
+  const document = { getElementById: get, createElement: tag => Object.assign(node(), {tagName: String(tag).toUpperCase()}), createElementNS: node, createTextNode: text => ({textContent: text}),
     querySelectorAll: () => [], querySelector: () => get('main'), addEventListener() {} };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
@@ -459,4 +459,21 @@ test('Settings › Account signs this device out', async () => {
   assert.ok(f.run('calls').includes('/logout'));
   assert.equal(f.get('app').classList.contains('hidden'), true);
   assert.equal(f.get('login').classList.contains('hidden'), false);
+});
+
+test('table cells render italics, bold and code; code blocks stay literal', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.out = document.createElement('div');
+    addMarkdown(out, '| Task | State |\\n|---|---|\\n| *Backup* | **done** |\\n| \`rg\` | _waiting_ |\\n\\n\`\`\`\\ndef f(*args, **kwargs): return a * b * c\\n\`\`\`');`);
+  const tags = n => [n.tagName || '', ...(n.children || []).flatMap(tags)];
+  const find = (n, tag) => (n.tagName === tag ? [n] : []).concat(...(n.children || []).map(c => find(c, tag)));
+  const out = f.context.out;
+  const cells = find(out, 'TD');
+  assert.equal(find(cells[0], 'EM')[0].textContent, 'Backup');
+  assert.equal(find(cells[1], 'STRONG')[0].textContent, 'done');
+  assert.equal(find(cells[2], 'CODE')[0].textContent, 'rg');
+  assert.equal(find(cells[3], 'EM')[0].textContent, 'waiting');
+  const pre = find(out, 'PRE')[0];
+  assert.equal(pre.children[0].textContent, 'def f(*args, **kwargs): return a * b * c');
+  assert.equal(tags(pre).includes('EM'), false);
 });
