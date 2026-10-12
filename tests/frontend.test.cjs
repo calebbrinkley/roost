@@ -839,3 +839,26 @@ test('with the keyboard up the app fits the visible screen, so only the message 
   assert.equal(fit({height: 400, offsetTop: 200, scale: 2}), false, 'a pinch zoom is not the keyboard');
   assert.equal(fit({height: 800, offsetTop: 0, scale: 1}), false);
 });
+
+test('a tap that opens the keyboard focuses the message field lifted to the top, then puts it back', async () => {
+  const frames = [];
+  const f = fixture(); await tick();
+  Object.assign(f.context.window, {visualViewport: {}, matchMedia: () => ({matches: true}), requestAnimationFrame: fn => frames.push(fn)});
+  const field = f.get('message'), seen = [];
+  field.value = 'draft';
+  field.getBoundingClientRect = () => ({top: field.style.transform ? 0 : 700});
+  field.focus = options => { seen.push({transform: field.style.transform, opacity: field.style.opacity, options}); f.context.document.activeElement = field; };
+  field.setSelectionRange = (from, to) => seen.push([from, to]);
+  let prevented = 0;
+  const tap = (x, y) => { field.events.touchstart({touches: [{clientX: 0, clientY: 0}]});
+    field.events.touchend({changedTouches: [{clientX: x, clientY: y}], preventDefault() { prevented++; }}); };
+  tap(30, 0);
+  assert.equal(prevented, 0, 'a drag does not focus');
+  tap(2, 3);
+  assert.equal(JSON.stringify(seen[0]), JSON.stringify({transform: 'translateY(-700px)', opacity: '0', options: {preventScroll: true}}));
+  assert.equal(JSON.stringify(seen[1]), '[5,5]', 'the caret goes to the end of a draft');
+  while (frames.length) frames.shift()();
+  assert.equal(field.style.transform, ''); assert.equal(field.style.opacity, '');
+  tap(2, 3);
+  assert.equal(prevented, 1, 'once focused, taps place the caret as usual');
+});
