@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from aiohttp import web
+from yarl import URL
 
 from .auth import Sessions, verify_password
 from .hermes import Hermes, HermesError
@@ -40,11 +41,11 @@ async def json_body(request: web.Request) -> dict:
     return value
 
 
-def item_id(request: web.Request, name: str) -> str:
+def item_id(request: web.Request, name: str, *, encode: bool = True) -> str:
     value = request.match_info[name]
-    if not ID.fullmatch(value):
+    if not ID.fullmatch(value) or value in {".", ".."}:
         raise bad("Invalid identifier.")
-    return quote(value, safe="")
+    return quote(value, safe="") if encode else value
 
 
 def secured_cookie(response: web.StreamResponse, request: web.Request, token: str) -> None:
@@ -101,25 +102,34 @@ async def login(request: web.Request):
         failures[key] = [t for t in failures[key] if now - t < FAILURE_WINDOW]
         if not failures[key]:
             del failures[key]
-    # One device's typos lock only that device; the overall ceiling still bounds guessing from anywhere.
-    if len(failures.get(address, [])) >= DEVICE_FAILURES or sum(map(len, failures.values())) >= ALL_FAILURES:
+    # Reserve capacity before awaiting body/file reads or password hashing. Concurrent requests
+    # must share both limits, and only bounded password checks may run in worker threads.
+    inflight = request.app["login_inflight"]
+    if (len(failures.get(address, [])) + inflight.get(address, 0) >= DEVICE_FAILURES or
+            sum(map(len, failures.values())) + sum(inflight.values()) >= ALL_FAILURES):
         raise web.HTTPTooManyRequests(text="Too many attempts. Try again in a few minutes.")
-    data = await json_body(request)
-    password = data.get("password")
-    if not isinstance(password, str) or len(password) > 1024:
-        raise bad("Password is required.")
-    # Read on every attempt so `roost set-password` takes effect without a restart.
+    inflight[address] = inflight.get(address, 0) + 1
     try:
-        encoded = await asyncio.to_thread(request.app["password_file"].read_text, encoding="utf-8")
-    except OSError:
-        raise web.HTTPServiceUnavailable(text="Roost has no password yet. Run `python -m roost set-password`.") from None
-    if not await asyncio.to_thread(verify_password, password, encoded):
-        failures.setdefault(address, []).append(now)
-        raise web.HTTPUnauthorized(text="Incorrect password.")
-    failures.pop(address, None)
-    response = web.json_response({"signed_in": True, "demo": request.app["demo"]})
-    secured_cookie(response, request, request.app["sessions"].issue())
-    return response
+        data = await json_body(request)
+        password = data.get("password")
+        if not isinstance(password, str) or len(password) > 1024:
+            raise bad("Password is required.")
+        # Read on every attempt so `roost set-password` takes effect without a restart.
+        try:
+            encoded = await asyncio.to_thread(request.app["password_file"].read_text, encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise web.HTTPServiceUnavailable(text="Roost has no password yet. Run `python -m roost set-password`.") from None
+        if not await asyncio.to_thread(verify_password, password, encoded):
+            failures.setdefault(address, []).append(time.monotonic())
+            raise web.HTTPUnauthorized(text="Incorrect password.")
+        failures.pop(address, None)
+        response = web.json_response({"signed_in": True, "demo": request.app["demo"]})
+        secured_cookie(response, request, request.app["sessions"].issue())
+        return response
+    finally:
+        inflight[address] -= 1
+        if not inflight[address]:
+            del inflight[address]
 
 
 async def logout(request: web.Request):
@@ -140,7 +150,7 @@ async def health(request: web.Request):
 
 async def conversations(request: web.Request):
     page = request.query.get("offset", "0")
-    if not page.isdecimal() or int(page) > 100000:
+    if not re.fullmatch(r"[0-9]{1,6}", page) or int(page) > 100000:
         raise bad("Invalid page offset.")
     result = await request.app["hermes"].request("GET", f"/api/sessions?limit=100&order=recent&exclude_sources=cron&offset={page}")
     return web.json_response(result)
@@ -160,7 +170,7 @@ async def create_conversation(request: web.Request):
 
 
 async def send_message(request: web.Request):
-    sid = item_id(request, "sid")
+    sid = item_id(request, "sid", encode=False)
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
     stored = await request.app["hermes"].send_message(text, sid)
@@ -185,7 +195,7 @@ async def rename_conversation(request: web.Request):
 async def delete_conversation(request: web.Request):
     sid = item_id(request, "sid")
     data = await json_body(request)
-    if data != {"confirm": True}:
+    if set(data) != {"confirm"} or data["confirm"] is not True:
         raise bad("Confirm conversation deletion.")
     result = await request.app["hermes"].request("DELETE", f"/api/sessions/{sid}")
     return web.json_response(result)
@@ -248,7 +258,7 @@ async def job_action(request: web.Request):
 async def delete_job(request: web.Request):
     jid = item_id(request, "jid")
     data = await json_body(request)
-    if data != {"confirm": True}:
+    if set(data) != {"confirm"} or data["confirm"] is not True:
         raise bad("Confirm job deletion.")
     result = await request.app["hermes"].request("DELETE", f"/api/cron/jobs/{jid}")
     return web.json_response(result)
@@ -274,8 +284,12 @@ async def cleanup(app: web.Application):
 def create_app() -> web.Application:
     origin = os.environ["ROOST_PUBLIC_ORIGIN"].rstrip("/")
     parsed = urlsplit(origin)
-    if (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"})) or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or not parsed.netloc:
+    if (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})) or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or not parsed.hostname or any(char.isspace() for char in origin):
         raise ValueError("ROOST_PUBLIC_ORIGIN must be HTTPS or a local HTTP origin.")
+    try:
+        origin = str(URL(origin).origin())
+    except ValueError:
+        raise ValueError("ROOST_PUBLIC_ORIGIN has an invalid port.") from None
     state = Path(os.environ.get("ROOST_STATE_DIR", "./.roost-state"))
     password_file = state / "password.hash"
     password_file.read_text(encoding="utf-8")  # fail at startup, not at first sign-in, if it is missing
@@ -291,6 +305,7 @@ def create_app() -> web.Application:
     app["secure_cookie"] = origin.startswith("https://")
     app["password_file"] = password_file
     app["login_attempts"] = {}
+    app["login_inflight"] = {}
     app["sessions"] = Sessions(state / "sessions.sqlite3")
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))

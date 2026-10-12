@@ -94,7 +94,7 @@ button:disabled { cursor: default; }
 .job-status-dot.ok { background: var(--good); }.job-status-dot.warn { background: var(--warn); }
 
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--frame); }
-.notice { padding: 10px 16px; color: var(--accent-text); background: var(--chip); border-bottom: 1px solid var(--line); font-size: 13px; }
+.notice { pointer-events: none; position: fixed; z-index: 20; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 24px); border-radius: 10px; box-shadow: 0 4px 20px #0003; padding: 10px 16px; color: var(--accent-text); background: var(--chip); border-bottom: 1px solid var(--line); font-size: 13px; }
 .messages-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chat-header { height: var(--desktop-header-height); flex: 0 0 var(--desktop-header-height); display: flex; align-items: center; gap: 7px; padding: 0 20px; border-bottom: 1px solid var(--line); }
 .chat-avatar { width: 34px; height: 34px; display: none; font-size: 13px; }
@@ -217,7 +217,7 @@ button:disabled { cursor: default; }
 @media (max-width: 700px) {
   .desktop-only { display: none !important; }.mobile-only { display: flex; }
   .theme-icon-only.mobile-only { display: grid; }
-  .shell { height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: relative;
+  .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: relative;
            padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
   /* iOS zooms into any field under 16 px and stays zoomed, pushing the page past the right edge. */
   .search-wrap input, .composer textarea, .login-card input, .job-dialog input, .job-dialog textarea { font-size: 16px; }
@@ -255,7 +255,7 @@ button:disabled { cursor: default; }
   .chat-header { height: 66px; flex-basis: 66px; display: grid; grid-template-columns: 30px 34px minmax(0,1fr) auto; gap: 8px; padding: 3px 12px; }
   .back-button { align-items: center; justify-content: center; width: 30px; height: 36px; padding: 0; border: 0; background: transparent; color: var(--accent-text); font-size: 38px; }
   .chat-avatar { display: grid; }
-  .chat-heading { display: grid; gap: 0; }
+  .chat-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
   .chat-heading strong { font-size: 16px; }
   .chat-heading small { font-size: 13px; }
   .chat-heading small::before { content: ""; }
@@ -268,7 +268,7 @@ button:disabled { cursor: default; }
   .shell { --under-line: 17px; }
   .composer { padding: 8px 12px calc(14px + env(safe-area-inset-bottom)); }
   .jobs-header { height: 66px; flex-basis: 66px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 8px; padding: 3px 12px; }
-  .jobs-heading { display: grid; gap: 0; }
+  .jobs-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
   .jobs-heading strong { font-size: 16px; }
   .jobs-heading small { font-size: 13px; }
   .job-report, .job-prompt { font-size: 17px; }
