@@ -2,7 +2,7 @@
   <img src="assets/roost-logo.png" alt="roost" width="240">
 </p>
 
-<p align="center"><strong>A private home for your Hermes agent.</strong><br>Conversations, voice messages, and scheduled work in one clean web app.</p>
+<p align="center"><strong>A private home for your Hermes agent.</strong><br>Conversations and scheduled work in one modern, simple app.</p>
 
 <p align="center">
   <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml"><img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks"></a>
@@ -50,7 +50,7 @@ python3 -m venv .venv
 
 Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**.
 
-Stop with Ctrl+C. Demo state lives in the Git-ignored `.roost-demo-state/` directory. The demo previews the interface; it does not validate a live Hermes connection.
+Demo state lives in the Git-ignored `.roost-demo-state/` directory.
 
 ## Connect your agent
 
@@ -58,8 +58,8 @@ Follow the [setup guide](docs/setup.md) to connect a running Hermes dashboard wi
 
 1. Install Roost and set its own owner password.
 2. Store the Hermes dashboard password in a private file outside the checkout and configure the connection.
-3. Run Roost behind a private HTTPS proxy for access from other devices.
-4. Optionally install the bundled Hermes plugin for Job reports and agent-initiated messages.
+3. Run Roost behind a private HTTPS proxy (Tailscale is recommended) for access from other devices.
+4. Optionally, install the bundled Hermes plugin for Job reports and agent-initiated messages.
 
 Roost binds to loopback by default. Keep remote access private: signing in lets the owner submit work to the agent. Roost does not start Hermes or load models; Hermes handles agent execution and model access.
 
@@ -67,13 +67,13 @@ The setup guide covers configuration, passkeys, notification delivery, and servi
 
 ## Use it on your phone
 
-Open your private HTTPS Roost address in the browser and add it to your Home Screen for an app-style experience.
+Open your private HTTPS Roost address in the browser and add it to your Home Screen for an app-style experience on iOS.
 
-On iPhone and iPad, reply notifications require a Home Screen installation on **iOS/iPadOS 16.4+**. Voice, push delivery, and passkeys have not yet been verified on physical devices. Review the [platform limitations](docs/compatibility.md) before relying on them.
+On iPhone and iPad, reply notifications require a Home Screen installation on **iOS/iPadOS 16.4+**. Voice compatibility has not yet been verified on physical devices. Review the [platform limitations](docs/compatibility.md) before relying on them.
 
 ## Privacy and access
 
-Roost has its own sign-in and keeps the Hermes dashboard credential on the server. The browser uses Roost's selected routes rather than receiving the dashboard password or inference keys. Sessions are revocable and stored server-side; sign-in is rate limited.
+Roost has its own sign-in and keeps the Hermes dashboard credential on the server. The browser uses Roost's selected routes rather than receiving the dashboard password or inference keys. Sessions are revocable and stored server-side, and sign-in is rate limited.
 
 Keep credentials, state, and conversation data outside version control. Use a private HTTPS front door for remote access, and follow [SECURITY.md](SECURITY.md) for vulnerability reports or accidental disclosure.
 
