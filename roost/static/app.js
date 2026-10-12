@@ -298,6 +298,10 @@ async function deleteConversation() {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     if (epoch !== state.authEpoch) return;
     if (state.pending?.id === id) state.pending = null;
+    // The server's rows shift down by one, so the next page starts one row earlier. A load
+    // started before the deletion could bring the row back or reuse the old offset: drop it.
+    if (state.conversations.some((row) => conversationId(row) === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
+    state.conversationRequest = (state.conversationRequest || 0) + 1;
     state.conversations = state.conversations.filter((row) => conversationId(row) !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
     if (state.current === id) { state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
@@ -530,10 +534,13 @@ async function selectConversation(id, source) {
 
 async function loadMessages(id = state.current) {
   if (!id) return;
-  const epoch = state.authEpoch;
+  const epoch = state.authEpoch, view = state.viewEpoch;
   const serial = state.messageRequest = (state.messageRequest || 0) + 1;
   const data = await api(`/conversations/${encodeURIComponent(id)}`);
-  if (epoch === state.authEpoch && state.current === id && serial === state.messageRequest) {
+  // Compare with the newest response applied, not the newest request issued: polls slower
+  // than the interval would otherwise discard every reply and freeze the transcript.
+  if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && serial > (state.messageApplied || 0)) {
+    state.messageApplied = serial;
     renderMessages(Array.isArray(data.messages) ? data.messages : []);
   }
 }
@@ -805,6 +812,8 @@ async function deleteJob(job) {
 
 function openJob(job = null) {
   if (state.jobBusy) return;
+  // A save cut short by sign-out skips its cleanup, so the form's buttons start enabled here.
+  for (const button of $("job-form").querySelectorAll("button")) button.disabled = false;
   state.job = job;
   $("job-dialog-title").textContent = job ? "Edit job" : "New job";
   $("job-name").value = job ? jobValue(job, "name") : "";

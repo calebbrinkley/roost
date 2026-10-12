@@ -203,3 +203,86 @@ test('malformed transcript and Job rows do not crash the remaining valid content
   assert.match(text(f.get('sidebar-jobs-list')),/valid job/);
   assert.match(text(f.get('job-detail')),/valid run/);
 });
+
+test('transcript keeps updating when every poll overlaps the next one', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
+    api = () => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+  const loads = [f.run('loadMessages()')];
+  for (let i = 0; i < 5; i++) {
+    loads.push(f.run('loadMessages()'));
+    f.run(`requests[${i}]({messages: [{content:'reply ${i}'}]});`); await loads[i];
+  }
+  assert.deepEqual(Array.from(f.run('rendered')), ['reply 0','reply 1','reply 2','reply 3','reply 4']);
+  f.run(`requests[5]({messages: [{content:'reply 5'}]});`); await loads[5];
+  assert.equal(f.run('rendered.at(-1)'), 'reply 5');
+});
+
+test('a transcript response from an earlier view or sign-in is discarded', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
+    api = () => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+  const beforeSwitch = f.run('loadMessages()');
+  f.run(`state.viewEpoch++; state.current = 'two'; state.viewEpoch++; state.current = 'one';`);
+  f.run(`requests[0]({messages: [{content:'old view'}]});`); await beforeSwitch;
+  const beforeSignOut = f.run('loadMessages()');
+  f.run(`signedOut(); state.current = 'one'; requests[1]({messages: [{content:'old session'}]});`); await beforeSignOut;
+  assert.equal(f.run('rendered.length'), 0);
+});
+
+test('session expiry during a Job save leaves the reopened form usable', async () => {
+  const f = fixture(); await tick();
+  const button = f.get('save-job-button'); f.get('job-form').querySelectorAll = () => [button];
+  f.context.fetch = async () => ({ok:false, status:401, json: async () => ({error:'expired'})});
+  await f.run('saveJob({preventDefault() {}})');
+  assert.equal(f.get('login').classList.contains('hidden'), false);
+  f.context.fetch = async () => ({ok:true, json: async () => ({})});
+  f.run('openJob()');
+  assert.equal(f.get('job-dialog').open, true);
+  assert.equal(button.disabled, false);
+});
+
+test('a late Job save from an old session cannot unlock a save in the new one', async () => {
+  const f = fixture(); await tick();
+  const button = f.get('save-job-button'); f.get('job-form').querySelectorAll = () => [button];
+  f.context.fetch = () => new Promise(resolve => { f.context.finishOld = resolve; });
+  const old = f.run('saveJob({preventDefault() {}})');
+  f.run('signedOut(); openJob();');
+  f.context.fetch = () => new Promise(resolve => { f.context.finishNew = resolve; });
+  const current = f.run('saveJob({preventDefault() {}})');
+  assert.equal(button.disabled, true);
+  f.context.finishOld({ok:true, json: async () => ({id:'old'})}); await old;
+  assert.equal(button.disabled, true); assert.equal(f.run('state.jobBusy'), true);
+  f.run(`loadJobs = async () => {}; selectJob = () => {};`);
+  f.context.finishNew({ok:true, json: async () => ({id:'new'})}); await current;
+  assert.equal(button.disabled, false);
+});
+
+test('Load more after deleting a loaded conversation skips nothing', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.server = ['a','b','c','d'];
+    api = async (path, options = {}) => {
+      if (options.method === 'DELETE') { server = server.filter(id => !path.endsWith('/' + id)); return {}; }
+      const offset = Number(path.split('offset=')[1]);
+      return {sessions: server.slice(offset, offset + 2).map(id => ({id})), total: server.length};
+    };
+    renderConversations = () => {};`);
+  await f.run('loadConversations()');
+  f.run(`state.sheetItem = state.conversations[0];`);
+  await f.run('deleteConversation()');
+  await f.run('loadConversations(true)');
+  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['b','c','d']);
+  assert.equal(f.run('state.conversationsMore'), false);
+});
+
+test('a conversation refresh started before a deletion cannot bring the row back', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.conversations = [{id:'a'},{id:'b'}]; state.conversationOffset = 2; globalThis.pending = [];
+    api = (path, options = {}) => options.method === 'DELETE' ? Promise.resolve({}) : new Promise(resolve => pending.push(resolve));
+    renderConversations = () => {};`);
+  const refresh = f.run('loadConversations()');
+  f.run(`state.sheetItem = {id:'a'};`); await f.run('deleteConversation()');
+  f.run(`pending[0]({sessions:[{id:'a'},{id:'b'}], total:4});`); await refresh;
+  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['b']);
+  assert.equal(f.run('state.conversationOffset'), 1);
+});
