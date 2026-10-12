@@ -1930,43 +1930,4 @@ navigator.serviceWorker?.addEventListener("message", (event) => {
   if (typeof id === "string" && !$("app").classList.contains("hidden")) { setSection("messages"); selectConversation(id); }
 });
 window.addEventListener("online", () => { boot.delay = 2000; start(); });
-
-// iOS doesn't resize the page for the on-screen keyboard; it slides the whole page up to keep the
-// field in view. While the keyboard is up, fit the app to the visible part of the screen instead.
-// Pinch zoom also shrinks the visible part, so a zoomed page is left alone.
-function fitViewport() {
-  const view = window.visualViewport;
-  const open = Boolean(view) && Math.abs(view.scale - 1) < 0.01 && document.documentElement.clientHeight - view.height > 100;
-  $("app").classList.toggle("keyboard-open", open);
-  if (open) {
-    $("app").style.setProperty("--keyboard-top", `${view.offsetTop}px`);
-    $("app").style.setProperty("--keyboard-height", `${view.height}px`);
-  }
-}
-window.visualViewport?.addEventListener("resize", fitViewport);
-window.visualViewport?.addEventListener("scroll", fitViewport);
-
-// Even so, iOS slides the page up as the keyboard opens if the keyboard would cover the field, judging
-// by where the field was when it took focus. So a tap that opens the keyboard focuses the field while it
-// is lifted, unseen, to the top of the screen for one frame; nothing needs revealing, nothing slides, and
-// fitViewport then sets the bar above the keyboard.
-let messageTouch = null;
-$("message").addEventListener("touchstart", (event) => {
-  const touch = event.touches[0];
-  messageTouch = touch ? { x: touch.clientX, y: touch.clientY } : null;
-}, { passive: true });
-$("message").addEventListener("touchend", (event) => {
-  const field = $("message"), touch = event.changedTouches[0], start = messageTouch;
-  messageTouch = null;
-  if (document.activeElement === field || !window.visualViewport || !window.matchMedia("(max-width: 700px)").matches) return;
-  if (!touch || !start || Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10) return;  // a drag, not a tap
-  event.preventDefault();
-  field.style.transform = `translateY(${-field.getBoundingClientRect().top}px)`;
-  field.style.opacity = "0";
-  field.getBoundingClientRect();  // lay out the lifted field before it takes focus
-  field.focus({ preventScroll: true });
-  field.setSelectionRange(field.value.length, field.value.length);
-  const frame = window.requestAnimationFrame?.bind(window) || ((callback) => setTimeout(callback, 16));
-  frame(() => frame(() => { field.style.transform = ""; field.style.opacity = ""; }));
-});
 start();
