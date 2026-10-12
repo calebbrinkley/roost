@@ -1,7 +1,7 @@
 "use strict";
 
-// Roost's service worker: it shows reply notifications and opens the conversation when one is
-// tapped. It caches nothing; every page and API request still goes to Roost.
+// Roost's service worker: it shows notifications and opens what one is about when it is tapped.
+// It caches nothing; every page and API request still goes to Roost.
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -22,12 +22,12 @@ self.addEventListener("notificationclick", (event) => {
   // Only Roost's own pages: a notification can never send the app elsewhere.
   let url = new URL(event.notification.data?.url || "/", self.location.origin);
   if (url.origin !== self.location.origin) url = new URL("/", self.location.origin);
-  const conversation = url.searchParams.get("c");
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
     if (open) {
-      if (conversation) open.postMessage({ open: conversation });
+      // A conversation (?c=), a job (?j=) or a message the agent sent (?d=).
+      if (url.search) open.postMessage({ link: url.search });
       return open.focus();
     }
     return self.clients.openWindow(url.href);

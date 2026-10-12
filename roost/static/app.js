@@ -113,11 +113,11 @@ function signedOut() {
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
-                         push: null, removingPush: null });
+                         push: null, removingPush: null, hermesLink: null, rotatingToken: false });
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -182,9 +182,36 @@ async function signedIn() {
   setSection("messages");
   refreshIdentity();
   try { await loadConversations(); } catch (error) { notice(error.message); }
-  // A tapped notification opens Roost at /?c=<conversation>.
-  const opened = new URLSearchParams(globalThis.location?.search || "").get("c");
-  if (opened) { history.replaceState(null, "", "/"); selectConversation(opened); }
+  // A tapped notification opens Roost at /?c=<conversation>, /?j=<job> or /?d=<delivered message>.
+  const search = globalThis.location?.search || "";
+  if (search) { history.replaceState(null, "", "/"); openLink(search); }
+}
+
+function openLink(search) {
+  const link = new URLSearchParams(search), conversation = link.get("c"), job = link.get("j"), delivery = link.get("d");
+  if (conversation) { setSection("messages"); selectConversation(conversation); }
+  else if (job) showJob(job);
+  else if (delivery) openDelivery(delivery);
+}
+
+async function showJob(id) {
+  setSection("jobs");
+  try { await loadJobs(); } catch (error) { notice(error.message); return; }
+  if (state.jobs.some((job) => (job.id || job.job_id) === id)) selectJob(id);
+  else notice("That job no longer exists.");
+}
+
+// A message the agent sent on its own, kept by Roost (Hermes has no transcript of it).
+async function openDelivery(id) {
+  const epoch = state.authEpoch;
+  try {
+    const item = await api("/deliveries/" + encodeURIComponent(id));
+    if (epoch !== state.authEpoch) return;
+    $("delivery-title").textContent = item.title || agent();
+    $("delivery-time").textContent = dateTimeLabel(item.created);
+    const body = $("delivery-text"); body.replaceChildren(); addMarkdown(body, String(item.text || ""));
+    if (!$("delivery-sheet").open) $("delivery-sheet").showModal();
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
 }
 
 // The agent's name and the synced accent, as the signed-in server sees them.
@@ -1177,7 +1204,7 @@ async function saveJob(event) {
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
           ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Reply alerts on your devices"],
+          ["service", "Service", `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
@@ -1204,7 +1231,7 @@ function selectSettingsGroup(id) {
   if (id === "agent") loadSoul();
   if (id === "about") loadAbout();
   if (id === "account") loadPasskeys();
-  if (id === "notifications") loadPush();
+  if (id === "notifications") { loadPush(); loadHermesLink(); }
 }
 
 function renderSettings() {
@@ -1461,6 +1488,10 @@ function dateLabel(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zone() });
 }
 
+function dateTimeLabel(seconds) {
+  return new Date(seconds * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", ...zone() });
+}
+
 function renderPasskeys(detail) {
   const section = settingsSection(detail, "Passkeys",
     "Sign in with Face ID, Touch ID or your device’s PIN instead of your password. Your password keeps working.");
@@ -1603,6 +1634,7 @@ function renderNotifications(detail) {
     else actions.append(settingsButton("primary", "Turn on", enablePush));
     section.append(actions);
   }
+  renderHermesLink(detail);
   if (!state.push.devices.length) return;
   const devices = settingsSection(detail, "Devices", "Every device that gets Roost’s notifications.");
   const list = el("ul", "passkey-list");
@@ -1618,6 +1650,48 @@ function renderNotifications(detail) {
     list.append(item);
   }
   devices.append(list);
+}
+
+async function loadHermesLink() {
+  const epoch = state.authEpoch;
+  try {
+    const data = await api("/hermes");
+    if (epoch !== state.authEpoch) return;
+    state.hermesLink = data;
+    if (state.settingsGroup === "notifications") renderSettings();
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+}
+
+// Job reports and messages the agent starts reach Roost through a plugin installed in Hermes.
+function renderHermesLink(detail) {
+  const link = state.hermesLink;
+  const section = settingsSection(detail, "Job reports from " + agent(),
+    `Install Roost’s plugin in Hermes to get ${agent()}’s job reports and the messages it sends on its own here, with a notification.`);
+  if (!link) { section.append(el("p", "", "Loading…")); return; }
+  section.append(el("p", "", link.last_delivery ? "Last report received " + dateTimeLabel(link.last_delivery) + "." : "Nothing received from Hermes yet."));
+  const steps = el("ol", "setup-steps");
+  const download = el("a", "", "Download the plugin"); download.href = "/api/hermes/plugin.zip"; download.setAttribute("download", "");
+  const first = el("li"); first.append(download, " and unzip it into Hermes’s plugins folder, so it becomes ", el("code", "", "$HERMES_HOME/plugins/roost"), ".");
+  const second = el("li"); second.append("Enable it: ", el("code", "", "hermes plugins enable roost"), ".");
+  const third = el("li"); third.append("Add these lines to Hermes’s ", el("code", "", ".env"), ". Use the address Hermes reaches Roost at if it differs.");
+  third.append(el("pre", "setup-block", `ROOST_URL=${link.url}\nROOST_DELIVERY_TOKEN=${link.token}\nROOST_HOME_CHANNEL=roost`));
+  const fourth = el("li"); fourth.append("Restart Hermes’s gateway. Then set a job’s Deliver to ", el("code", "", "roost"), ".");
+  steps.append(first, second, third, fourth);
+  section.append(steps);
+  const confirming = state.rotatingToken;
+  const rotate = settingsButton("secondary" + (confirming ? " confirming" : ""), confirming ? "Confirm new token" : "New token",
+    () => confirming ? rotateDeliveryToken() : (state.rotatingToken = true, renderSettings()));
+  const actions = el("div", "settings-actions"); actions.append(rotate);
+  section.append(actions);
+}
+
+function rotateDeliveryToken() {
+  return withSettingsBusy(async (epoch) => {
+    const data = await api("/hermes/token", { method: "POST", body: JSON.stringify({ confirm: true }) });
+    if (epoch !== state.authEpoch) return;
+    state.hermesLink = data; state.rotatingToken = false;
+    notice("New token made. Update ROOST_DELIVERY_TOKEN in Hermes; the old one no longer works.");
+  });
 }
 
 function enablePush() {
@@ -1978,8 +2052,10 @@ document.addEventListener("visibilitychange", () => { reportPresence(); if (docu
 setInterval(reportPresence, 15000);
 // A notification tapped while Roost is already open.
 navigator.serviceWorker?.addEventListener("message", (event) => {
-  const id = event.data?.open;
-  if (typeof id === "string" && !$("app").classList.contains("hidden")) { setSection("messages"); selectConversation(id); }
+  if ($("app").classList.contains("hidden")) return;
+  if (typeof event.data?.link === "string") openLink(event.data.link);
+  else if (typeof event.data?.open === "string") openLink("?c=" + encodeURIComponent(event.data.open));
 });
+$("delivery-close").addEventListener("click", () => $("delivery-sheet").close());
 window.addEventListener("online", () => { boot.delay = 2000; start(); });
 start();
