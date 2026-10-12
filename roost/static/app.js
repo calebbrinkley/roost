@@ -1117,8 +1117,9 @@ function renderAbout(detail) {
     ["Uptime", formatDuration(stats.uptime_seconds)],
     ["CPU", (stats.cpu_percent ?? 0) + "%", "of one core"],
     ["Memory", formatBytes(stats.memory_bytes), stats.memory_limit_bytes ? "of " + formatBytes(stats.memory_limit_bytes) : ""],
-    ["Roost data", formatBytes(stats.state_bytes), "sessions and settings"],
-    ["Disk", formatBytes(stats.disk_total_bytes - stats.disk_free_bytes), "used of " + formatBytes(stats.disk_total_bytes)]]));
+    ["Roost on disk", formatBytes((stats.app_bytes || 0) + (stats.state_bytes || 0)),
+     "app " + formatBytes(stats.app_bytes) + " · data " + formatBytes(stats.state_bytes)],
+    ["Free space", formatBytes(stats.disk_free_bytes), "of " + formatBytes(stats.disk_total_bytes) + " on the shared drive"]]));
   live.append(el("p", "", "Updated " + clockTime(about.at)));
   const hermes = about.hermes;
   const hermesSection = settingsSection(detail, agent() + " (Hermes)", null);
@@ -1130,7 +1131,7 @@ function renderAbout(detail) {
   const credits = settingsSection(detail, "Credits", null);
   const list = el("ul", "credits");
   for (const [text, href] of [
-    ["Roost by threeswept, MIT License", "https://github.com/calebbrinkley/roost"],
+    ["Roost by calebbrinkley, MIT License", "https://github.com/calebbrinkley/roost"],
     ["Hermes Agent by Nous Research", "https://github.com/NousResearch/hermes-agent"],
     ["Space Grotesk typeface by the Space Grotesk Project Authors, SIL Open Font License 1.1", "https://github.com/floriankarsten/space-grotesk"],
     ["aiohttp by the aio-libs contributors, Apache License 2.0", "https://github.com/aio-libs/aiohttp"]]) {

@@ -352,7 +352,10 @@ def process_stats(app: web.Application) -> dict:
         "memory_bytes": read_number("/sys/fs/cgroup/memory.current") or rss,
         "memory_limit_bytes": read_number("/sys/fs/cgroup/memory.max"),
         "process_memory_bytes": rss,
+        # Roost's own footprint: its code and assets, plus its data (sessions and settings).
+        "app_bytes": directory_bytes(Path(__file__).parent),
         "state_bytes": directory_bytes(app["state_dir"]),
+        # The whole volume the data lives on, which other services share; only its free space is shown.
         "disk_total_bytes": disk.f_frsize * disk.f_blocks,
         "disk_free_bytes": disk.f_frsize * disk.f_bavail,
     }
