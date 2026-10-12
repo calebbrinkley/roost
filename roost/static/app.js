@@ -480,6 +480,13 @@ function addInline(parent, value) {
   });
 }
 
+// Table cells take the same bold, code and italics as paragraphs. Code blocks stay literal.
+function tableCell(tag, text) {
+  const cell = el(tag);
+  addInline(cell, text.trim());
+  return cell;
+}
+
 function addPlainMarkdown(parent, value) {
   const lines = value.split("\n");
   for (let i = 0; i < lines.length;) {
@@ -494,11 +501,11 @@ function addPlainMarkdown(parent, value) {
     if (lines[i].includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1])) {
       const table = el("table");
       const head = el("tr");
-      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(el("th", "", cell.trim()));
+      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(tableCell("th", cell));
       table.append(head); i += 2;
       while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
         const row = el("tr");
-        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(el("td", "", cell.trim()));
+        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(tableCell("td", cell));
         table.append(row); i++;
       }
       parent.append(table); continue;
