@@ -24,7 +24,7 @@ If `main` moves while a pull request is open, merge current `origin/main` into t
 
 ## Validation
 
-Install Roost in a Python 3.11+ virtual environment, then run:
+Install Roost in a Python 3.11+ virtual environment and have Node.js 18+ available for the browser-logic regressions, then run:
 
 ```bash
 make PYTHON=.venv/bin/python check
@@ -36,7 +36,9 @@ For server or interface changes, also run:
 make PYTHON=.venv/bin/python smoke
 ```
 
-`make check` scans candidate files and reachable history, checks documentation links, and runs unit tests. The smoke check exercises authentication, origin checks, sample conversations and Jobs against a local stand-in. Neither proves behavior against a live Hermes agent or on a physical phone.
+The JavaScript tests use Node’s built-in test runner and synthetic DOM objects; no browser package is required. Override `NODE` when Node is outside your PATH.
+
+`make check` scans candidate files and reachable history, checks documentation links, and runs unit tests. The smoke check reserves ephemeral loopback ports and uses temporary state, so it can run alongside an existing demo. It exercises authentication, origin checks, sample conversations and Jobs against a local stand-in. Neither proves behavior against a live Hermes agent or on a physical phone.
 
 Describe the validation performed and any remaining device or host checks in the pull request. Do not attach live logs, credentials or transcripts.
 

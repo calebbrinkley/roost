@@ -1,8 +1,9 @@
 PYTHON ?= python3
+NODE ?= node
 
-.PHONY: check check-python check-public check-history check-scaffold hooks test smoke
+.PHONY: check check-python check-public check-history check-scaffold hooks test test-ui smoke
 
-check: check-python check-public check-history check-scaffold test
+check: check-python check-public check-history check-scaffold test test-ui
 
 check-python:
 	$(PYTHON) -c 'import sys; sys.exit("Python 3.11+ is required") if sys.version_info < (3, 11) else None'
@@ -24,6 +25,9 @@ check-scaffold:
 test:
 	$(PYTHON) -m unittest discover -s tests -v
 
+test-ui:
+	$(NODE) --test tests/frontend.test.cjs
+
 # The demo and its smoke check need aiohttp: run with a venv that has Roost installed.
 smoke:
-	$(PYTHON) dev/demo.py > /dev/null 2>&1 & pid=$$!; sleep 3; $(PYTHON) dev/smoke.py; status=$$?; kill $$pid; exit $$status
+	$(PYTHON) dev/smoke.py

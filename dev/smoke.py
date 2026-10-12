@@ -2,9 +2,16 @@
 
 import asyncio
 import secrets
+import os
+import socket
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
-from aiohttp import ClientSession, CookieJar
+from aiohttp import ClientSession, CookieJar, web
+
+from demo import mock_hermes, DEMO_PASSWORD, HERMES_PASSWORD
+from roost.server import create_app
 
 from roost.auth import make_password_hash
 
@@ -47,7 +54,7 @@ async def sign_in_checks():
         PASSWORD_FILE.write_text(original, encoding="utf-8")
 
 
-async def main():
+async def checks():
     async with ClientSession(cookie_jar=CookieJar(unsafe=True)) as client:
         async with client.get(BASE + "/") as response:
             assert response.status == 200
@@ -77,8 +84,20 @@ async def main():
         assert "local demo reply" in transcript["messages"][-1]["content"]
         await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "And one more"})
 
+        await request(client, "PATCH", f"/api/conversations/{sid}", body={"title": "Smoke conversation"})
+        await request(client, "PATCH", f"/api/conversations/{sid}", 400, {"title": "Benchmark at 96K"})
+        await request(client, "DELETE", f"/api/conversations/{sid}", 400, {"confirm": 1})
+        await request(client, "DELETE", f"/api/conversations/{sid}", body={"confirm": True})
+        remaining = await request(client, "GET", "/api/conversations")
+        assert not any(row.get("id") == sid for row in remaining["sessions"])
+
         jobs = await request(client, "GET", "/api/jobs")
         assert len(jobs) >= 2
+        for job in jobs:
+            runs = await request(client, "GET", f"/api/jobs/{job['id']}/runs")
+            for run in runs["runs"]:
+                transcript = await request(client, "GET", f"/api/conversations/{run['id']}")
+                assert transcript["messages"], "A demo run must open a nonempty conversation."
         new_job = await request(client, "POST", "/api/jobs", 201, {
             "name": "Demo check", "prompt": "Say hello", "schedule": "0 9 * * *", "deliver": "local",
         })
@@ -94,7 +113,39 @@ async def main():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, Jobs CRUD/actions, confirmed deletion, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, sign-out")
+
+
+async def main():
+    global BASE, PASSWORD_FILE, HEADERS
+    # Reserve sockets rather than guessing a port or accidentally testing an existing demo.
+    with tempfile.TemporaryDirectory(prefix="roost-smoke-") as directory, socket.socket() as upstream_socket, socket.socket() as roost_socket:
+        upstream_socket.bind(("127.0.0.1", 0))
+        roost_socket.bind(("127.0.0.1", 0))
+        state = Path(directory)
+        PASSWORD_FILE = state / "password.hash"
+        PASSWORD_FILE.write_text(make_password_hash(DEMO_PASSWORD))
+        hermes_password = state / "hermes-password"
+        hermes_password.write_text(HERMES_PASSWORD)
+        BASE = f"http://127.0.0.1:{roost_socket.getsockname()[1]}"
+        HEADERS = {"Origin": BASE, "X-Roost-Request": "1"}
+        with patch.dict(os.environ, {
+            "ROOST_STATE_DIR": str(state), "ROOST_PUBLIC_ORIGIN": BASE,
+            "ROOST_HERMES_URL": f"http://127.0.0.1:{upstream_socket.getsockname()[1]}",
+            "ROOST_HERMES_USERNAME": "demo", "ROOST_HERMES_PASSWORD_FILE": str(hermes_password),
+            "ROOST_DEMO": "1", "ROOST_TRUST_FORWARDED": "0",
+        }):
+            upstream = web.AppRunner(mock_hermes(), access_log=None)
+            roost = web.AppRunner(create_app(), access_log=None)
+            try:
+                await upstream.setup()
+                await web.SockSite(upstream, upstream_socket).start()
+                await roost.setup()
+                await web.SockSite(roost, roost_socket).start()
+                await checks()
+            finally:
+                await roost.cleanup()
+                await upstream.cleanup()
 
 
 if __name__ == "__main__":
