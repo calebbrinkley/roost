@@ -6,7 +6,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ["README.md", "AGENTS.md", "SECURITY.md", "LICENSE", "Makefile", "pyproject.toml",
-            "LICENSES/SpaceGrotesk-OFL.txt", ".github/workflows/checks.yml"]
+            "LICENSES/SpaceGrotesk-OFL.txt", ".github/workflows/checks.yml", "CONTRIBUTING.md",
+            "docs/setup.md", "docs/compatibility.md", "docs/repository-security.md",
+            ".github/rulesets/main.json", ".github/rulesets/all-branches.json",
+            ".github/repository-settings.json", ".github/actions-permissions.json",
+            ".github/allowed-actions.json", ".github/workflow-permissions.json",
+            ".github/CODEOWNERS", ".github/pull_request_template.md", ".github/dependabot.yml"]
 
 
 def main() -> int:

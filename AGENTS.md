@@ -9,6 +9,10 @@ Roost is a public repository. Treat every change, commit, pull request, issue an
 - A new binary file (font, image) must be reviewed and pinned by SHA-256 in `REVIEWED_ASSETS` in `scripts/check_public_content.py`, with its license in `LICENSES/`.
 - If a leak is suspected, stop publishing and follow `SECURITY.md`; never paste the value into an issue.
 
+## Repository workflow
+
+Use a short-lived work branch and a pull request to `main`; do not push directly to `main`. GitHub requires the `check` job and resolved review conversations. Approval is optional. Use squash merges, never force-push, and follow [CONTRIBUTING.md](CONTRIBUTING.md). Repository policy is recorded in [docs/repository-security.md](docs/repository-security.md).
+
 ## Verification
 
 Run `make check` for every change, and `make PYTHON=.venv/bin/python smoke` for anything that touches the server or the interface. Neither contacts a live Hermes; say plainly what was checked against a real agent and what was not.

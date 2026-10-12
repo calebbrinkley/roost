@@ -2,7 +2,7 @@
 
 Do not open a public issue containing credentials, identifying host details, private logs or conversation transcripts.
 
-Use the repository's private vulnerability reporting feature if it is enabled. If it is unavailable, contact the maintainer through an already established private channel. Do not invent or publish a personal contact address.
+Use GitHub's [private vulnerability reporting](https://github.com/calebbrinkley/roost/security/advisories/new). If it is unavailable, contact the maintainer through an already established private channel. Do not invent or publish a personal contact address.
 
 For a suspected disclosure:
 
@@ -13,3 +13,5 @@ For a suspected disclosure:
 5. Verify the replacement is sanitized before publishing. Do not repeat the secret in a report, commit message or remediation test.
 
 Roost holds the Hermes dashboard password, which administers the agent. Report anything that lets a browser reach a Hermes route Roost does not deliberately forward, or that weakens sign-in, with a minimal generic reproduction and the affected version.
+
+For branch rules, CI permissions and dependency updates, see [repository security](docs/repository-security.md). These controls help prevent unsafe publication; they do not replace code review, credential rotation or live deployment validation.
