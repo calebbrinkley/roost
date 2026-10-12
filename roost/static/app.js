@@ -61,6 +61,8 @@ function refreshWorkingLabels() {
 const ICONS = {
   compose: [["path", { d: "M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" }], ["path", { d: "M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 8.5-8.5z" }]],
   plus: [["path", { d: "M12 5v14M5 12h14" }]],
+  speaker: [["path", { d: "M11 5 6 9H3v6h3l5 4V5z" }], ["path", { d: "M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" }]],
+  stop: [["rect", { x: 7, y: 7, width: 10, height: 10, rx: 1.5 }]],
   gear: [["path", { d: "M10.08 4.85L10.09 2.18L13.91 2.18L13.92 4.85L15.70 5.59L17.59 3.71L20.29 6.41L18.41 8.30L19.15 10.08L21.82 10.09L21.82 13.91L19.15 13.92L18.41 15.70L20.29 17.59L17.59 20.29L15.70 18.41L13.92 19.15L13.91 21.82L10.09 21.82L10.08 19.15L8.30 18.41L6.41 20.29L3.71 17.59L5.59 15.70L4.85 13.92L2.18 13.91L2.18 10.09L4.85 10.08L5.59 8.30L3.71 6.41L6.41 3.71L8.30 5.59Z" }],
          ["circle", { cx: 12, cy: 12, r: 3 }]],
 };
@@ -106,10 +108,11 @@ async function api(path, options = {}) {
 function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   closeStream();
+  stopRecording(true); state.player?.pause();
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
-    live: null, liveNodes: null, lastRows: null });
+    live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
@@ -722,7 +725,12 @@ function renderMessages(rows) {
     if (row.role === "user") {
       const status = visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
       transcript.append(el("div", "under right", shown ? `${status} · ${time}` : status));
-    } else if (shown) transcript.append(el("div", "under", time));
+    } else {
+      const under = el("div", "under reply-under");
+      if (row.id != null) under.append(playButton(row.id));
+      if (shown) under.append(time);
+      if (under.children.length) transcript.append(under);
+    }
     if (time) {
       body.classList.add("has-time");
       body.addEventListener("click", (event) => {
@@ -744,6 +752,7 @@ function renderMessages(rows) {
     }
     if ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000) state.pending = null;
   }
+  readVoiceReply(visible, working, live);
   if (live ? !live.done : working || state.pending?.id === state.current) {
     const typing = el("div", "typing-row");
     const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
@@ -879,7 +888,12 @@ async function submitMessage(event) {
   event.preventDefault();
   if (state.busy) return;
   const text = $("message").value.trim();
-  if (!text) return;
+  if (text) await sendText(text);
+}
+
+// Sends what was typed, or a voice message's transcript (`voice`), whose reply is then read aloud.
+async function sendText(text, { voice = false } = {}) {
+  if (state.busy) return;
   const epoch = state.authEpoch, view = state.viewEpoch, oldId = state.current;
   const sameView = () => epoch === state.authEpoch && view === state.viewEpoch && state.current === oldId;
   let accepted = false;
@@ -896,6 +910,7 @@ async function submitMessage(event) {
     accepted = true;
     if (sameView()) { state.current = result.session_id; state.draft = false; }
     state.pending = { id: result.session_id, text, since: Date.now() };
+    if (voice) state.voiceReply = { id: result.session_id, text, since: Date.now() };
     if (state.current === result.session_id) openStream(result.session_id);
     nextWorkingVerb();
     // A failed refresh must never turn an accepted message back into an unsent draft.
@@ -2028,6 +2043,149 @@ setInterval(() => {
   if (state.section === "messages") loadConversations().catch(() => {});
   else if (state.section === "jobs") loadJobs().catch(() => {});
 }, 20000);
+
+// Voice: hold the mic to record and let go to send; the transcript is the message. Every reply has a
+// play button, and the reply to a voice message is read aloud by itself.
+const voice = { recorder: null, stream: null, chunks: [], started: 0, held: false, cancelled: false, timer: null, placeholder: "" };
+
+async function startRecording(event) {
+  event.preventDefault();
+  if (voice.held || voice.recorder || state.busy) return;
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder !== "function") { notice("This browser can’t record audio."); return; }
+  if (event.pointerId !== undefined) $("voice-button").setPointerCapture?.(event.pointerId);
+  voice.held = true; voice.cancelled = false;
+  unlockPlayer();
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { voice.held = false; notice("Roost can’t use the microphone. Allow it for Roost in this device’s settings."); return; }
+  // Let go while the permission prompt was up: nothing to record.
+  if (!voice.held) { stream.getTracks().forEach((track) => track.stop()); return; }
+  const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((name) => MediaRecorder.isTypeSupported?.(name));
+  const recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  Object.assign(voice, { recorder, stream, chunks: [], started: Date.now(), placeholder: $("message").placeholder });
+  recorder.addEventListener("dataavailable", (chunk) => { if (chunk.data.size) voice.chunks.push(chunk.data); });
+  recorder.addEventListener("stop", () => finishRecording(recorder));
+  recorder.start();
+  $("composer").classList.add("recording");
+  const tick = () => {
+    const seconds = Math.floor((Date.now() - voice.started) / 1000);
+    $("message").placeholder = `Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · let go to send`;
+  };
+  tick(); voice.timer = setInterval(tick, 500);
+}
+
+function stopRecording(cancel) {
+  voice.held = false;
+  if (!voice.recorder || voice.recorder.state === "inactive") return;
+  voice.cancelled = cancel ? "cancelled" : Date.now() - voice.started < 600 ? "short" : false;
+  voice.recorder.stop();
+}
+
+function finishRecording(recorder) {
+  voice.stream?.getTracks().forEach((track) => track.stop());
+  clearInterval(voice.timer);
+  $("composer").classList.remove("recording");
+  $("message").placeholder = voice.placeholder;
+  const chunks = voice.chunks;
+  Object.assign(voice, { recorder: null, stream: null, chunks: [] });
+  if (voice.cancelled === "short") notice("Hold the mic while you speak, then let go to send.");
+  if (voice.cancelled || !chunks.length) return;
+  sendRecording(new Blob(chunks, { type: recorder.mimeType || chunks[0].type || "audio/mp4" }));
+}
+
+async function sendRecording(recording) {
+  const epoch = state.authEpoch;
+  const status = el("p", "empty-transcript", "Transcribing…");
+  $("transcript").append(status); $("transcript").scrollTop = $("transcript").scrollHeight;
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Roost couldn’t read the recording."));
+      reader.readAsDataURL(recording);
+    });
+    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type }) });
+    if (epoch !== state.authEpoch) return;
+    status.remove();
+    if (!data.transcript) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
+    await sendText(data.transcript, { voice: true });
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  finally { status.remove(); }
+}
+
+function audioPlayer() {
+  if (!state.player) {
+    const player = state.player = new Audio();
+    player.addEventListener("ended", () => { state.playing = null; refreshPlayButtons(); });
+    player.addEventListener("error", () => {
+      if (!state.playing || !player.src.includes("/speech/")) return;
+      state.playing = null; refreshPlayButtons();
+      notice("Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
+    });
+  }
+  return state.player;
+}
+
+// Played from a tap, the player may later start a reply on its own (Safari otherwise refuses).
+function unlockPlayer() {
+  if (typeof Audio !== "function" || state.playing) return;
+  const player = audioPlayer();
+  player.src = "/api/audio/silence";
+  player.play().catch(() => {});
+}
+
+function playReply(conversation, id) {
+  if (typeof Audio !== "function") return;
+  const player = audioPlayer();
+  state.playing = { conversation, id };
+  player.src = `/api/conversations/${encodeURIComponent(conversation)}/speech/${encodeURIComponent(id)}`;
+  player.play().catch((error) => {
+    // Refused without a tap (an automatic reading): show the play button again, quietly.
+    if (error?.name === "NotAllowedError" && state.playing?.id === id) { state.playing = null; refreshPlayButtons(); }
+  });
+  refreshPlayButtons();
+}
+
+function stopPlaying() {
+  state.player?.pause();
+  state.playing = null;
+  refreshPlayButtons();
+}
+
+function refreshPlayButtons() { if (state.lastRows) renderMessages(state.lastRows); }
+
+function playButton(id) {
+  const playing = state.playing?.conversation === state.current && state.playing.id === id;
+  const button = el("button", "play-reply" + (playing ? " playing" : ""));
+  button.type = "button";
+  button.setAttribute("aria-label", playing ? "Stop reading aloud" : "Read aloud");
+  button.title = playing ? "Stop" : "Read aloud";
+  button.append(icon(playing ? "stop" : "speaker"));
+  button.addEventListener("click", (event) => { event.stopPropagation(); if (playing) stopPlaying(); else playReply(state.current, id); });
+  return button;
+}
+
+// Once the reply to a voice message is in, read it aloud (once; ten minutes at most).
+function readVoiceReply(visible, working, live) {
+  const waiting = state.voiceReply;
+  if (!waiting || waiting.id !== state.current || live) return;
+  if (Date.now() - waiting.since > 600000) { state.voiceReply = null; return; }
+  let own = -1;
+  for (let i = visible.length - 1; i >= 0; i--) if (visible[i].role === "user" && messageText(visible[i]) === waiting.text) { own = i; break; }
+  const reply = own >= 0 && !working ? visible.slice(own + 1).findLast((row) => row.role === "assistant" && row.id != null) : null;
+  if (!reply) return;
+  state.voiceReply = null;
+  // After this render: starting the player renders the transcript again.
+  const conversation = state.current;
+  setTimeout(() => playReply(conversation, reply.id), 0);
+}
+
+$("voice-button").addEventListener("pointerdown", startRecording);
+$("voice-button").addEventListener("pointerup", () => stopRecording(false));
+$("voice-button").addEventListener("pointercancel", () => stopRecording(true));
+$("voice-button").addEventListener("contextmenu", (event) => event.preventDefault());
+$("voice-button").addEventListener("keydown", (event) => { if ((event.key === " " || event.key === "Enter") && !event.repeat) startRecording(event); });
+$("voice-button").addEventListener("keyup", (event) => { if (event.key === " " || event.key === "Enter") stopRecording(false); });
 
 // iOS reloads a home-screen app that sat in the background, often before the network (or VPN) is
 // back. Until Roost answers, say so and keep trying, rather than leaving a blank page or signing out.
