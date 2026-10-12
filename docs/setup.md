@@ -40,7 +40,7 @@ Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and 
 | `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
 | `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
 | `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
-| `ROOST_STATE_DIR` | Directory for the password hash, session database and settings. | `.roost-state` |
+| `ROOST_STATE_DIR` | Directory for the password hash, session database (also passkeys and notification devices), settings and the notification signing key (`vapid.pem`, created on first start). | `.roost-state` |
 | `ROOST_REVISION` | The commit Roost was built from, shown in Settings › About. Set by whatever builds Roost. | Unset (shown as unknown) |
 | `ROOST_TRUST_FORWARDED` | Set to `1` only when a trusted proxy is the service's sole entry point and controls `X-Forwarded-For`. | Off |
 

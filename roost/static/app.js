@@ -110,7 +110,8 @@ function signedOut() {
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set() });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
-                         timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null });
+                         timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
+                         push: null, removingPush: null });
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
@@ -179,6 +180,9 @@ async function signedIn() {
   setSection("messages");
   refreshIdentity();
   try { await loadConversations(); } catch (error) { notice(error.message); }
+  // A tapped notification opens Roost at /?c=<conversation>.
+  const opened = new URLSearchParams(globalThis.location?.search || "").get("c");
+  if (opened) { history.replaceState(null, "", "/"); selectConversation(opened); }
 }
 
 // The agent's name and the synced accent, as the signed-in server sees them.
@@ -206,6 +210,7 @@ function setSection(section) {
   $("app").classList.toggle("section-jobs", section === "jobs");
   $("app").classList.toggle("section-settings", section === "settings");
   $("app").classList.remove("chat-open", "job-open", "settings-open");
+  reportPresence();
   show("messages-view", section === "messages"); show("jobs-view", section === "jobs"); show("settings-view", section === "settings");
   for (const name of ["messages", "jobs", "settings"]) {
     $("nav-" + name).classList.toggle("active", section === name);
@@ -498,6 +503,7 @@ function finishLoadingConversations(data, rows, more) {
     selectConversation(conversationId(rows[0]), rows[0].source);
     // Initial selection stays in the list on phones.
     $("app").classList.remove("chat-open");
+    reportPresence();
   }
   renderConversations();
   if (!state.current && !more) renderWelcome();
@@ -666,6 +672,7 @@ async function selectConversation(id, source) {
   state.current = id;
   state.draft = false;
   $("app").classList.add("chat-open");
+  reportPresence();
   const item = state.conversations.find((row) => (row.session_id || row.id) === id);
   $("chat-title").textContent = item ? sessionName(item) : "Conversation";
   $("origin-badge").textContent = source && source !== "roost" ? source : "";
@@ -1025,7 +1032,8 @@ async function saveJob(event) {
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
           ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", `Restart Roost or ${agent()}`], ["account", "Account", "Passkeys and sign out"],
+          ["service", "Service", `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Reply alerts on your devices"],
+          ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
@@ -1051,6 +1059,7 @@ function selectSettingsGroup(id) {
   if (id === "agent") loadSoul();
   if (id === "about") loadAbout();
   if (id === "account") loadPasskeys();
+  if (id === "notifications") loadPush();
 }
 
 function renderSettings() {
@@ -1070,7 +1079,7 @@ function renderSettings() {
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
   ({ appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
-     service: renderServiceSettings, account: renderAccount, about: renderAbout })[group[0]](detail);
+     service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
 function settingsSection(parent, heading, text) {
@@ -1406,6 +1415,130 @@ function renderServiceSettings(detail) {
   roostSection.append(roostActions);
 }
 
+// Notifications: the server watches for the end of each reply sent from Roost and pushes it to
+// every device that turned them on, unless an open Roost has that conversation on screen.
+const serviceWorker = globalThis.isSecureContext && navigator.serviceWorker
+  ? navigator.serviceWorker.register("/sw.js").catch(() => null) : Promise.resolve(null);
+
+function pushSupported() { return Boolean(globalThis.isSecureContext && navigator.serviceWorker && globalThis.PushManager && globalThis.Notification); }
+
+// This browser's subscription, and its id on the server (a hash of the endpoint, as the server makes it).
+async function thisDevicePush() {
+  const registration = pushSupported() ? await serviceWorker : null;
+  const subscription = registration ? await registration.pushManager.getSubscription() : null;
+  if (!subscription) return null;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(subscription.endpoint)));
+  return { subscription, id: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 24) };
+}
+
+async function loadPush() {
+  const epoch = state.authEpoch;
+  try {
+    const [data, mine] = await Promise.all([api("/push"), thisDevicePush().catch(() => null)]);
+    if (epoch !== state.authEpoch) return;
+    state.push = { ...data, mine: mine?.id || null };
+    if (state.settingsGroup === "notifications") renderSettings();
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+}
+
+function renderNotifications(detail) {
+  const section = settingsSection(detail, "This device", `Get a notification when ${agent()} finishes a reply you aren’t looking at.`);
+  if (!state.push) { section.append(el("p", "", "Loading…")); return; }
+  const on = state.push.devices.some((device) => device.id === state.push.mine);
+  if (!pushSupported()) {
+    section.append(el("p", "", ["iPhone", "iPad"].includes(deviceName())
+      ? "On iPhone and iPad, notifications work once Roost is on the Home Screen: in Safari, tap Share, then Add to Home Screen, and open Roost from there."
+      : "This browser can’t receive notifications from Roost."));
+  } else if (Notification.permission === "denied" && !on) {
+    section.append(el("p", "", "Notifications are blocked for Roost in this device’s settings. Allow them there, then come back."));
+  } else {
+    section.append(el("p", "", on ? "Notifications are on for this device." : "Notifications are off for this device."));
+    const actions = el("div", "settings-actions");
+    if (on) actions.append(settingsButton("primary", "Send a test", () => testPush(state.push.mine)), settingsButton("secondary", "Turn off", disablePush));
+    else actions.append(settingsButton("primary", "Turn on", enablePush));
+    section.append(actions);
+  }
+  if (!state.push.devices.length) return;
+  const devices = settingsSection(detail, "Devices", "Every device that gets Roost’s notifications.");
+  const list = el("ul", "passkey-list");
+  for (const device of state.push.devices) {
+    const item = el("li"), text = el("div");
+    text.append(el("strong", "", device.name + (device.id === state.push.mine ? " (this device)" : "")),
+                el("small", "", "Added " + dateLabel(device.created) + (device.last_sent ? " · last notified " + dateLabel(device.last_sent) : " · not notified yet")));
+    const confirming = state.removingPush === device.id;
+    const remove = settingsButton("secondary" + (confirming ? " confirming" : ""), confirming ? "Confirm remove" : "Remove",
+      () => confirming ? removePushDevice(device) : (state.removingPush = device.id, renderSettings()));
+    remove.setAttribute("aria-label", (confirming ? "Confirm removing " : "Remove ") + device.name);
+    item.append(text, remove);
+    list.append(item);
+  }
+  devices.append(list);
+}
+
+function enablePush() {
+  return withSettingsBusy(async (epoch) => {
+    // First, straight from the tap: Safari shows the permission prompt only for one.
+    if (await Notification.requestPermission() !== "granted") throw new Error("Notifications weren’t allowed, so they stay off.");
+    const registration = await serviceWorker;
+    if (!registration) throw new Error("Roost couldn’t start its notification worker. Reload and try again.");
+    await navigator.serviceWorker.ready;
+    const options = { userVisibleOnly: true, applicationServerKey: fromB64url(state.push.public_key) };
+    let subscription;
+    try { subscription = await registration.pushManager.subscribe(options); }
+    catch {
+      // A subscription made for an earlier Roost key can't be reused: replace it.
+      await (await registration.pushManager.getSubscription())?.unsubscribe();
+      subscription = await registration.pushManager.subscribe(options);
+    }
+    await api("/push/devices", { method: "POST", body: JSON.stringify({ subscription: subscription.toJSON(), name: deviceName() }) });
+    if (epoch !== state.authEpoch) return;
+    notice("Notifications are on for this device.");
+    await loadPush();
+  });
+}
+
+function disablePush() {
+  return withSettingsBusy(async (epoch) => {
+    const mine = await thisDevicePush();
+    if (mine && state.push.devices.some((device) => device.id === mine.id)) {
+      await api("/push/devices/" + encodeURIComponent(mine.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    }
+    await mine?.subscription.unsubscribe();
+    if (epoch !== state.authEpoch) return;
+    notice("Notifications are off for this device.");
+    await loadPush();
+  });
+}
+
+function removePushDevice(device) {
+  return withSettingsBusy(async (epoch) => {
+    await api("/push/devices/" + encodeURIComponent(device.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    if (epoch !== state.authEpoch) return;
+    state.removingPush = null;
+    notice(`${device.name} won’t get Roost’s notifications.`);
+    await loadPush();
+  });
+}
+
+function testPush(device) {
+  return withSettingsBusy(async () => {
+    await api("/push/test", { method: "POST", body: JSON.stringify({ device }) });
+    notice("Test sent. It should arrive in a few seconds.");
+  });
+}
+
+// Tells the server which conversation is on screen, so a reply there doesn't also notify.
+// A plain fetch: it runs as the page hides, and a failure only means a notification may show.
+function reportPresence() {
+  if ($("app").classList.contains("hidden")) return;
+  // On a phone the list and the chat take turns; only an open chat is on screen.
+  const onScreen = document.visibilityState === "visible" && state.section === "messages"
+    && (!phoneWidth.matches || $("app").classList.contains("chat-open"));
+  const conversation = onScreen ? state.current : null;
+  fetch("/api/presence", { method: "POST", keepalive: true, credentials: "same-origin",
+    headers: { "X-Roost-Request": "1", "Content-Type": "application/json" }, body: JSON.stringify({ conversation }) }).catch(() => {});
+}
+
 async function withSettingsBusy(work) {
   if (state.settingsBusy) return false;
   const epoch = state.authEpoch;
@@ -1506,7 +1639,7 @@ $("mobile-nav-settings").addEventListener("click", () => setSection("settings"))
 $("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("sidebar-new").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
-$("back-to-list").addEventListener("click", () => $("app").classList.remove("chat-open"));
+$("back-to-list").addEventListener("click", () => { $("app").classList.remove("chat-open"); reportPresence(); });
 $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
 
 // Swipe right on a phone to leave a conversation or job, like iOS's back gesture (which installed
@@ -1689,6 +1822,12 @@ async function start() {
   state.passkeysAvailable = Boolean(data.passkeys);
   return data.signed_in ? signedIn() : signedOut();
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { boot.delay = 2000; start(); } });
+document.addEventListener("visibilitychange", () => { reportPresence(); if (document.visibilityState === "visible") { boot.delay = 2000; start(); } });
+setInterval(reportPresence, 15000);
+// A notification tapped while Roost is already open.
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  const id = event.data?.open;
+  if (typeof id === "string" && !$("app").classList.contains("hidden")) { setSection("messages"); selectConversation(id); }
+});
 window.addEventListener("online", () => { boot.delay = 2000; start(); });
 start();

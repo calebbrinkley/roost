@@ -4,7 +4,8 @@
 The integration targets Hermes **`v2026.9.24`**. The project records a successful live loopback check on 2026-10-11 covering sign-in, conversation listing and transcripts, two-turn chat, and Job creation, pause, edit, resume and deletion. These recorded live checks have not been repeated as part of repository governance work. Repository CI uses a local stand-in, not a live agent.
 
 - Phone layouts are implemented; a phone browser has not been verified.
-- Voice, push notifications and a direct Hermes plugin are not implemented.
+- Voice and a direct Hermes plugin are not implemented.
+- Reply notifications use Web Push, encrypted on the server for each device. They cover replies to messages sent from Roost, not Jobs or messages sent from other Hermes clients, and skip a conversation an open Roost has on screen. Pending replies are watched in memory for 30 minutes, so restarting Roost mid-reply drops that notification. Roost needs outbound HTTPS to the browsers' push services (Apple, Google, Mozilla, Microsoft). On iPhone and iPad they work only for Roost added to the Home Screen (iOS 16.4 or later). Encryption is checked against RFC 8291's example and delivery against a stand-in; Apple's push service and a real device have not been tried.
 - Passkeys are tested against a software authenticator with real ES256 and Ed25519 signatures, not yet against Face ID or Touch ID on a device.
 - Schedules are sent to Hermes as entered; there is no schedule builder yet.
 - Settings uses the dashboard's profile routes (`/api/profiles`, `/api/profiles/active`, `/api/profiles/{name}/soul`), `/api/gateway/restart` and `/api/status` (About shows only its version, gateway state and active sessions), read from the `v2026.9.24` source. The profile name and SOUL routes were checked against a live dashboard on 2026-10-11; the others have not been.

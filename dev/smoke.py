@@ -59,7 +59,7 @@ async def checks():
         async with client.get(BASE + "/") as response:
             assert response.status == 200
             assert "demo-banner" not in await response.text()
-        for asset in ("/app.js", "/style.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png",
+        for asset in ("/app.js", "/style.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/sw.js",
                       "/apple-touch-icon.png"):
             async with client.get(BASE + asset) as response:
                 assert response.status == 200, asset
@@ -129,6 +129,10 @@ async def checks():
         assert (await request(client, "GET", "/api/me"))["time_zone"] == "America/New_York"
         assert (await request(client, "GET", "/api/passkeys"))["passkeys"] == []
         assert (await request(client, "POST", "/api/passkeys/register/options"))["authenticatorSelection"]["residentKey"] == "required"
+        # Notifications: Roost's push key and an empty device list; presence accepts the open conversation.
+        push = await request(client, "GET", "/api/push")
+        assert push["public_key"] and push["devices"] == []
+        await request(client, "POST", "/api/presence", body={"conversation": "roost_benchmark"})
         about = await request(client, "GET", "/api/about")
         assert about["hermes"]["reachable"] and about["hermes"]["version"] == "demo" and "hermes_home" not in about["hermes"]
         assert about["roost"]["version"] and about["stats"]["state_bytes"] > 0 and about["stats"]["disk_total_bytes"] > 0
@@ -144,7 +148,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():
