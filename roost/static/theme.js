@@ -34,7 +34,6 @@
       remember(key, choice);
       apply();
     },
-    toggle() { this.set(current() === "dark" ? "light" : "dark"); },
     setAccent(name) {
       const accent = accents.includes(name) ? name : accents[0];
       document.documentElement.dataset.accent = accent;
