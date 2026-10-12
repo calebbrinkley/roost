@@ -1,11 +1,13 @@
 """Owner-only Roost HTTP service. No dashboard credential reaches the browser."""
 
 import asyncio
+import io
 import json
 import os
 import platform
 import re
 import time
+import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -17,11 +19,16 @@ from . import __version__, live
 
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, Chats, with_instructions
+from .deliveries import TEXT_LIMIT as DELIVERY_LIMIT, Deliveries
 from .hermes import Hermes, HermesError
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
 
 STATIC = Path(__file__).with_name("static")
+# The Hermes plugin Roost offers as a download; it runs inside Hermes, never in Roost.
+HERMES_PLUGIN = Path(__file__).with_name("hermes_plugin")
+# Hermes's plugin authenticates with Roost's delivery token instead of a signed-in browser's cookie.
+DELIVERY_PATH = "/api/hermes/deliveries"
 COOKIE = "roost_session"
 ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
@@ -52,16 +59,26 @@ def body_text(value, field: str, limit: int, *, required: bool = True) -> str:
     return value.strip()
 
 
-async def json_body(request: web.Request) -> dict:
+async def json_body(request: web.Request, limit: int | None = None) -> dict:
+    """The request's JSON object; `limit` (bytes) replaces the app-wide size limit for this route."""
     if request.content_type != "application/json":
         raise bad("Expected JSON.")
     try:
-        value = await request.json()
+        value = json.loads(await bounded_body(request, limit)) if limit else await request.json()
     except (ValueError, UnicodeDecodeError):
         raise bad("Invalid JSON.") from None
     if not isinstance(value, dict):
         raise bad("Expected a JSON object.")
     return value
+
+
+async def bounded_body(request: web.Request, limit: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(65536):
+        if len(body) + len(chunk) > limit:
+            raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(body) + len(chunk))
+        body.extend(chunk)
+    return bytes(body)
 
 
 def item_id(request: web.Request, name: str, *, encode: bool = True) -> str:
@@ -80,10 +97,10 @@ def secured_cookie(response: web.StreamResponse, request: web.Request, token: st
 async def guard(request: web.Request, handler):
     try:
         if request.path.startswith("/api/"):
-            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and request.path != DELIVERY_PATH:
                 if request.headers.get("Origin") != request.app["origin"] or request.headers.get("X-Roost-Request") != "1":
                     raise bad("Request origin was not accepted.", 403)
-            if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login"}:
+            if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login", DELIVERY_PATH}:
                 if not request.app["sessions"].valid(request.cookies.get(COOKIE, "")):
                     raise web.HTTPUnauthorized(text="Sign in to Roost.")
         response = await handler(request)
@@ -541,6 +558,53 @@ async def watch_replies(app: web.Application) -> None:
             pass
 
 
+async def receive_delivery(request: web.Request):
+    """A job report or a message the agent sends, from Hermes's Roost plugin."""
+    deliveries = request.app["deliveries"]
+    if not deliveries.authorized(request.headers.get("Authorization", "")):
+        raise web.HTTPUnauthorized(text="Roost did not accept that delivery token.")
+    data = await json_body(request, 4 * DELIVERY_LIMIT + 4096)
+    text = body_text(data.get("text"), "Text", DELIVERY_LIMIT)
+    job_id = data.get("job_id")
+    if job_id is not None and not (isinstance(job_id, str) and ID.fullmatch(job_id)):
+        raise bad("Invalid job identifier.")
+    item = deliveries.add(text, job_id)
+    url = "/?j=" + quote(item["job_id"], safe="") if item["job_id"] else "/?d=" + item["id"]
+    await notify(request.app, {"title": item["title"] or await agent_name(request.app, ask_hermes=True),
+                               "body": preview(item["text"]), "url": url, "tag": "delivery-" + item["id"]})
+    return web.json_response({"id": item["id"]}, status=201)
+
+
+async def get_delivery(request: web.Request):
+    item = request.app["deliveries"].get(item_id(request, "did", encode=False))
+    if item is None:
+        raise web.HTTPNotFound(text="That message is no longer kept.")
+    return web.json_response(item)
+
+
+async def hermes_link(request: web.Request):
+    """What Settings shows for connecting Hermes's plugin: the token, Roost's address and the last delivery."""
+    deliveries = request.app["deliveries"]
+    return web.json_response({"token": deliveries.token(), "url": request.app["origin"], "last_delivery": deliveries.last()})
+
+
+async def rotate_delivery_token(request: web.Request):
+    data = await json_body(request)
+    if set(data) != {"confirm"} or data["confirm"] is not True:
+        raise bad("Confirm replacing the delivery token.")
+    request.app["deliveries"].rotate()
+    return await hermes_link(request)
+
+
+async def hermes_plugin(request: web.Request):
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name in ("plugin.yaml", "__init__.py"):
+            bundle.write(HERMES_PLUGIN / name, "roost/" + name)
+    return web.Response(body=archive.getvalue(), content_type="application/zip",
+                        headers={"Content-Disposition": 'attachment; filename="roost-hermes-plugin.zip"'})
+
+
 async def presence(request: web.Request):
     data = await json_body(request)
     conversation = data.get("conversation")
@@ -852,6 +916,7 @@ def create_app() -> web.Application:
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
     app["chats"] = Chats(app["sessions"].db)
+    app["deliveries"] = Deliveries(app["sessions"].db, state / "delivery-token")
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
     app["watches"], app["presence"], app["live"] = {}, {}, {}
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
@@ -893,6 +958,11 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/push/devices/{did}", remove_push_device)
     app.router.add_post("/api/push/test", test_push)
     app.router.add_post("/api/presence", presence)
+    app.router.add_post(DELIVERY_PATH, receive_delivery)
+    app.router.add_get("/api/deliveries/{did}", get_delivery)
+    app.router.add_get("/api/hermes", hermes_link)
+    app.router.add_post("/api/hermes/token", rotate_delivery_token)
+    app.router.add_get("/api/hermes/plugin.zip", hermes_plugin)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
     app.router.add_get("/api/settings/soul", get_soul)

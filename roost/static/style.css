@@ -274,6 +274,11 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .sheet .dialog-actions { margin-top: 6px; }
 .sheet .error:empty { display: none; }
 .sheet-title:focus { outline: none; }
+.delivery-text { max-height: 60vh; overflow-y: auto; overflow-wrap: anywhere; line-height: 1.45; font-size: calc(15px * var(--text-scale)); }
+.delivery-text p { margin: 0 0 8px; white-space: pre-wrap; }
+.setup-steps { margin: 0 0 12px; padding-left: 20px; line-height: 1.5; max-width: 620px; }
+.setup-steps li + li { margin-top: 6px; }
+.setup-block { margin: 6px 0 0; padding: 9px 11px; border-radius: 10px; background: var(--chip); font-size: calc(13px * var(--text-scale)); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
 .sheet button:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .run-row { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: calc(13px * var(--text-scale)); }
 .run-row:last-child { border-bottom: 0; }

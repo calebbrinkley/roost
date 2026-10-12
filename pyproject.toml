@@ -17,3 +17,4 @@ include = ["roost*"]
 
 [tool.setuptools.package-data]
 roost = ["static/*"]
+"roost.hermes_plugin" = ["plugin.yaml"]

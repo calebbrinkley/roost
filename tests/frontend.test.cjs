@@ -864,3 +864,36 @@ test('the gear opens this conversation\'s menu: instructions load and save, and 
   f.run('renderWelcome()');
   assert.equal(f.get('chat-settings').classList.contains('hidden'), true);
 });
+
+test('a tapped notification opens its job, or the message the agent sent', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.calls = []; api = async path => { calls.push(path);
+    return path === '/jobs' ? [{id: 'job_7', name: 'Morning brief'}] : {id: 'd1', title: '', text: 'Dinner is at **7**.', created: 1760000000}; };
+    loadJobRuns = async () => {};`);
+  await f.run(`openLink('?j=job_7')`); await tick();
+  assert.equal(f.run('state.section'), 'jobs');
+  assert.equal(f.run('state.selectedJob'), 'job_7');
+  await f.run(`openLink('?d=d1')`); await tick();
+  assert.equal(f.get('delivery-sheet').open, true);
+  assert.match(text(f.get('delivery-text')), /Dinner is at/);
+  assert.equal(f.get('delivery-title').textContent, f.run('agent()'));
+});
+
+test('Notifications shows how to connect Hermes, with the token, and replaces the token after a confirm', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.settings = {}; state.settingsGroup = 'notifications'; state.push = {devices: [], mine: null, public_key: ''};
+    state.hermesLink = {token: 'tok-1', url: 'https://roost.example.invalid', last_delivery: null};
+    globalThis.calls = []; api = async (path, options = {}) => { calls.push([path, options.body]);
+      return {token: 'tok-2', url: 'https://roost.example.invalid', last_delivery: null}; };`);
+  f.run('renderSettings()');
+  const detail = text(f.get('settings-detail'));
+  assert.match(detail, /ROOST_URL=https:\/\/roost\.example\.invalid\nROOST_DELIVERY_TOKEN=tok-1\nROOST_HOME_CHANNEL=roost/);
+  assert.match(detail, /hermes plugins enable roost/);
+  assert.match(detail, /Nothing received from Hermes yet/);
+  const button = () => find(f.get('settings-detail'), n => /token/i.test(n.textContent || '') && n.events?.click);
+  button().events.click();
+  assert.equal(button().textContent, 'Confirm new token');
+  await button().events.click(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls').at(-1))), ['/hermes/token', '{"confirm":true}']);
+  assert.equal(f.run('state.hermesLink.token'), 'tok-2');
+});

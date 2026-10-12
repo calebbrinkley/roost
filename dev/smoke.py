@@ -154,6 +154,17 @@ async def checks():
         assert (await request(client, "GET", "/api/passkeys"))["passkeys"] == []
         assert (await request(client, "POST", "/api/passkeys/register/options"))["authenticatorSelection"]["residentKey"] == "required"
         # Notifications: Roost's push key and an empty device list; presence accepts the open conversation.
+        # Hermes's plugin delivers a job report with Roost's token; Settings offers the plugin.
+        token = (PASSWORD_FILE.parent / "delivery-token").read_text(encoding="utf-8").strip()
+        async with client.post(BASE + "/api/hermes/deliveries", headers={"Authorization": "Bearer " + token},
+                               json={"text": "Cronjob Response: Smoke\n(job_id: job_smoke)\n---\n\nAll clear."}) as response:
+            assert response.status == 201
+            delivered = (await response.json())["id"]
+        item = await request(client, "GET", f"/api/deliveries/{delivered}")
+        assert (item["title"], item["job_id"], item["text"]) == ("Smoke", "job_smoke", "All clear.")
+        assert (await request(client, "GET", "/api/hermes"))["last_delivery"] == item["created"]
+        async with client.get(BASE + "/api/hermes/plugin.zip") as response:
+            assert response.status == 200 and (await response.read())[:2] == b"PK"
         push = await request(client, "GET", "/api/push")
         assert push["public_key"] and push["devices"] == []
         await request(client, "POST", "/api/presence", body={"conversation": "roost_benchmark"})
@@ -172,7 +183,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

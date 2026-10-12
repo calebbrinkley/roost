@@ -32,6 +32,17 @@ Open **http://127.0.0.1:8787** and sign in with the password you set in step 1.
 
 Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and set `ROOST_PUBLIC_ORIGIN` to the exact browser origin, with no path or trailing slash. Keep access restricted to your private network: authenticated users can submit work to the agent.
 
+### 4. Optional: job reports from Hermes
+
+Roost's reply notifications work on their own. To also get the agent's job reports, and messages it sends on its own, Hermes needs Roost's platform plugin. It ships with Roost, and **Settings › Notifications** has it as a download, along with these steps and the values to paste:
+
+1. Unzip the plugin into Hermes's plugins folder, so it becomes `$HERMES_HOME/plugins/roost`.
+2. Enable it: `hermes plugins enable roost` (or add `roost` to `plugins.enabled` in Hermes's `config.yaml`).
+3. Add to Hermes's `.env`: `ROOST_URL` (Roost's address as Hermes reaches it), `ROOST_DELIVERY_TOKEN` (shown in Settings) and `ROOST_HOME_CHANNEL=roost`.
+4. Restart Hermes's gateway, then set a job's Deliver to `roost`.
+
+The plugin needs nothing beyond Python's standard library. It posts each delivery to `/api/hermes/deliveries` with the token; Roost keeps the newest 200 and notifies every device. A tapped job report opens the job; any other message opens in Roost. **New token** in Settings replaces the token, and the old one stops working at once.
+
 ## Configuration
 
 | Variable | Purpose | Default |
@@ -40,7 +51,7 @@ Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and 
 | `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
 | `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
 | `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
-| `ROOST_STATE_DIR` | Directory for the password hash, session database (also passkeys and notification devices), settings and the notification signing key (`vapid.pem`, created on first start). | `.roost-state` |
+| `ROOST_STATE_DIR` | Directory for the password hash, session database (also passkeys and notification devices), settings, the notification signing key (`vapid.pem`) and Hermes's delivery token (`delivery-token`), both created on first start. | `.roost-state` |
 | `ROOST_REVISION` | The commit Roost was built from, shown in Settings › About. Set by whatever builds Roost. | Unset (shown as unknown) |
 | `ROOST_TRUST_FORWARDED` | Set to `1` only when a trusted proxy is the service's sole entry point and controls `X-Forwarded-For`. | Off |
 
