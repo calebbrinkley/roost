@@ -48,8 +48,6 @@ function refreshWorkingLabels() {
 }
 // Line icons in one style (24 px grid, 2 px round strokes, current text colour).
 const ICONS = {
-  sun: [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }]],
-  moon: [["path", { d: "M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" }]],
   compose: [["path", { d: "M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" }], ["path", { d: "M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 8.5-8.5z" }]],
   plus: [["path", { d: "M12 5v14M5 12h14" }]],
   gear: [["path", { d: "M10.08 4.85L10.09 2.18L13.91 2.18L13.92 4.85L15.70 5.59L17.59 3.71L20.29 6.41L18.41 8.30L19.15 10.08L21.82 10.09L21.82 13.91L19.15 13.92L18.41 15.70L20.29 17.59L17.59 20.29L15.70 18.41L13.92 19.15L13.91 21.82L10.09 21.82L10.08 19.15L8.30 18.41L6.41 20.29L3.71 17.59L5.59 15.70L4.85 13.92L2.18 13.91L2.18 10.09L4.85 10.08L5.59 8.30L3.71 6.41L6.41 3.71L8.30 5.59Z" }],
@@ -69,21 +67,6 @@ function icon(name) {
   return svg;
 }
 
-function refreshThemeControls() {
-  const switchToLight = window.roostTheme.current() === "dark";
-  const label = switchToLight ? "Switch to light mode" : "Switch to dark mode";
-  for (const button of document.querySelectorAll("[data-theme-toggle]")) {
-    button.setAttribute("aria-label", label);
-    button.title = label;
-    // The toggle shows where a click takes you: a sun in dark mode, a moon in light mode.
-    button.replaceChildren(icon(switchToLight ? "sun" : "moon"));
-  }
-}
-for (const button of document.querySelectorAll("[data-theme-toggle]")) {
-  button.addEventListener("click", () => window.roostTheme.toggle());
-}
-window.addEventListener("roostthemechange", refreshThemeControls);
-refreshThemeControls();
 let noticeTimer;
 function notice(message) {
   clearTimeout(noticeTimer);
@@ -491,6 +474,13 @@ function addInline(parent, value) {
   });
 }
 
+// Table cells take the same bold, code and italics as paragraphs. Code blocks stay literal.
+function tableCell(tag, text) {
+  const cell = el(tag);
+  addInline(cell, text.trim());
+  return cell;
+}
+
 function addPlainMarkdown(parent, value) {
   const lines = value.split("\n");
   for (let i = 0; i < lines.length;) {
@@ -505,11 +495,11 @@ function addPlainMarkdown(parent, value) {
     if (lines[i].includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1])) {
       const table = el("table");
       const head = el("tr");
-      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(el("th", "", cell.trim()));
+      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(tableCell("th", cell));
       table.append(head); i += 2;
       while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
         const row = el("tr");
-        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(el("td", "", cell.trim()));
+        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(tableCell("td", cell));
         table.append(row); i++;
       }
       parent.append(table); continue;
@@ -943,7 +933,8 @@ async function saveJob(event) {
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
           ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", `Restart Roost or ${agent()}`], ["about", "About", "Version, live status and credits"]];
+          ["service", "Service", `Restart Roost or ${agent()}`], ["account", "Account", "Sign out of this device"],
+          ["about", "About", "Version, live status and credits"]];
 }
 
 async function loadSettings() {
@@ -986,7 +977,7 @@ function renderSettings() {
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
   ({ appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
-     service: renderServiceSettings, about: renderAbout })[group[0]](detail);
+     service: renderServiceSettings, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
 function settingsSection(parent, heading, text) {
@@ -1017,6 +1008,17 @@ function renderAppearance(detail) {
     choices.append(button);
   }
   theme.append(choices);
+  const text = settingsSection(detail, "Text size", "Applies to this device, across Roost.");
+  const sizes = el("div", "choice-row");
+  sizes.setAttribute("role", "radiogroup"); sizes.setAttribute("aria-label", "Text size");
+  for (const [size, label] of [["small", "Small"], ["default", "Default"], ["large", "Large"], ["larger", "Larger"]]) {
+    const chosen = window.roostTheme.textSize() === size;
+    const button = el("button", "segment" + (chosen ? " active" : ""), label);
+    button.type = "button"; button.setAttribute("role", "radio"); button.setAttribute("aria-checked", String(chosen));
+    button.addEventListener("click", () => { window.roostTheme.setTextSize(size); renderSettings(); });
+    sizes.append(button);
+  }
+  text.append(sizes);
   const accent = settingsSection(detail, "Accent colour", "Used for your messages, buttons and highlights on every device you sign in on.");
   const swatches = el("div", "swatches");
   swatches.setAttribute("role", "radiogroup"); swatches.setAttribute("aria-label", "Accent colour");
@@ -1185,6 +1187,22 @@ function renderDataSettings(detail) {
   }
 }
 
+function renderAccount(detail) {
+  const section = settingsSection(detail, "Sign out",
+    "Signs this device out of Roost. Other devices stay signed in. You’ll need your Roost password to sign back in.");
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("secondary", "Sign out", signOut));
+  section.append(actions);
+}
+
+// A failed sign-out keeps the session and says why; the session ends only when the server agrees.
+async function signOut() {
+  if (state.settingsBusy) return;
+  state.settingsBusy = true; renderSettings();
+  try { await api("/logout", { method: "POST" }); signedOut(); }
+  catch (error) { notice(error.message); state.settingsBusy = false; renderSettings(); }
+}
+
 function renderServiceSettings(detail) {
   const agentSection = settingsSection(detail, `Restart ${agent()}`,
     `Restarts the Hermes gateway: its messaging platforms and the job scheduler. A reply that is being written may stop.`);
@@ -1286,12 +1304,6 @@ $("login-form").addEventListener("submit", async (event) => {
     await api("/login", { method: "POST", body: JSON.stringify({ password: $("password").value }) });
     await signedIn();
   } catch (error) { $("login-error").textContent = error.message; }
-});
-$("logout").addEventListener("click", async () => {
-  $("logout").disabled = true;
-  try { await api("/logout", { method: "POST" }); signedOut(); }
-  catch (error) { notice(error.message); }
-  finally { $("logout").disabled = false; }
 });
 $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
