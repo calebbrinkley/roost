@@ -278,7 +278,7 @@ function messageTime(value) {
 }
 
 function sessionName(item) {
-  return item.title || item.name || item.preview || "Conversation";
+  return item.title || item.name || withoutInstructions(item.preview) || "Conversation";
 }
 
 // Hold a conversation (about half a second) or right-click it to rename or delete it.
@@ -357,14 +357,15 @@ document.addEventListener("touchstart", (event) => {
 }, { passive: true });
 
 function sheetView(name) {
-  for (const view of ["sheet-actions", "sheet-rename-form", "sheet-confirm"]) show(view, view === name);
+  for (const view of ["sheet-actions", "sheet-instructions-form", "sheet-rename-form", "sheet-confirm"]) show(view, view === name);
 }
 
 function openConversationSheet(item) {
   if (state.sheetBusy) return;
   state.sheetItem = item;
   $("sheet-title").textContent = sessionName(item);
-  $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = "";
+  $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = ""; $("sheet-instructions-error").textContent = "";
+  $("sheet-export").href = `/api/conversations/${encodeURIComponent(conversationId(item))}/export`;
   sheetView("sheet-actions");
   if (!$("conversation-sheet").open) $("conversation-sheet").showModal();
   $("sheet-title").focus();
@@ -385,6 +386,35 @@ async function renameConversation(event) {
     if (state.current === id) $("chat-title").textContent = sessionName(item);
     $("conversation-sheet").close(); renderConversations(); notice("Conversation renamed.");
   } catch (error) { if (epoch === state.authEpoch) $("sheet-error").textContent = error.message; }
+  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
+}
+
+async function openInstructions() {
+  const item = state.sheetItem, id = item && conversationId(item);
+  if (!id || state.sheetBusy) return;
+  const epoch = state.authEpoch, field = $("sheet-instructions-text");
+  field.value = ""; field.disabled = true;
+  sheetView("sheet-instructions-form");
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
+    if (epoch !== state.authEpoch || state.sheetItem !== item) return;
+    field.value = typeof data.instructions === "string" ? data.instructions : "";
+    field.disabled = false; field.focus();
+  } catch (error) { if (epoch === state.authEpoch) $("sheet-instructions-error").textContent = error.message; }
+}
+
+async function saveInstructions(event) {
+  event.preventDefault();
+  const item = state.sheetItem, id = item && conversationId(item), field = $("sheet-instructions-text");
+  if (!id || state.sheetBusy || field.disabled) return;
+  const epoch = state.authEpoch;
+  state.sheetBusy = true;
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value }) });
+    if (epoch !== state.authEpoch) return;
+    $("conversation-sheet").close();
+    notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
+  } catch (error) { if (epoch === state.authEpoch) $("sheet-instructions-error").textContent = error.message; }
   finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
 }
 
@@ -413,7 +443,7 @@ async function deleteConversation() {
 function renderConversations() {
   const list = $("conversation-list"); list.replaceChildren();
   const rows = state.conversations.filter((item) =>
-    (sessionName(item) + " " + (item.preview || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
+    (sessionName(item) + " " + (withoutInstructions(item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
   if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
   for (const item of rows) {
     const id = item.session_id || item.id;
@@ -424,7 +454,7 @@ function renderConversations() {
     heading.append(el("span", "conversation-name", sessionName(item)));
     if (item.source && item.source !== "roost") heading.append(el("span", "source-tag", item.source));
     const preview = el("span", "row-preview" + (state.pending?.id === id ? " live" : ""));
-    preview.append(state.pending?.id === id ? workingLabel(true) : (item.preview || `Conversation with ${agent()}`));
+    preview.append(state.pending?.id === id ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
@@ -512,6 +542,7 @@ function finishLoadingConversations(data, rows, more) {
 }
 
 function renderWelcome() {
+  show("chat-settings", false);
   const transcript = $("transcript"); transcript.replaceChildren();
   const card = el("div", "welcome-card");
   card.append(el("div", "welcome-symbol", agent().charAt(0).toUpperCase()), el("h2", "", `Message ${agent()}`),
@@ -521,9 +552,22 @@ function renderWelcome() {
   show("origin-badge", false);
 }
 
+// Instructions set for a conversation travel once with the next message, between these lines
+// (roost/chats.py writes them); the transcript shows that message as it was typed.
+const INSTRUCTIONS_BEGIN = "[Instructions for this conversation, set by the owner in Roost. Follow them until they change.]";
+const INSTRUCTIONS_END = "[End of instructions]";
+
+function withoutInstructions(text) {
+  // Hermes's list previews are cut short and flattened to one line, so match loosely.
+  if (typeof text !== "string" || !text.startsWith(INSTRUCTIONS_BEGIN.slice(0, 40))) return text;
+  const end = text.indexOf(INSTRUCTIONS_END, INSTRUCTIONS_BEGIN.length);
+  // Cut off inside the instructions: none of the message is left.
+  return end < 0 ? "" : text.slice(end + INSTRUCTIONS_END.length).trimStart();
+}
+
 function messageText(message) {
   const value = message.display_content ?? message.content;
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return message.role === "user" ? withoutInstructions(value) : value;
   if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : (part?.text || part?.type || "")).join("\n");
   if (value && typeof value === "object") return typeof value.text === "string" ? value.text : JSON.stringify(value);
   return "";
@@ -615,6 +659,7 @@ function renderMessages(rows) {
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   const keepScroll = transcript.scrollTop;
   state.renderedConversation = state.current;
+  show("chat-settings", Boolean(state.current));
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   state.lastRows = rows; state.liveNodes = null;
@@ -1733,7 +1778,7 @@ $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
-$("nav-settings").append(icon("gear")); $("mobile-nav-settings").append(icon("gear"));
+$("nav-settings").append(icon("gear")); $("mobile-nav-settings").append(icon("gear")); $("chat-settings").append(icon("gear"));
 $("nav-settings").addEventListener("click", () => setSection("settings"));
 $("mobile-nav-settings").addEventListener("click", () => setSection("settings"));
 $("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
@@ -1874,8 +1919,15 @@ $("sheet-delete").addEventListener("click", () => {
   sheetView("sheet-confirm"); $("sheet-confirm-title").focus();
 });
 $("sheet-rename-form").addEventListener("submit", renameConversation);
+$("sheet-instructions").addEventListener("click", openInstructions);
+$("sheet-instructions-form").addEventListener("submit", saveInstructions);
+$("sheet-export").addEventListener("click", () => setTimeout(() => $("conversation-sheet").close(), 0));
+$("chat-settings").addEventListener("click", () => {
+  if (!state.current) return;
+  openConversationSheet(state.conversations.find((row) => conversationId(row) === state.current) || { id: state.current, title: $("chat-title").textContent });
+});
 $("sheet-confirm-delete").addEventListener("click", deleteConversation);
-for (const id of ["sheet-cancel", "sheet-rename-cancel", "sheet-confirm-cancel"]) $(id).addEventListener("click", () => $("conversation-sheet").close());
+for (const id of ["sheet-cancel", "sheet-instructions-cancel", "sheet-rename-cancel", "sheet-confirm-cancel"]) $(id).addEventListener("click", () => $("conversation-sheet").close());
 // A tap on the dimmed backdrop (outside the sheet) closes it.
 $("conversation-sheet").addEventListener("click", (event) => {
   const box = $("conversation-sheet").getBoundingClientRect();

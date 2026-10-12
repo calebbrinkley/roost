@@ -16,6 +16,7 @@ from yarl import URL
 from . import __version__, live
 
 from .auth import Sessions, verify_password
+from .chats import INSTRUCTIONS_LIMIT, Chats, with_instructions
 from .hermes import Hermes, HermesError
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
@@ -37,6 +38,8 @@ WATCH_INTERVAL, WATCH_SECONDS, PRESENCE_SECONDS = 4, 1800, 35
 TIME_ZONE = re.compile(r"^(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})$")
 # Hermes status fields shown in About; the rest (paths, PIDs, auth) stays on the server.
 HERMES_STATUS_FIELDS = ("version", "release_date", "gateway_running", "gateway_state", "active_sessions")
+# Hermes returns at most 500 messages a page; an export reads up to this many pages.
+EXPORT_PAGE, EXPORT_PAGES = 500, 40
 
 
 def bad(message: str, status: int = 400) -> web.HTTPException:
@@ -371,6 +374,7 @@ async def delete_all_conversations(request: web.Request):
                 await hermes.request("DELETE", f"/api/sessions/{quote(sid, safe='')}")
             except HermesError as exc:
                 raise HermesError(exc.status, f"Deleted {deleted} conversations, then Hermes refused the next one.") from None
+            request.app["chats"].forget(sid)
             deleted += 1
     return web.json_response({"deleted": deleted})
 
@@ -648,7 +652,14 @@ async def send_message(request: web.Request):
     text = body_text(data.get("text"), "Message", 16000)
     # The reply to watch for is written after this message is sent.
     since = time.time()
-    stored = await request.app["hermes"].send_message(text, sid, follow=following(request.app, text))
+    chats = request.app["chats"]
+    unsent = chats.unsent(sid)
+    outgoing = text if unsent is None else with_instructions(text, unsent)
+    stored = await request.app["hermes"].send_message(outgoing, sid, follow=following(request.app, text))
+    if unsent is None:
+        chats.moved(sid, stored)
+    else:
+        chats.sent(sid, unsent, stored)
     watch_reply(request.app, stored, since)
     return web.json_response({"session_id": stored})
 
@@ -674,7 +685,45 @@ async def delete_conversation(request: web.Request):
     if set(data) != {"confirm"} or data["confirm"] is not True:
         raise bad("Confirm conversation deletion.")
     result = await request.app["hermes"].request("DELETE", f"/api/sessions/{sid}")
+    request.app["chats"].forget(item_id(request, "sid", encode=False))
     return web.json_response(result)
+
+
+async def get_chat_settings(request: web.Request):
+    sid = item_id(request, "sid", encode=False)
+    return web.json_response({"instructions": request.app["chats"].instructions(sid)})
+
+
+async def update_chat_settings(request: web.Request):
+    sid = item_id(request, "sid", encode=False)
+    data = await json_body(request)
+    if set(data) != {"instructions"}:
+        raise bad("Only instructions can be changed.")
+    request.app["chats"].set_instructions(sid, body_text(data["instructions"], "Instructions", INSTRUCTIONS_LIMIT, required=False))
+    return web.json_response({"instructions": request.app["chats"].instructions(sid)})
+
+
+async def export_conversation(request: web.Request):
+    """The whole conversation as a JSON file, older compressed history included."""
+    sid, raw = item_id(request, "sid"), item_id(request, "sid", encode=False)
+    messages = []
+    for page in range(EXPORT_PAGES):
+        data = await request.app["hermes"].request(
+            "GET", f"/api/sessions/{sid}/messages?inline_images=false&order=oldest&include_compacted=true"
+                   f"&limit={EXPORT_PAGE}&offset={page * EXPORT_PAGE}")
+        rows = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise HermesError(502, "Hermes returned invalid data.")
+        messages.extend(rows)
+        if len(rows) < EXPORT_PAGE:
+            break
+    else:
+        raise bad(f"This conversation is longer than {EXPORT_PAGE * EXPORT_PAGES} messages, too long to export.")
+    body = {"conversation": raw, "exported": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "instructions": request.app["chats"].instructions(raw), "messages": messages}
+    name = "conversation-" + re.sub(r"[^A-Za-z0-9_.-]", "_", raw) + ".json"
+    return web.Response(body=json.dumps(body, ensure_ascii=False, indent=2).encode(), content_type="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 def job_fields(data: dict, *, create: bool) -> dict:
@@ -802,6 +851,7 @@ def create_app() -> web.Application:
     # Passkeys are bound to the browser origin's host name (the WebAuthn relying party ID).
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
+    app["chats"] = Chats(app["sessions"].db)
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
     app["watches"], app["presence"], app["live"] = {}, {}, {}
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
@@ -817,6 +867,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/conversations", create_conversation)
     app.router.add_get("/api/conversations/{sid}", conversation)
     app.router.add_get("/api/conversations/{sid}/stream", stream)
+    app.router.add_get("/api/conversations/{sid}/settings", get_chat_settings)
+    app.router.add_put("/api/conversations/{sid}/settings", update_chat_settings)
+    app.router.add_get("/api/conversations/{sid}/export", export_conversation)
     app.router.add_post("/api/conversations/{sid}/messages", send_message)
     app.router.add_patch("/api/conversations/{sid}", rename_conversation)
     app.router.add_delete("/api/conversations/{sid}", delete_conversation)

@@ -13,7 +13,7 @@ from unittest.mock import ANY, AsyncMock, patch
 from aiohttp import CookieJar, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from roost import live, server
+from roost import chats, live, server
 from roost.__main__ import main as cli_main
 from roost.auth import Sessions, make_password_hash
 from roost.hermes import Hermes, HermesError
@@ -73,7 +73,8 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_uses_raw_identifier(self):
         hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
-        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}},
+        import sqlite3
+        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}, "chats": chats.Chats(sqlite3.connect(":memory:"))},
                                   content_type="application/json", json=AsyncMock(return_value={"text": "hello"}))
         await server.send_message(request)
         hermes.send_message.assert_awaited_once_with("hello", "chat:one", follow=ANY)
@@ -232,6 +233,67 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         socket = SimpleNamespace(send_json=AsyncMock(), receive=receive)
         with patch("roost.hermes.RPC_TIMEOUT", 0.02), self.assertRaises(asyncio.TimeoutError):
             await Hermes._rpc_on_socket(socket, 1, "session.create", {})
+
+
+class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import sqlite3
+        self.chats = chats.Chats(sqlite3.connect(":memory:"))
+
+    def test_instructions_go_once_per_change_and_a_change_in_flight_still_goes(self):
+        store = self.chats
+        self.assertIsNone(store.unsent("chat:one"))
+        store.set_instructions("chat:one", "Answer in French.")
+        self.assertEqual(store.unsent("chat:one"), "Answer in French.")
+        store.set_instructions("chat:one", "Answer in Spanish.")  # changed while the first was on its way
+        store.sent("chat:one", "Answer in French.", "chat:one")
+        self.assertEqual(store.unsent("chat:one"), "Answer in Spanish.")
+        store.sent("chat:one", "Answer in Spanish.", "chat:one")
+        self.assertIsNone(store.unsent("chat:one"))
+        store.set_instructions("chat:one", "Answer in Spanish.")  # unchanged: nothing to send
+        self.assertIsNone(store.unsent("chat:one"))
+
+    def test_clearing_tells_the_model_once_then_leaves_nothing(self):
+        store = self.chats
+        store.set_instructions("chat:one", "")
+        self.assertIsNone(store.unsent("chat:one"), "nothing was set, so nothing to clear")
+        store.set_instructions("chat:one", "Be brief.")
+        store.sent("chat:one", "Be brief.", "chat:one")
+        store.set_instructions("chat:one", "")
+        self.assertEqual(store.unsent("chat:one"), "")
+        self.assertIn(chats.CLEARED, chats.with_instructions("hi", ""))
+        store.sent("chat:one", "", "chat:one")
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM chat_settings").fetchone()[0], 0)
+
+    def test_settings_follow_a_conversation_hermes_continues_under_a_new_id_and_are_forgotten(self):
+        store = self.chats
+        store.set_instructions("chat:one", "Be brief.")
+        store.sent("chat:one", "Be brief.", "chat:two")
+        self.assertEqual((store.instructions("chat:one"), store.instructions("chat:two")), ("", "Be brief."))
+        store.forget("chat:two")
+        self.assertEqual(store.instructions("chat:two"), "")
+
+    async def test_the_next_message_carries_changed_instructions_and_shows_as_typed(self):
+        followed = []
+        hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
+        app = {"hermes": hermes, "watches": {}, "chats": self.chats, "live": {}}
+        def request(text):
+            return SimpleNamespace(match_info={"sid": "chat:one"}, app=app, content_type="application/json",
+                                   json=AsyncMock(return_value={"text": text}))
+        self.chats.set_instructions("chat:one", "Answer in French.")
+        with patch("roost.server.following", lambda app, text: followed.append(text)):
+            await server.send_message(request("hello"))
+            await server.send_message(request("again"))
+        first, second = (call.args[0] for call in hermes.send_message.await_args_list)
+        self.assertEqual(first, chats.with_instructions("hello", "Answer in French."))
+        self.assertTrue(first.startswith(chats.BEGIN + "\nAnswer in French.\n" + chats.END + "\n\n"))
+        self.assertEqual(second, "again")
+        self.assertEqual(followed, ["hello", "again"])
+
+    def test_the_browser_strips_the_same_markers(self):
+        source = (Path(__file__).resolve().parents[1] / "roost/static/app.js").read_text(encoding="utf-8")
+        self.assertIn(f"const INSTRUCTIONS_BEGIN = {json.dumps(chats.BEGIN)};", source)
+        self.assertIn(f"const INSTRUCTIONS_END = {json.dumps(chats.END)};", source)
 
 
 class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
@@ -406,6 +468,34 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"done": true', body)
         response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
         self.assertIs((await response.json())["live"], False)
+
+    async def test_conversation_settings_export_and_deletion(self):
+        response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
+        cookies = {server.COOKIE: response.cookies[server.COOKIE].value}
+        url = "/api/conversations/chat:one"
+        for body in ({"instructions": 1}, {"instructions": "x" * 4001}, {"instructions": "ok", "extra": 1}):
+            response = await self.client.put(url + "/settings", headers=self.headers, json=body, cookies=cookies)
+            self.assertEqual(response.status, 400, body)
+        response = await self.client.put(url + "/settings", headers=self.headers, json={"instructions": " Be brief. "}, cookies=cookies)
+        self.assertEqual(await response.json(), {"instructions": "Be brief."})
+        response = await self.client.get(url + "/settings", cookies=cookies)
+        self.assertEqual(await response.json(), {"instructions": "Be brief."})
+        # Hermes pages 500 rows at a time; the export reads until a short page.
+        pages = [{"messages": [{"role": "user", "content": str(i)} for i in range(500)]}, {"messages": [{"role": "assistant", "content": "end"}]}]
+        self.app["hermes"].request = AsyncMock(side_effect=pages)
+        response = await self.client.get(url + "/export", cookies=cookies)
+        self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename="conversation-chat_one.json"')
+        exported = await response.json()
+        self.assertEqual((len(exported["messages"]), exported["instructions"], exported["conversation"]), (501, "Be brief.", "chat:one"))
+        paths = [call.args[1] for call in self.app["hermes"].request.await_args_list]
+        self.assertIn("order=oldest&include_compacted=true&limit=500&offset=500", paths[1])
+        self.app["hermes"].request = AsyncMock(return_value={"messages": [{"role": "user"}] * 500})
+        response = await self.client.get(url + "/export", cookies=cookies)
+        self.assertEqual(response.status, 400)
+        self.app["hermes"].request = AsyncMock(return_value={"ok": True})
+        response = await self.client.delete(url, headers=self.headers, json={"confirm": True}, cookies=cookies)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.app["chats"].instructions("chat:one"), "")
 
     async def test_origin_and_auth_guards_and_error_headers(self):
         for headers in ({}, {**self.headers, "Origin": "https://other.example.invalid"}):
