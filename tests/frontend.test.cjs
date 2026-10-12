@@ -826,3 +826,16 @@ test('a refused stream hands the turn back to the transcript, and leaving a conv
   assert.equal(opened[1].closed, true);
   assert.equal(f.run('state.live'), null);
 });
+
+test('with the keyboard up the app fits the visible screen, so only the message bar rises', async () => {
+  const f = fixture(); await tick();
+  const app = f.get('app'), vars = {};
+  app.style.setProperty = (name, value) => { vars[name] = value; };
+  f.context.document.documentElement = {clientHeight: 800};
+  const fit = view => { f.context.window.visualViewport = view; f.run('fitViewport()'); return app.classList.contains('keyboard-open'); };
+  assert.equal(fit({height: 800, offsetTop: 0, scale: 1}), false);
+  assert.equal(fit({height: 450, offsetTop: 120, scale: 1}), true);
+  assert.deepEqual(vars, {'--keyboard-top': '120px', '--keyboard-height': '450px'});
+  assert.equal(fit({height: 400, offsetTop: 200, scale: 2}), false, 'a pinch zoom is not the keyboard');
+  assert.equal(fit({height: 800, offsetTop: 0, scale: 1}), false);
+});
