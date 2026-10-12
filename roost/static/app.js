@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
-                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false };
+                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -96,7 +96,7 @@ function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
+    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null });
@@ -105,7 +105,6 @@ function signedOut() {
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
   for (const id of ["job-dialog", "conversation-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
-  $("more-conversations").disabled = false; $("more-conversations").textContent = "Load more";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
   notice("");
@@ -164,8 +163,7 @@ function setSection(section) {
   $("top-action").replaceChildren(icon(section === "jobs" ? "plus" : "compose"));
   $("top-action").setAttribute("aria-label", section === "jobs" ? "New job" : "New conversation");
   $("top-action").title = section === "jobs" ? "New job" : "New conversation";
-  if (section !== "messages") show("more-conversations", false);
-  else renderConversations();
+  if (section === "messages") renderConversations();
   if (section === "jobs") loadJobs().catch((error) => notice(error.message));
   if (section === "settings") loadSettings();
 }
@@ -344,7 +342,6 @@ async function deleteConversation() {
 }
 
 function renderConversations() {
-  show("more-conversations", state.section === "messages" && state.conversationsMore);
   const list = $("conversation-list"); list.replaceChildren();
   const rows = state.conversations.filter((item) =>
     (sessionName(item) + " " + (item.preview || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
@@ -380,13 +377,19 @@ function renderConversations() {
     wrapper.append(remove, button);
     list.append(wrapper);
   }
+  if (state.loadingMore) {
+    const loading = el("div", "list-loading");
+    loading.setAttribute("role", "status"); loading.setAttribute("aria-label", "Loading older conversations");
+    loading.append(el("span", "spinner"));
+    list.append(loading);
+  }
 }
 
 async function loadConversations(more = false) {
   const epoch = state.authEpoch;
-  const button = $("more-conversations");
-  if (button.disabled) return;
-  if (more) { button.disabled = true; button.textContent = "Loading…"; }
+  // A refresh waits out a page load; both would otherwise race for the paging offset.
+  if (state.loadingMore) return;
+  if (more) { state.loadingMore = true; renderConversations(); }
   const serial = state.conversationRequest = (state.conversationRequest || 0) + 1;
   try {
     // Refresh the loaded range, not just its first page: insertions would otherwise
@@ -413,8 +416,17 @@ async function loadConversations(more = false) {
       (!Number.isInteger(data.total) || offset < data.total);
     finishLoadingConversations(data, loaded, more);
   } finally {
-    if (more && epoch === state.authEpoch) { button.disabled = false; button.textContent = "Load more"; }
+    if (more && epoch === state.authEpoch) { state.loadingMore = false; renderConversations(); }
   }
+  if (epoch === state.authEpoch) loadMoreIfNearEnd();
+}
+
+// Older conversations load as the list nears its end, or at once when the loaded ones don't fill it.
+function loadMoreIfNearEnd() {
+  const list = $("conversation-list");
+  if (state.section !== "messages" || !state.conversationsMore || state.loadingMore) return;
+  if (list.scrollTop + list.clientHeight < list.scrollHeight - 400) return;
+  loadConversations(true).catch((error) => notice(error.message));
 }
 
 function conversationId(item) { return item?.session_id || item?.id; }
@@ -427,7 +439,6 @@ function finishLoadingConversations(data, rows, more) {
   }
   renderConversations();
   if (!state.current && !more) renderWelcome();
-  show("more-conversations", state.section === "messages" && state.conversationsMore);
 }
 
 function renderWelcome() {
@@ -1369,7 +1380,66 @@ $("search").addEventListener("input", () => {
   const query = $("search").value.trim().toLowerCase();
   if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = query; renderConversations(); }
 });
-$("more-conversations").addEventListener("click", () => loadConversations(true).catch((error) => notice(error.message)));
+$("conversation-list").addEventListener("scroll", loadMoreIfNearEnd, { passive: true });
+
+// Pull to refresh on phones: drag Messages or Jobs down from the top, past the threshold, and let go.
+// The spinner holds in place while the list reloads. Sideways drags (swipe to delete) are left alone.
+const PULL_THRESHOLD = 64, PULL_HOLD = 52, PULL_MAX = 110, PULL_MINIMUM_MS = 600;
+const pullIndicator = $("pull-indicator"), pullSpinner = el("span", "spinner");
+pullIndicator.append(pullSpinner);
+
+function settlePull(height) {
+  pullIndicator.classList.add("settling");
+  pullIndicator.style.height = height + "px";
+  setTimeout(() => pullIndicator.classList.remove("settling"), 260);
+}
+
+async function refreshFromPull() {
+  state.refreshing = true;
+  const epoch = state.authEpoch, began = Date.now();
+  pullIndicator.classList.remove("armed"); pullIndicator.classList.add("refreshing");
+  settlePull(PULL_HOLD);
+  try { await (state.section === "jobs" ? loadJobs() : loadConversations()); }
+  catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  // A very fast reload still shows the spinner long enough to read as "refreshed".
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, PULL_MINIMUM_MS - (Date.now() - began))));
+  state.refreshing = false;
+  pullIndicator.classList.remove("refreshing");
+  settlePull(0);
+}
+
+function pullToRefresh(list) {
+  let drag = null;
+  list.addEventListener("touchstart", (event) => {
+    if (!phoneWidth.matches || state.refreshing || list.scrollTop > 0 || event.touches.length !== 1) return;
+    drag = { x: event.touches[0].clientX, y: event.touches[0].clientY, pull: 0, vertical: false };
+  }, { passive: true });
+  list.addEventListener("touchmove", (event) => {
+    if (!drag) return;
+    const dx = event.touches[0].clientX - drag.x, dy = event.touches[0].clientY - drag.y;
+    if (!drag.vertical) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      if (dy <= 0 || Math.abs(dx) > Math.abs(dy)) { drag = null; return; }
+      drag.vertical = true;
+    }
+    event.preventDefault();
+    drag.pull = Math.min(PULL_MAX, Math.max(0, dy * 0.5));
+    pullIndicator.style.height = drag.pull + "px";
+    pullSpinner.style.transform = `rotate(${drag.pull * 4}deg)`;
+    pullIndicator.classList.toggle("armed", drag.pull >= PULL_THRESHOLD);
+  }, { passive: false });
+  const end = (event) => {
+    if (!drag) return;
+    const { pull } = drag; drag = null;
+    pullSpinner.style.transform = "";
+    if (event.type === "touchend" && pull >= PULL_THRESHOLD) refreshFromPull();
+    else { pullIndicator.classList.remove("armed"); settlePull(0); }
+  };
+  list.addEventListener("touchend", end);
+  list.addEventListener("touchcancel", end);
+}
+pullToRefresh($("conversation-list"));
+pullToRefresh($("sidebar-jobs-list"));
 $("composer").addEventListener("submit", submitMessage);
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
