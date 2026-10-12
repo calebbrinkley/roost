@@ -606,4 +606,69 @@ test('an unreachable server at start shows Connecting and retries, never a blank
   assert.equal(f.get('connecting').classList.contains('hidden'), true);
   assert.equal(f.run('state.authEpoch'), 1);
   f.run('start();'); assert.equal(calls, 2);
+
+test('the thinking indicator stays through tool rounds and clears on the final reply', async () => {
+  const f = fixture(); await tick();
+  const now = Date.now() / 1000, thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
+  f.run(`state.current = 'one'; state.pending = {id: 'one', text: 'check the logs', since: Date.now()};`);
+  const user = {role: 'user', content: 'check the logs', timestamp: now};
+  const interim = {role: 'assistant', content: 'Let me look.', tool_calls: [{id: 'a'}], timestamp: now};
+  const tool = {role: 'tool', content: 'ok', timestamp: now};
+  for (const rows of [[], [user], [user, interim], [user, interim, tool]]) {
+    f.context.rows = rows; f.run('renderMessages(rows)');
+    assert.equal(thinking(), true, `${rows.length} rows`);
+  }
+  f.context.rows = [user, interim, tool, {role: 'assistant', content: 'All clear.', timestamp: now}];
+  f.run('renderMessages(rows)');
+  assert.equal(thinking(), false);
+  assert.equal(f.run('state.pending'), null);
+});
+
+test('an opened conversation shows a turn still in progress, but not a stale or failed one', async () => {
+  const f = fixture(); await tick();
+  const now = Date.now() / 1000, thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
+  const show = rows => { f.context.rows = rows; f.run(`state.current = 'one'; state.pending = null; renderMessages(rows)`); return thinking(); };
+  assert.equal(show([{role: 'user', content: 'hi', timestamp: now}]), true);
+  assert.equal(show([{role: 'user', content: 'hi', timestamp: now - 3600}]), false);
+  assert.equal(show([{role: 'user', content: 'hi', timestamp: now}, {role: 'assistant', content: 'Failed.', finish_reason: 'error', tool_calls: [{id: 'a'}], timestamp: now}]), false);
+});
+
+test('the working label never says typing', async () => {
+  const f = fixture(); await tick();
+  assert.equal(f.run('WORKING_VERBS').includes('typing'), false);
+  for (let i = 0; i < 50; i++) assert.notEqual(f.run('nextWorkingVerb(); state.workingVerb'), 'typing');
+});
+
+test('thoughts from every step fold, collapsed, into one block above the reply they led to', async () => {
+  const f = fixture(); await tick();
+  const now = Date.now() / 1000;
+  f.context.rows = [
+    {id: 1, role: 'user', content: 'check the logs', timestamp: now},
+    {id: 2, role: 'assistant', content: '', reasoning: 'Read the log first.', tool_calls: [{id: 'a'}], timestamp: now},
+    {id: 3, role: 'tool', content: 'ok', timestamp: now},
+    {id: 4, role: 'assistant', content: 'All clear.', reasoning_content: 'Nothing failed.', timestamp: now},
+    {id: 5, role: 'assistant', content: 'Anything else?', reasoning: 'hidden by Hermes', display_reasoning: '', timestamp: now}];
+  f.run(`state.current = 'one'; renderMessages(rows)`);
+  const kids = f.get('transcript').children, blocks = kids.filter(n => n.className === 'thoughts');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].open, false);
+  assert.match(text(blocks[0]), /Read the log first\.[\s\S]*Nothing failed\./);
+  assert.equal(kids[kids.indexOf(blocks[0]) + 1].className, 'message from-wren');
+  assert.match(text(kids[kids.indexOf(blocks[0]) + 1]), /All clear/);
+});
+
+test('an opened thoughts block stays open across polls, and a turn in progress shows its thoughts so far', async () => {
+  const f = fixture(); await tick();
+  const now = Date.now() / 1000, block = () => f.get('transcript').children.find(n => n.className === 'thoughts');
+  f.context.rows = [{id: 1, role: 'user', content: 'hi', timestamp: now},
+    {id: 2, role: 'assistant', content: '', reasoning: 'Planning.', tool_calls: [{id: 'a'}], timestamp: now}];
+  f.run(`state.current = 'one'; renderMessages(rows)`);
+  const kids = f.get('transcript').children;
+  assert.equal(kids.indexOf(block()), kids.findIndex(n => n.className === 'typing-row') - 1);
+  block().open = true; block().events.toggle();
+  f.context.rows.push({id: 3, role: 'assistant', content: 'Hello.', timestamp: now});
+  f.run('renderMessages(rows)');
+  assert.equal(block().open, true);
+  f.run(`state.current = 'two'; renderMessages(rows)`);
+  assert.equal(block().open, false);
 });
