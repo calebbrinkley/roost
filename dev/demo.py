@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -244,14 +245,27 @@ def mock_hermes():
                 session["preview"] = text[:80]
                 session["last_active_at"] = time.time()
 
-                async def reply(sid, prompt):
-                    await asyncio.sleep(1)
+                async def reply(runtime_id, sid, prompt):
+                    # Streams like Hermes: thoughts, then the reply, a few words at a time, then the saved row.
+                    async def emit(kind, payload=None):
+                        if not socket.closed:
+                            await socket.send_json({"jsonrpc": "2.0", "method": "event", "params": {
+                                "type": kind, "session_id": runtime_id, **({"payload": payload} if payload else {})}})
+                    answer = (f"This is the local demo reply to: “{prompt}”\n\n"
+                              "The agent's real answer will appear here when Roost is connected to Hermes.")
+                    thoughts = "The owner sent a message to the demo. I'll answer with the demo reply and say where the real one comes from."
+                    await emit("message.start")
+                    for kind, text in (("reasoning.delta", thoughts), ("message.delta", answer)):
+                        for word in re.findall(r"\S+\s*", text):
+                            await asyncio.sleep(0.03)
+                            await emit(kind, {"text": word})
                     if sid not in messages:
                         return  # The owner may delete a conversation while its demo reply is pending.
-                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nThe agent's real answer will appear here when Roost is connected to Hermes."})
+                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": answer, "reasoning": thoughts})
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
+                    await emit("message.complete", {"text": answer, "status": "complete"})
 
-                asyncio.create_task(reply(stored_id, text))
+                asyncio.create_task(reply(params.get("session_id"), stored_id, text))
                 result = {"status": "accepted"}
             else:
                 await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})

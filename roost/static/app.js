@@ -105,9 +105,11 @@ async function api(path, options = {}) {
 
 function signedOut() {
   state.authEpoch++; state.viewEpoch++;
+  closeStream();
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set() });
+    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
+    live: null, liveNodes: null, lastRows: null });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
@@ -615,13 +617,24 @@ function renderMessages(rows) {
   state.renderedConversation = state.current;
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
-  const visible = records(rows).filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
+  state.lastRows = rows; state.liveNodes = null;
+  let all = records(rows), live = state.live?.id === state.current ? state.live : null;
+  if (live) {
+    // The turn being written shows live: the message it answers, then its thoughts and text so far,
+    // in place of whatever steps Hermes has saved, until Hermes has saved the finished turn.
+    let own = -1;
+    for (let i = all.length - 1; i >= 0; i--) if (all[i].role === "user" && messageText(all[i]) === live.user) { own = i; break; }
+    const saved = own >= 0 && !turnInProgress(all) && all.slice(own + 1).some((row) => row.role === "assistant" && messageText(row));
+    if (live.done && (saved || Date.now() - live.ended > 15000)) { state.live = live = null; }
+    else all = own >= 0 ? all.slice(0, own + 1) : [...all, { role: "user", content: live.user }];
+  }
+  const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   // Thoughts from every step since the last message shown, including steps that only called tools,
   // go in one block above the next message; a turn still going shows its thoughts so far at the end.
   const thoughtsBefore = new Map(), shownRows = new Set(visible);
   let thoughts = [], thoughtsKey = null;
-  records(rows).forEach((row, index) => {
+  all.forEach((row, index) => {
     const text = row.role === "assistant" && row.display_kind !== "hidden" ? reasoningText(row) : "";
     if (text) { thoughts.push(text); thoughtsKey ??= String(row.id ?? `at ${index}`); }
     if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
@@ -649,6 +662,7 @@ function renderMessages(rows) {
     }
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
+  if (live) transcript.append(...liveNodes(live));
   const working = turnInProgress(records(rows));
   if (state.pending?.id === state.current) {
     // Until Hermes saves the message just sent, the transcript cannot say whether its turn is over.
@@ -658,7 +672,7 @@ function renderMessages(rows) {
     }
     if ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000) state.pending = null;
   }
-  if (working || state.pending?.id === state.current) {
+  if (live ? !live.done : working || state.pending?.id === state.current) {
     const typing = el("div", "typing-row");
     const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
     typing.append(dots, workingLabel()); transcript.append(typing);
@@ -669,6 +683,7 @@ function renderMessages(rows) {
 
 async function selectConversation(id, source) {
   state.viewEpoch++;
+  if (state.current !== id) leaveLive();
   state.current = id;
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -691,12 +706,96 @@ async function loadMessages(id = state.current) {
   // than the interval would otherwise discard every reply and freeze the transcript.
   if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && serial > (state.messageApplied || 0)) {
     state.messageApplied = serial;
+    if (data.live === true) openStream(id);
     renderMessages(Array.isArray(data.messages) ? data.messages : []);
   }
 }
 
+// A reply being written arrives as an event stream of its thoughts and text. The transcript stays
+// the record: a stream that can't open or ends early leaves the turn to polling, as before.
+function openStream(id) {
+  if (typeof EventSource !== "function" || state.stream?.id === id) return;
+  closeStream();
+  const source = new EventSource(`/api/conversations/${encodeURIComponent(id)}/stream`);
+  const ours = () => state.stream?.source === source;
+  state.stream = { id, source };
+  source.onmessage = (event) => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (!ours() || !data || typeof data !== "object") return;
+    // Every connection, reconnections included, starts with the turn so far.
+    if (data.reset) {
+      if (state.live?.id !== id || state.live.started !== data.started) state.liveThoughtsOpen = true;
+      state.live = { id, user: String(data.user ?? ""), started: data.started, thoughts: "", text: "", done: false };
+    }
+    if (state.live?.id !== id) return;
+    if (typeof data.thoughts === "string") state.live.thoughts += data.thoughts;
+    if (typeof data.text === "string") state.live.text += data.text;
+    if (data.done) endStream(id);
+    else scheduleLive();
+  };
+  // The browser retries a dropped connection by itself; a refused one (the turn is over) ends here.
+  source.onerror = () => { if (ours() && source.readyState === 2) endStream(id); };
+}
+
+function endStream(id) {
+  closeStream();
+  if (state.live?.id === id) Object.assign(state.live, { done: true, ended: Date.now() });
+  if (state.current === id) loadMessages(id).catch(() => {});
+}
+
+function closeStream() {
+  state.stream?.source.close();
+  state.stream = null;
+}
+
+// Another conversation is opening: nothing live or rendered here belongs to it.
+function leaveLive() {
+  closeStream();
+  Object.assign(state, { live: null, liveNodes: null, lastRows: null });
+}
+
+function scheduleLive() {
+  if (state.liveFrame) return;
+  const frame = window.requestAnimationFrame?.bind(window) || ((callback) => setTimeout(callback, 16));
+  state.liveFrame = frame(() => { state.liveFrame = 0; renderLive(); });
+}
+
+// Thoughts open while they are written (one closed stays closed for that turn), then the text.
+function liveNodes(live) {
+  const details = el("details", "thoughts");
+  details.open = state.liveThoughtsOpen !== false;
+  details.append(el("summary", "", "Thoughts"));
+  const thoughts = el("div", "thoughts-body"); details.append(thoughts);
+  details.addEventListener("toggle", () => { state.liveThoughtsOpen = details.open; });
+  const message = el("article", "message from-wren"), body = el("div", "message-body"); message.append(body);
+  state.liveNodes = { details, thoughts, message, body, shownThoughts: null, shownText: null };
+  fillLive(live);
+  return [details, message];
+}
+
+function fillLive(live) {
+  const nodes = state.liveNodes;
+  if (nodes.shownThoughts !== live.thoughts) { nodes.thoughts.replaceChildren(); addMarkdown(nodes.thoughts, live.thoughts); nodes.shownThoughts = live.thoughts; }
+  if (nodes.shownText !== live.text) { nodes.body.replaceChildren(); addMarkdown(nodes.body, live.text); nodes.shownText = live.text; }
+  nodes.details.classList.toggle("hidden", !live.thoughts.trim());
+  nodes.message.classList.toggle("hidden", !live.text.trim());
+}
+
+// Only the live nodes change while text arrives; the rest of the transcript stays as it is.
+function renderLive() {
+  const live = state.live;
+  if (!live || live.id !== state.current || !state.lastRows) return;
+  if (!state.liveNodes) return renderMessages(state.lastRows);
+  const transcript = $("transcript");
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  fillLive(live);
+  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+}
+
 function newConversation() {
   state.viewEpoch++;
+  leaveLive();
   state.current = null;
   state.draft = true;
   $("app").classList.add("chat-open");
@@ -725,6 +824,7 @@ async function submitMessage(event) {
     accepted = true;
     if (sameView()) { state.current = result.session_id; state.draft = false; }
     state.pending = { id: result.session_id, text, since: Date.now() };
+    if (state.current === result.session_id) openStream(result.session_id);
     nextWorkingVerb();
     // A failed refresh must never turn an accepted message back into an unsent draft.
     const updates = await Promise.allSettled([loadConversations(), loadMessages()]);

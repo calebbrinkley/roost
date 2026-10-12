@@ -755,3 +755,74 @@ test('a tapped notification opens its conversation after sign-in', async () => {
   assert.deepEqual(Array.from(f.run('opened')), ['chat:one']);
   assert.equal(f.context.history.url, '/');
 });
+
+function eventSources() {
+  const opened = [];
+  class EventSource {
+    constructor(url) { this.url = url; this.readyState = 1; this.closed = false; opened.push(this); }
+    close() { this.closed = true; this.readyState = 2; }
+    send(data) { this.onmessage({data: JSON.stringify(data)}); }
+  }
+  return {opened, globals: {EventSource}};
+}
+
+test('a reply streams its thoughts, then its text, in place of the steps Hermes has saved so far', async () => {
+  const {opened, globals} = eventSources();
+  const f = fixture(undefined, globals); await tick();
+  const now = Date.now() / 1000, kids = () => f.get('transcript').children;
+  const message = n => n.className === 'message from-wren';
+  f.get('message').value = 'check the logs';
+  f.run(`state.current = 'one'; api = async () => ({session_id: 'one'}); loadConversations = async () => {};
+    globalThis.loads = 0; loadMessages = async () => { loads++; };`);
+  await f.run(`submitMessage({preventDefault() {}})`);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].url, '/api/conversations/one/stream');
+  const user = {id: 1, role: 'user', content: 'check the logs', timestamp: now};
+  const interim = {id: 2, role: 'assistant', content: 'Let me look.', reasoning: 'Read the log.', tool_calls: [{id: 'a'}], timestamp: now};
+  f.context.rows = [user, interim];
+  f.run('renderMessages(rows)');
+  opened[0].send({reset: true, user: 'check the logs', started: 1, thoughts: 'Read the log.'});
+  f.run('renderLive()');
+  const thoughts = kids().find(n => n.className === 'thoughts');
+  assert.equal(thoughts.open, true);
+  assert.match(text(thoughts), /Read the log\./);
+  assert.equal(kids().find(message).classList.contains('hidden'), true);
+  assert.equal(kids().filter(n => n.className === 'thoughts').length, 1, 'saved steps are not shown twice');
+  opened[0].send({text: 'Let me look.\n\nAll clear.'});
+  f.run('renderLive()');
+  assert.match(text(kids().find(message)), /All clear\./);
+  assert.ok(find(f.get('transcript'), n => n.className === 'typing-row'));
+  opened[0].send({done: true});
+  assert.equal(opened[0].closed, true);
+  assert.equal(f.run('loads'), 2, 'the end of the stream reloads the transcript');
+  f.context.rows = [user, interim, {id: 3, role: 'tool', content: 'ok', timestamp: now},
+    {id: 4, role: 'assistant', content: 'All clear.', reasoning: 'Nothing failed.', timestamp: now}];
+  f.run('renderMessages(rows)');
+  assert.equal(f.run('state.live'), null);
+  assert.equal(kids().find(n => n.className === 'thoughts').open, false);
+  assert.equal(find(f.get('transcript'), n => n.className === 'typing-row'), undefined);
+});
+
+test('a reply being written shows the message it answers before Hermes has saved it', async () => {
+  const {opened, globals} = eventSources();
+  const f = fixture(undefined, globals); await tick();
+  f.run(`state.current = 'one'; openStream('one'); renderMessages([])`);
+  opened[0].send({reset: true, user: 'hello there', started: 1});
+  f.run('renderLive()');
+  const yours = f.get('transcript').children.find(n => n.className === 'message from-you');
+  assert.match(text(yours), /hello there/);
+});
+
+test('a refused stream hands the turn back to the transcript, and leaving a conversation closes it', async () => {
+  const {opened, globals} = eventSources();
+  const f = fixture(undefined, globals); await tick();
+  f.run(`state.current = 'one'; loadMessages = async () => {}; openStream('one')`);
+  opened[0].send({reset: true, user: 'hi', started: 1, text: 'Hel'});
+  opened[0].readyState = 2; opened[0].onerror();
+  assert.equal(f.run('state.live.done'), true);
+  assert.equal(f.run('state.stream'), null);
+  f.run(`openStream('one')`);
+  f.run(`api = async () => ({messages: []}); selectConversation('two')`);
+  assert.equal(opened[1].closed, true);
+  assert.equal(f.run('state.live'), null);
+});

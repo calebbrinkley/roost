@@ -8,12 +8,12 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from aiohttp import CookieJar, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from roost import server
+from roost import live, server
 from roost.__main__ import main as cli_main
 from roost.auth import Sessions, make_password_hash
 from roost.hermes import Hermes, HermesError
@@ -76,7 +76,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}},
                                   content_type="application/json", json=AsyncMock(return_value={"text": "hello"}))
         await server.send_message(request)
-        hermes.send_message.assert_awaited_once_with("hello", "chat:one")
+        hermes.send_message.assert_awaited_once_with("hello", "chat:one", follow=ANY)
         self.assertIn("chat:one", request.app["watches"])
 
 
@@ -144,9 +144,30 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
                 except ConnectionResetError:
                     break
             return stream
+        async def ticket(request):
+            return web.json_response({"ticket": "one-use"})
+        async def socket(request):
+            # A turn whose first reasoning arrives before prompt.submit answers, among other sessions' events.
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            def event(kind, sid="runtime", **payload):
+                return {"jsonrpc": "2.0", "method": "event", "params": {"type": kind, "session_id": sid, "payload": payload}}
+            async for message in ws:
+                frame = message.json()
+                if frame["method"] == "session.create":
+                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {"session_id": "runtime", "stored_session_id": "chat:one"}})
+                else:
+                    await ws.send_json(event("reasoning.delta", text="Early "))
+                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {}})
+                    for item in (event("message.delta", "elsewhere", text="not ours"), event("reasoning.delta", text="thought"),
+                                 event("message.delta", text="Hi"), event("message.complete", text="Hi")):
+                        await ws.send_json(item)
+            return ws
         app = web.Application()
         app.router.add_post("/auth/password-login", login)
         app.router.add_get("/api/data", response)
+        app.router.add_post("/api/auth/ws-ticket", ticket)
+        app.router.add_get("/api/ws", socket)
         self.upstream = TestServer(app)
         await self.upstream.start_server()
         self.hermes = Hermes(str(self.upstream.make_url("")), "demo", self.password)
@@ -191,6 +212,19 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(caught.exception.status, 502)
 
 
+    async def test_a_followed_turn_yields_its_own_events_from_the_start(self):
+        followed = []
+        sid = await self.hermes.send_message("hello", follow=lambda sid, events: followed.append((sid, events)))
+        self.assertEqual((sid, followed[0][0]), ("chat:one", "chat:one"))
+        events = []
+        async for event in followed[0][1]:
+            events.append(event)
+            if event[0] == "message.complete":
+                break
+        await followed[0][1].aclose()
+        self.assertEqual(events, [("reasoning.delta", {"text": "Early "}), ("reasoning.delta", {"text": "thought"}),
+                                  ("message.delta", {"text": "Hi"}), ("message.complete", {"text": "Hi"})])
+
     async def test_rpc_events_do_not_extend_the_deadline(self):
         async def receive():
             await asyncio.sleep(0.001)
@@ -198,6 +232,51 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         socket = SimpleNamespace(send_json=AsyncMock(), receive=receive)
         with patch("roost.hermes.RPC_TIMEOUT", 0.02), self.assertRaises(asyncio.TimeoutError):
             await Hermes._rpc_on_socket(socket, 1, "session.create", {})
+
+
+class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    async def events(*items):
+        for item in items:
+            yield item
+            await asyncio.sleep(0)
+
+    async def test_a_turn_streams_in_steps_then_leaves_the_registry(self):
+        registry, written = {}, []
+        task = live.follow(registry, "chat:one", "hello", self.events(
+            ("reasoning.delta", {"text": "Look it up."}), ("message.delta", {"text": "Searching."}),
+            ("tool.start", {"name": "web_search"}), ("reasoning.delta", {"text": "\nFound it."}),
+            ("message.delta", {"text": "Here."}), ("message.complete", {}), ("message.delta", {"text": "late"})))
+        turn = registry["chat:one"]
+        response = SimpleNamespace(write=AsyncMock(side_effect=lambda data: written.append(data)))
+        await asyncio.gather(task, live.send(response, turn))
+        self.assertEqual((turn.thoughts, turn.text, turn.done), ("Look it up.\n\nFound it.", "Searching.\n\nHere.", True))
+        self.assertNotIn("chat:one", registry)
+        sent = [json.loads(line[6:]) for line in written]
+        self.assertEqual((sent[0]["reset"], sent[0]["user"], sent[-1]["done"]), (True, "hello", True))
+        self.assertEqual("".join(event.get("text", "") for event in sent), turn.text)
+
+    async def test_a_turn_is_bounded_and_a_new_one_keeps_its_place(self):
+        registry = {}
+        with patch("roost.live.TEXT_LIMIT", 8):
+            first = live.follow(registry, "chat:one", "one", self.events(("message.delta", {"text": "12345"}), ("message.delta", {"text": "6789"})))
+            turn = registry["chat:one"]
+            second = live.follow(registry, "chat:one", "two", self.events())
+            await first
+        self.assertEqual(turn.text, "12345")
+        await second
+        self.assertEqual(registry, {})
+
+    async def test_a_broken_stream_ends_the_turn(self):
+        async def broken():
+            yield ("message.delta", {"text": "Hi"})
+            raise ConnectionResetError
+        registry = {}
+        task = live.follow(registry, "chat:one", "hello", broken())
+        turn = registry["chat:one"]
+        await task
+        self.assertTrue(turn.done)
+        self.assertEqual(registry, {})
 
 
 class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
@@ -302,6 +381,31 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         response = await self.client.get("/api/jobs", cookies={server.COOKIE: token})
         self.assertEqual(response.status, 401)
+
+    async def test_a_reply_being_written_streams_to_a_signed_in_browser(self):
+        response = await self.client.get("/api/conversations/chat:one/stream")
+        self.assertEqual(response.status, 401)
+        response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
+        cookies = {server.COOKIE: response.cookies[server.COOKIE].value}
+        response = await self.client.get("/api/conversations/chat:one/stream", cookies=cookies)
+        self.assertEqual(response.status, 404)
+        release = asyncio.Event()
+        async def events():
+            yield ("message.delta", {"text": "Hi"})
+            await release.wait()
+        live.follow(self.app["live"], "chat:one", "hello", events())
+        self.app["hermes"].request = AsyncMock(return_value={"messages": []})
+        response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
+        self.assertIs((await response.json())["live"], True)
+        response = await self.client.get("/api/conversations/chat:one/stream", cookies=cookies)
+        self.assertEqual((response.status, response.content_type), (200, "text/event-stream"))
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertEqual(json.loads((await response.content.readline())[6:])["reset"], True)
+        release.set()
+        body = await response.text()
+        self.assertIn('"done": true', body)
+        response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
+        self.assertIs((await response.json())["live"], False)
 
     async def test_origin_and_auth_guards_and_error_headers(self):
         for headers in ({}, {**self.headers, "Origin": "https://other.example.invalid"}):
