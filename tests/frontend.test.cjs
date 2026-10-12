@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: false})})) {
+function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: false})}), globals = {}) {
   const nodes = new Map();
   function node() {
     const classes = new Set();
@@ -24,7 +24,7 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
     querySelectorAll: () => [], querySelector: () => get('main'), addEventListener() {} };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
-    fetch, AbortSignal, Date, Math, atob, btoa });
+    fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, ...globals });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
   return {context, get, run: code => vm.runInContext(code, context)};
 }
@@ -335,8 +335,8 @@ test('Jobs share the sidebar search and + button with Messages', async () => {
   assert.equal(f.get('search').placeholder, 'Search conversations');
 });
 
-function settingsFixture() {
-  const f = fixture();
+function settingsFixture(...args) {
+  const f = fixture(...args);
   Object.assign(f.context.window.roostTheme, { mode: 'system', accent: 'forest', size: 'default',
     choice() { return this.mode; }, set(mode) { this.mode = mode; }, setAccent(name) { this.accent = name; },
     textSize() { return this.size; }, setTextSize(name) { this.size = name; } });
@@ -672,4 +672,86 @@ test('an opened thoughts block stays open across polls, and a turn in progress s
   assert.equal(block().open, true);
   f.run(`state.current = 'two'; renderMessages(rows)`);
   assert.equal(block().open, false);
+});
+
+const pushId = endpoint => require('node:crypto').createHash('sha256').update(endpoint).digest('hex').slice(0, 24);
+
+function pushBrowser() {
+  const calls = {permission: 0, subscribe: [], unsubscribed: 0};
+  const subscription = {endpoint: 'https://web.push.apple.com/device', unsubscribe: async () => { calls.unsubscribed++; return true; },
+    toJSON() { return {endpoint: this.endpoint, keys: {p256dh: 'BA', auth: 'AA'}}; }};
+  let current = null;
+  const registration = {pushManager: {getSubscription: async () => current,
+    subscribe: async options => { calls.subscribe.push(options); current = subscription; return subscription; }}};
+  const globals = {isSecureContext: true, PushManager: function () {}, crypto: require('node:crypto').webcrypto, TextEncoder,
+    Notification: {permission: 'default', requestPermission: async () => { calls.permission++; return 'granted'; }},
+    navigator: {userAgent: 'Mozilla/5.0 (iPhone)', serviceWorker: {register: async () => registration, ready: Promise.resolve(registration), addEventListener() {}}}};
+  return {calls, globals, subscription};
+}
+
+test('Notifications turns on for this device from the tap, then marks it and can send a test', async () => {
+  const browser = pushBrowser();
+  const f = settingsFixture(undefined, browser.globals); await tick();
+  const key = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 1)]).toString('base64url');
+  f.context.devices = [];
+  f.run(`globalThis.sent = []; api = async (path, options = {}) => {
+    sent.push([options.method || 'GET', path, options.body && JSON.parse(options.body)]);
+    if (path === '/settings') return ${SETTINGS};
+    if (path === '/push') return {public_key: '${key}', devices};
+    if (path === '/push/devices') { devices.push({id: '${pushId('https://web.push.apple.com/device')}', name: 'iPhone', created: 1, last_sent: null}); return {}; }
+    return {};
+  };`);
+  f.run(`setSection('settings')`); await tick();
+  await f.run(`selectSettingsGroup('notifications'); loadPush()`); await tick();
+  assert.match(text(f.get('settings-detail')), /Notifications are off for this device/);
+  await find(f.get('settings-detail'), n => n.textContent === 'Turn on').events.click(); await tick(); await tick();
+  assert.equal(browser.calls.permission, 1);
+  assert.equal(browser.calls.subscribe[0].userVisibleOnly, true);
+  assert.equal(browser.calls.subscribe[0].applicationServerKey.byteLength, 65);
+  const added = f.run('sent').find(([method, path]) => method === 'POST' && path === '/push/devices');
+  assert.deepEqual(JSON.parse(JSON.stringify(added[2])), {subscription: browser.subscription.toJSON(), name: 'iPhone'});
+  assert.match(text(f.get('settings-detail')), /Notifications are on for this device[\s\S]*iPhone \(this device\)/);
+  await find(f.get('settings-detail'), n => n.textContent === 'Send a test').events.click(); await tick();
+  assert.ok(f.run('sent').some(([method, path, body]) => method === 'POST' && path === '/push/test' && body.device === pushId(browser.subscription.endpoint)));
+});
+
+test('an iPhone outside the Home Screen is told how to get notifications, and other devices can be removed', async () => {
+  const f = settingsFixture(undefined, {navigator: {userAgent: 'Mozilla/5.0 (iPhone)'}}); await tick();
+  f.run(`globalThis.sent = []; api = async (path, options = {}) => {
+    sent.push([options.method || 'GET', path, options.body && JSON.parse(options.body)]);
+    if (path === '/settings') return ${SETTINGS};
+    return path === '/push' ? {public_key: 'BA', devices: [{id: 'mac', name: 'Mac', created: 1, last_sent: 2}]} : {};
+  };`);
+  f.run(`setSection('settings')`); await tick();
+  await f.run(`selectSettingsGroup('notifications'); loadPush()`); await tick();
+  assert.match(text(f.get('settings-detail')), /Add to Home Screen/);
+  assert.equal(find(f.get('settings-detail'), n => n.textContent === 'Turn on'), undefined);
+  const remove = () => find(f.get('settings-detail'), n => /^(Remove|Confirm remove)$/.test(n.textContent));
+  remove().events.click();
+  assert.equal(remove().textContent, 'Confirm remove');
+  await remove().events.click(); await tick();
+  assert.ok(f.run('sent').some(([method, path, body]) => method === 'DELETE' && path === '/push/devices/mac' && body.confirm === true));
+});
+
+test('presence reports the conversation on screen, and nothing when hidden or back at the list on a phone', async () => {
+  const posts = [];
+  const f = fixture(async (url, options = {}) => {
+    if (url === '/api/presence') posts.push(JSON.parse(options.body).conversation);
+    return {ok: true, json: async () => ({signed_in: false})};
+  }); await tick();
+  f.run(`show('app', true); state.section = 'messages'; state.current = 'chat:one';`);
+  f.context.document.visibilityState = 'visible'; f.run('reportPresence()');
+  f.context.document.visibilityState = 'hidden'; f.run('reportPresence()');
+  f.context.document.visibilityState = 'visible';
+  f.run(`phoneWidth.matches = true; $('app').classList.remove('chat-open'); reportPresence();`);
+  f.run(`$('app').classList.add('chat-open'); reportPresence();`);
+  assert.deepEqual(posts, ['chat:one', null, null, 'chat:one']);
+});
+
+test('a tapped notification opens its conversation after sign-in', async () => {
+  const f = fixture(undefined, {location: {search: '?c=chat%3Aone'}, history: {replaceState(state, title, url) { this.url = url; }}}); await tick();
+  f.run(`globalThis.opened = []; api = async () => ({sessions: []}); selectConversation = id => opened.push(id);`);
+  await f.run('signedIn()');
+  assert.deepEqual(Array.from(f.run('opened')), ['chat:one']);
+  assert.equal(f.context.history.url, '/');
 });

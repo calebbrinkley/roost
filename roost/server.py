@@ -18,6 +18,7 @@ from . import __version__
 from .auth import Sessions, verify_password
 from .hermes import Hermes, HermesError
 from .passkeys import PasskeyError, Passkeys
+from .push import Push, PushError
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "roost_session"
@@ -29,6 +30,9 @@ AGENT_NAME_CACHE_SECONDS = 300
 # systemd restarts the service after a non-zero exit (Restart=on-failure); 75 is EX_TEMPFAIL.
 RESTART_EXIT = 75
 SOUL_LIMIT = 16000
+# Reply notifications: how often the watcher looks, how long it waits for a reply, and how
+# recently an open Roost must have reported a conversation on screen to count as looking at it.
+WATCH_INTERVAL, WATCH_SECONDS, PRESENCE_SECONDS = 4, 1800, 35
 # "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
 TIME_ZONE = re.compile(r"^(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})$")
 # Hermes status fields shown in About; the rest (paths, PIDs, auth) stays on the server.
@@ -452,6 +456,128 @@ async def about(request: web.Request):
     })
 
 
+def message_text(row: dict) -> str:
+    value = row.get("display_content") or row.get("content")
+    if isinstance(value, list):
+        value = " ".join(part if isinstance(part, str) else str((part or {}).get("text") or "") for part in value)
+    return value if isinstance(value, str) else ""
+
+
+def finished_reply(rows: list, since: float) -> str | None:
+    """The reply text once the turn has ended: the transcript ends with an assistant message
+    written after `since` that has text and no tool calls. None while the agent is still working.
+    Hermes returns at most the newest 500 rows, so a row count can't say what is new; Hermes and
+    Roost share the host's clock, so the reply's timestamp can."""
+    if not rows or not isinstance(rows[-1], dict):
+        return None
+    last = rows[-1]
+    text = message_text(last).strip()
+    if last.get("role") != "assistant" or not text or last.get("tool_calls"):
+        return None
+    try:
+        written = float(last.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+    return text if written >= since else None
+
+
+def preview(text: str, limit: int = 160) -> str:
+    flat = " ".join(text.replace("```", " ").split())
+    return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
+
+
+def watch_reply(app: web.Application, sid: str, since: float) -> None:
+    if isinstance(sid, str) and ID.fullmatch(sid):
+        app["watches"][sid] = {"since": since, "started": time.monotonic()}
+
+
+def looking_at(app: web.Application, sid: str) -> bool:
+    now = time.monotonic()
+    return any(now - seen < PRESENCE_SECONDS and conversation == sid for seen, conversation in app["presence"].values())
+
+
+async def check_replies(app: web.Application) -> None:
+    """One pass over conversations waiting for a reply; notify for each that finished unseen."""
+    for sid, watch in list(app["watches"].items()):
+        if time.monotonic() - watch["started"] > WATCH_SECONDS:
+            app["watches"].pop(sid, None)
+            continue
+        try:
+            data = await app["hermes"].request("GET", f"/api/sessions/{quote(sid, safe='')}/messages?inline_images=false")
+        except HermesError:
+            continue
+        rows = data.get("messages") if isinstance(data, dict) else None
+        reply = finished_reply(rows if isinstance(rows, list) else [], watch["since"])
+        if reply is None:
+            continue
+        app["watches"].pop(sid, None)
+        if not looking_at(app, sid):
+            await notify(app, {"title": await agent_name(app, ask_hermes=True), "body": preview(reply),
+                               "url": "/?c=" + quote(sid, safe=""), "tag": "reply-" + sid})
+
+
+async def notify(app: web.Application, message: dict) -> int:
+    try:
+        return await app["push"].send(app["push_http"], message)
+    except ValueError:
+        return 0
+
+
+async def watch_replies(app: web.Application) -> None:
+    while True:
+        await asyncio.sleep(WATCH_INTERVAL)
+        try:
+            await check_replies(app)
+        except Exception:  # one bad pass must not end reply notifications until a restart
+            pass
+
+
+async def presence(request: web.Request):
+    data = await json_body(request)
+    conversation = data.get("conversation")
+    if set(data) != {"conversation"} or not (conversation is None or (isinstance(conversation, str) and ID.fullmatch(conversation))):
+        raise bad("Send the conversation on screen, or null.")
+    request.app["presence"][session_key(request)] = (time.monotonic(), conversation)
+    return web.json_response({"ok": True})
+
+
+async def push_settings(request: web.Request):
+    return web.json_response({"public_key": request.app["push"].public_key(), "devices": request.app["push"].list()})
+
+
+async def add_push_device(request: web.Request):
+    data = await json_body(request)
+    name = clean_name(data.get("name", ""))
+    if set(data) != {"subscription", "name"} or not isinstance(data["subscription"], dict) or not name:
+        raise bad("Send this browser's push subscription and a name for the device.")
+    try:
+        added = request.app["push"].subscribe(data["subscription"], name)
+    except PushError as error:
+        raise bad(str(error)) from None
+    return web.json_response(added, status=201)
+
+
+async def remove_push_device(request: web.Request):
+    data = await json_body(request)
+    if set(data) != {"confirm"} or data["confirm"] is not True:
+        raise bad("Confirm removing the device.")
+    if not request.app["push"].remove(request.match_info["did"]):
+        raise web.HTTPNotFound(text="That device doesn't get Roost notifications.")
+    return web.json_response({"ok": True})
+
+
+async def test_push(request: web.Request):
+    data = await json_body(request)
+    device = data.get("device")
+    if set(data) - {"device"} or not (device is None or isinstance(device, str)):
+        raise bad("Send a device to test, or none for all.")
+    delivered = await request.app["push"].send(request.app["push_http"], {
+        "title": "Roost", "body": "Notifications from Roost are working.", "url": "/", "tag": "test"}, only=device)
+    if not delivered:
+        raise web.HTTPBadGateway(text="The push service didn't accept the test. Turn notifications off and on again on that device.")
+    return web.json_response({"delivered": delivered})
+
+
 async def restart_agent(request: web.Request):
     await request.app["hermes"].request("POST", "/api/gateway/restart")
     return web.json_response({"ok": True})
@@ -484,7 +610,9 @@ async def conversation(request: web.Request):
 async def create_conversation(request: web.Request):
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
+    since = time.time()
     sid = await request.app["hermes"].send_message(text)
+    watch_reply(request.app, sid, since)
     return web.json_response({"session_id": sid}, status=201)
 
 
@@ -492,7 +620,10 @@ async def send_message(request: web.Request):
     sid = item_id(request, "sid", encode=False)
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
+    # The reply to watch for is written after this message is sent.
+    since = time.time()
     stored = await request.app["hermes"].send_message(text, sid)
+    watch_reply(request.app, stored, since)
     return web.json_response({"session_id": stored})
 
 
@@ -585,7 +716,7 @@ async def delete_job(request: web.Request):
 
 async def static(request: web.Request):
     name = request.match_info.get("name") or "index.html"
-    if name not in {"index.html", "app.js", "theme.js", "style.css", "manifest.webmanifest",
+    if name not in {"index.html", "app.js", "theme.js", "style.css", "manifest.webmanifest", "sw.js",
                     "icon-192.png", "icon-512.png", "apple-touch-icon.png",
                     "SpaceGrotesk-Regular.ttf", "SpaceGrotesk-Bold.ttf"}:
         raise web.HTTPNotFound()
@@ -594,9 +725,13 @@ async def static(request: web.Request):
 
 async def startup(app: web.Application):
     await app["hermes"].start()
+    app["push_http"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    app["watcher"] = asyncio.create_task(watch_replies(app))
 
 
 async def cleanup(app: web.Application):
+    app["watcher"].cancel()
+    await app["push_http"].close()
     await app["hermes"].close()
     app["sessions"].close()
 
@@ -634,6 +769,9 @@ def create_app() -> web.Application:
     app["sessions"] = Sessions(state / "sessions.sqlite3")
     # Passkeys are bound to the browser origin's host name (the WebAuthn relying party ID).
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
+    # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
+    app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
+    app["watches"], app["presence"] = {}, {}
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
     app.on_startup.append(startup)
@@ -663,6 +801,11 @@ def create_app() -> web.Application:
     app.router.add_post("/api/passkeys/register/options", passkey_registration_options)
     app.router.add_post("/api/passkeys", add_passkey)
     app.router.add_delete("/api/passkeys/{pid}", remove_passkey)
+    app.router.add_get("/api/push", push_settings)
+    app.router.add_post("/api/push/devices", add_push_device)
+    app.router.add_delete("/api/push/devices/{did}", remove_push_device)
+    app.router.add_post("/api/push/test", test_push)
+    app.router.add_post("/api/presence", presence)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
     app.router.add_get("/api/settings/soul", get_soul)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from roost import server
 from roost.__main__ import main as cli_main
 from roost.auth import Sessions, make_password_hash
 from roost.hermes import Hermes, HermesError
+from roost.push import unb64url
 
 
 class ValidationTests(unittest.TestCase):
@@ -71,10 +73,11 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_uses_raw_identifier(self):
         hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
-        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes},
+        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}},
                                   content_type="application/json", json=AsyncMock(return_value={"text": "hello"}))
         await server.send_message(request)
         hermes.send_message.assert_awaited_once_with("hello", "chat:one")
+        self.assertIn("chat:one", request.app["watches"])
 
 
     async def test_deletion_requires_a_boolean_confirmation(self):
@@ -197,6 +200,53 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
             await Hermes._rpc_on_socket(socket, 1, "session.create", {})
 
 
+class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
+    def watching(self, rows, since):
+        sent = []
+
+        async def send(http, message, only=None):
+            sent.append(message)
+            return 1
+        app = {"hermes": SimpleNamespace(request=AsyncMock(return_value={"messages": rows})),
+               "push": SimpleNamespace(send=send), "push_http": None, "watches": {}, "presence": {},
+               "settings_file": Path("/nonexistent/settings.json"), "hermes_agent_name": ("Kestrel", time.monotonic())}
+        server.watch_reply(app, "chat:one", since)
+        return app, sent
+
+    async def test_notifies_once_the_turn_ends_not_at_an_interim_reply(self):
+        now = time.time()
+        rows = [{"role": "user", "content": "check the logs", "timestamp": now},
+                {"role": "assistant", "content": "Let me look.", "tool_calls": [{"id": "a"}], "timestamp": now + 1}]
+        app, sent = self.watching(rows, now)
+        await server.check_replies(app)
+        self.assertEqual(sent, [])
+        rows += [{"role": "tool", "content": "ok", "timestamp": now + 2},
+                 {"role": "assistant", "content": "All clear: ```no errors``` in the last hour.", "timestamp": now + 3}]
+        await server.check_replies(app)
+        self.assertEqual(sent, [{"title": "Kestrel", "body": "All clear: no errors in the last hour.",
+                                 "url": "/?c=chat%3Aone", "tag": "reply-chat:one"}])
+        self.assertEqual(app["watches"], {})
+
+    async def test_a_reply_from_before_the_message_is_not_its_answer(self):
+        now = time.time()
+        app, sent = self.watching([{"role": "assistant", "content": "Earlier answer.", "timestamp": now - 60}], now)
+        await server.check_replies(app)
+        self.assertEqual(sent, [])
+        self.assertIn("chat:one", app["watches"])
+
+    async def test_a_conversation_on_screen_is_not_notified_unless_that_report_is_stale(self):
+        now = time.time()
+        rows = [{"role": "assistant", "content": "Done.", "timestamp": now + 1}]
+        app, sent = self.watching(rows, now)
+        app["presence"]["phone"] = (time.monotonic(), "chat:one")
+        await server.check_replies(app)
+        self.assertEqual((sent, app["watches"]), ([], {}))
+        app, sent = self.watching(rows, now)
+        app["presence"]["phone"] = (time.monotonic() - server.PRESENCE_SECONDS - 1, "chat:one")
+        await server.check_replies(app)
+        self.assertEqual(len(sent), 1)
+
+
 class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -216,6 +266,27 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.directory.cleanup()
+
+    async def test_push_routes_need_a_session_and_validate_input(self):
+        response = await self.client.get("/api/push")
+        self.assertEqual(response.status, 401)
+        response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
+        self.assertEqual(response.status, 200)
+        cookies = {server.COOKIE: response.cookies[server.COOKIE].value}
+        response = await self.client.get("/api/push", cookies=cookies)
+        data = await response.json()
+        self.assertEqual((len(unb64url(data["public_key"])), data["devices"]), (65, []))
+        for body in ({"conversation": "../x"}, {"conversation": 1}, {}, {"conversation": None, "extra": 1}):
+            response = await self.client.post("/api/presence", headers=self.headers, json=body, cookies=cookies)
+            self.assertEqual(response.status, 400, body)
+        response = await self.client.post("/api/presence", headers=self.headers, json={"conversation": "chat:one"}, cookies=cookies)
+        self.assertEqual(response.status, 200)
+        response = await self.client.post("/api/push/devices", headers=self.headers, json={
+            "subscription": {"endpoint": "https://skynet-hermes:9119/x", "keys": {}}, "name": "iPhone"}, cookies=cookies)
+        self.assertEqual(response.status, 400)
+        self.assertIn("isn't one Roost sends to", (await response.json())["error"])
+        response = await self.client.get("/sw.js")
+        self.assertEqual(response.status, 200)
 
     async def test_login_cookie_and_revocation(self):
         response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
