@@ -147,9 +147,10 @@ test('repeated Run now clicks submit only one action', async () => {
 test('failed sign-out keeps the session visible and reports the error', async () => {
   const f = fixture(); await tick();
   f.run(`show('app',true); api = async () => {throw new Error('offline');};`);
-  await f.get('logout').events.click();
+  await f.run('signOut()');
   assert.equal(f.get('app').classList.contains('hidden'),false);
   assert.equal(f.get('notice').textContent,'offline');
+  assert.equal(f.run('state.settingsBusy'), false);
 });
 
 test('ambiguous or invalid cron expressions are not described as a different schedule', async () => {
@@ -447,6 +448,17 @@ test('choosing a time zone saves it and re-renders times', async () => {
   select.value = 'Asia/Tokyo'; await select.events.change(); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{time_zone:'Asia/Tokyo'}]);
   assert.equal(f.run('state.timeZone'), 'Asia/Tokyo');
+});
+
+test('Settings › Account signs this device out', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.calls = []; api = async (path, options = {}) => { calls.push(path); return path === '/settings' ? ${SETTINGS} : {}; };`);
+  f.run(`show('app', true); setSection('settings'); selectSettingsGroup('account')`); await tick();
+  const button = find(f.get('settings-detail'), n => n.textContent === 'Sign out' && n.className === 'secondary');
+  await button.events.click(); await tick();
+  assert.ok(f.run('calls').includes('/logout'));
+  assert.equal(f.get('app').classList.contains('hidden'), true);
+  assert.equal(f.get('login').classList.contains('hidden'), false);
 });
 
 test('table cells render italics, bold and code; code blocks stay literal', async () => {
