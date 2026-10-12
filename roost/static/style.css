@@ -153,6 +153,16 @@ button:disabled { cursor: default; }
 .transcript > .message.from-you:not(:first-child) { margin-top: calc(9px + var(--under-line)); }
 .transcript > .day + .message.from-you { margin-top: 0; }
 .under.right { align-self: flex-end; }
+.thoughts { align-self: flex-start; max-width: 75%; min-width: 0; color: var(--muted); font-size: calc(13px * var(--text-scale)); }
+.thoughts summary { width: max-content; padding: 2px 6px; cursor: pointer; list-style: none; }
+.thoughts summary::-webkit-details-marker { display: none; }
+.thoughts summary::before { content: "›"; display: inline-block; width: 10px; margin-right: 4px; transition: transform .15s; }
+.thoughts[open] summary::before { transform: rotate(90deg); }
+.thoughts-body { margin: 4px 0 6px 8px; padding-left: 12px; border-left: 2px solid var(--line); line-height: 1.45; overflow-wrap: anywhere; }
+.thoughts-body p { margin: 0 0 7px; white-space: pre-wrap; }
+.thoughts-body p:last-child { margin-bottom: 0; }
+.thoughts-body code { font-family: var(--mono); font-size: .87em; }
+.thoughts-body pre { max-width: 100%; overflow-x: auto; font: calc(12px * var(--text-scale))/1.45 var(--mono); white-space: pre; }
 .typing-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: calc(11.5px * var(--text-scale)); }
 .typing-dots { display: flex; gap: 4px; padding: 10px 13px; border-radius: 18px; background: var(--agent); }
 .typing-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: pulse 1.2s ease-in-out infinite; }
