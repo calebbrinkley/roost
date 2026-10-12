@@ -59,7 +59,8 @@ async def checks():
         async with client.get(BASE + "/") as response:
             assert response.status == 200
             assert "demo-banner" not in await response.text()
-        for asset in ("/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg"):
+        for asset in ("/app.js", "/style.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png",
+                      "/apple-touch-icon.png"):
             async with client.get(BASE + asset) as response:
                 assert response.status == 200, asset
         await request(client, "GET", "/api/conversations", 401)
