@@ -52,6 +52,8 @@ const ICONS = {
   moon: [["path", { d: "M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" }]],
   compose: [["path", { d: "M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" }], ["path", { d: "M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 8.5-8.5z" }]],
   plus: [["path", { d: "M12 5v14M5 12h14" }]],
+  gear: [["path", { d: "M10.08 4.85L10.09 2.18L13.91 2.18L13.92 4.85L15.70 5.59L17.59 3.71L20.29 6.41L18.41 8.30L19.15 10.08L21.82 10.09L21.82 13.91L19.15 13.92L18.41 15.70L20.29 17.59L17.59 20.29L15.70 18.41L13.92 19.15L13.91 21.82L10.09 21.82L10.08 19.15L8.30 18.41L6.41 20.29L3.71 17.59L5.59 15.70L4.85 13.92L2.18 13.91L2.18 10.09L4.85 10.08L5.59 8.30L3.71 6.41L6.41 3.71L8.30 5.59Z" }],
+         ["circle", { cx: 12, cy: 12, r: 3 }]],
 };
 
 function icon(name) {
@@ -113,7 +115,8 @@ function signedOut() {
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
-  Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined });
+  Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
+                         timeZone: "", about: null });
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
@@ -142,7 +145,16 @@ async function refreshIdentity() {
     if (epoch !== state.authEpoch || !data.signed_in) return;
     applyAgentName(data.agent);
     window.roostTheme.setAccent(data.accent);
+    applyTimeZone(data.time_zone);
   } catch { /* The defaults stay until the next sign-in or settings visit. */ }
+}
+
+function applyTimeZone(name) {
+  if ((name || "") === state.timeZone) return;
+  state.timeZone = name || "";
+  renderConversations();
+  if (state.jobs.length) renderJobs();
+  if (state.current) loadMessages().catch(() => {});
 }
 
 function setSection(section) {
@@ -175,28 +187,43 @@ function setSection(section) {
   if (section === "settings") loadSettings();
 }
 
-function timeLabel(value) {
-  if (!value) return "";
+// Times show in the zone chosen in Settings, or the device's own when none is chosen (or it is unknown here).
+function zone() {
+  if (!state.timeZone) return {};
+  try { new Intl.DateTimeFormat(undefined, { timeZone: state.timeZone }); return { timeZone: state.timeZone }; }
+  catch { return {}; }
+}
+
+function parseTime(value) {
+  if (!value) return null;
   const date = typeof value === "number" ? new Date(value > 1e11 ? value : value * 1000) : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// The calendar day in the display zone, as YYYY-MM-DD.
+function dayKey(date) { return date.toLocaleDateString("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", ...zone() }); }
+
+function clockTime(date) { return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", ...zone() }); }
+
+function timeLabel(value) {
+  const date = parseTime(value);
+  if (!date) return "";
   const now = new Date();
-  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  if (now - date < 6 * 86400000) return date.toLocaleDateString(undefined, { weekday: "short" });
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (dayKey(date) === dayKey(now)) return clockTime(date);
+  if (dayKey(date) === dayKey(new Date(now - 86400000))) return "Yesterday";
+  if (now - date < 6 * 86400000) return date.toLocaleDateString(undefined, { weekday: "short", ...zone() });
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...zone() });
 }
 
 // A message's full time for its tap-to-reveal line: "2:14 PM", "Yesterday 2:14 PM" or "Oct 9, 2:14 PM".
 function messageTime(value) {
-  if (!value) return "";
-  const date = typeof value === "number" ? new Date(value > 1e11 ? value : value * 1000) : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const now = new Date(), yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  if (date.toDateString() === now.toDateString()) return time;
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday " + time;
-  const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) });
+  const date = parseTime(value);
+  if (!date) return "";
+  const now = new Date(), time = clockTime(date);
+  if (dayKey(date) === dayKey(now)) return time;
+  if (dayKey(date) === dayKey(new Date(now - 86400000))) return "Yesterday " + time;
+  const sameYear = dayKey(date).slice(0, 4) === dayKey(now).slice(0, 4);
+  const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }), ...zone() });
   return day + ", " + time;
 }
 
@@ -903,8 +930,9 @@ async function saveJob(event) {
 
 // Settings: a list of groups in the sidebar and the selected group in the main pane, like Jobs.
 function settingsGroups() {
-  return [["appearance", "Appearance", "Theme and accent colour"], ["agent", agent(), "Name and instructions"],
-          ["data", "Data", "Delete conversations or jobs"], ["service", "Service", `Restart Roost or ${agent()}`]];
+  return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
+          ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
+          ["service", "Service", `Restart Roost or ${agent()}`], ["about", "About", "Version, live status and credits"]];
 }
 
 async function loadSettings() {
@@ -927,6 +955,7 @@ function selectSettingsGroup(id) {
   renderSettings();
   $("settings-detail").scrollTop = 0;
   if (id === "agent") loadSoul();
+  if (id === "about") loadAbout();
 }
 
 function renderSettings() {
@@ -945,7 +974,8 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ appearance: renderAppearance, agent: renderAgentSettings, data: renderDataSettings, service: renderServiceSettings })[group[0]](detail);
+  ({ appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+     service: renderServiceSettings, about: renderAbout })[group[0]](detail);
 }
 
 function settingsSection(parent, heading, text) {
@@ -989,6 +1019,113 @@ function renderAppearance(detail) {
     swatches.append(swatch);
   }
   accent.append(swatches);
+}
+
+function deviceTimeZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; }
+}
+
+function renderTimeSettings(detail) {
+  const section = settingsSection(detail, "Time zone",
+    `Conversation, message and job run times show in this zone on every device you sign in on. It doesn’t change when jobs run; ${agent()}’s scheduler keeps its own clock.`);
+  const label = el("label", "", "Show times in"); label.htmlFor = "settings-time-zone";
+  const select = el("select"); select.id = "settings-time-zone"; select.disabled = state.settingsBusy;
+  const device = deviceTimeZone();
+  const zones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  const saved = state.settings.time_zone;
+  for (const [value, text] of [["", "This device’s time zone" + (device ? ` (${device.replaceAll("_", " ")})` : "")],
+                               ...[...new Set([...zones, ...(saved ? [saved] : [])])].map((name) => [name, name.replaceAll("_", " ")])]) {
+    const option = el("option", "", text); option.value = value; option.selected = value === saved;
+    select.append(option);
+  }
+  select.addEventListener("change", () => saveSettings({ time_zone: select.value }, "Time zone saved."));
+  const example = el("p", "", "");
+  const now = new Date();
+  example.textContent = "Now: " + now.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit", timeZoneName: "short", ...zone() });
+  section.append(label, select, example);
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "Unknown";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
+  return (index && value < 10 ? value.toFixed(1) : Math.round(value)) + " " + units[index];
+}
+
+function formatDuration(seconds) {
+  if (typeof seconds !== "number") return "Unknown";
+  const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60);
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+async function loadAbout() {
+  const epoch = state.authEpoch;
+  try {
+    const data = await api("/about");
+    if (epoch !== state.authEpoch) return;
+    state.about = { ...data, at: new Date() };
+    if (state.section === "settings" && state.settingsGroup === "about") renderSettings();
+  } catch (error) { if (epoch === state.authEpoch && !state.about) notice(error.message); }
+}
+
+function statList(rows) {
+  const list = el("dl", "stats");
+  for (const [term, value, note] of rows) {
+    const item = el("div");
+    const detail = el("dd", "", value);
+    if (note) detail.append(" ", el("small", "", note));
+    item.append(el("dt", "", term), detail);
+    list.append(item);
+  }
+  return list;
+}
+
+function renderAbout(detail) {
+  const about = state.about;
+  const roost = settingsSection(detail, "Roost", null);
+  if (!about) { roost.append(el("p", "", "Loading…")); return; }
+  const revision = about.roost.revision;
+  roost.append(statList([
+    ["Version", about.roost.version],
+    ["Build", revision ? revision.slice(0, 7) : "Unknown", revision ? "" : "built without commit information"],
+    ["Python", about.runtime.python], ["aiohttp", about.runtime.aiohttp]]));
+  if (revision) {
+    const source = el("p");
+    const link = el("a", "", "View this commit on GitHub");
+    link.href = "https://github.com/calebbrinkley/roost/commit/" + encodeURIComponent(revision);
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    source.append(link);
+    roost.append(source);
+  }
+  const stats = about.stats;
+  const live = settingsSection(detail, "Live", "Roost’s own service, refreshed every few seconds while this page is open.");
+  live.append(statList([
+    ["Uptime", formatDuration(stats.uptime_seconds)],
+    ["CPU", (stats.cpu_percent ?? 0) + "%", "of one core"],
+    ["Memory", formatBytes(stats.memory_bytes), stats.memory_limit_bytes ? "of " + formatBytes(stats.memory_limit_bytes) : ""],
+    ["Roost data", formatBytes(stats.state_bytes), "sessions and settings"],
+    ["Disk", formatBytes(stats.disk_total_bytes - stats.disk_free_bytes), "used of " + formatBytes(stats.disk_total_bytes)]]));
+  live.append(el("p", "", "Updated " + clockTime(about.at)));
+  const hermes = about.hermes;
+  const hermesSection = settingsSection(detail, agent() + " (Hermes)", null);
+  hermesSection.append(statList(hermes.reachable ? [
+    ["Status", hermes.gateway_running ? "Running" : (hermes.gateway_state || "Stopped")],
+    ["Response time", hermes.latency_ms + " ms"],
+    ["Hermes version", String(hermes.version || "Unknown"), hermes.release_date ? String(hermes.release_date) : ""],
+    ["Active sessions", String(hermes.active_sessions ?? "Unknown")]] : [["Status", "Unreachable", "Roost can’t reach the Hermes dashboard"]]));
+  const credits = settingsSection(detail, "Credits", null);
+  const list = el("ul", "credits");
+  for (const [text, href] of [
+    ["Roost by threeswept, MIT License", "https://github.com/calebbrinkley/roost"],
+    ["Hermes Agent by Nous Research", "https://github.com/NousResearch/hermes-agent"],
+    ["Space Grotesk typeface by the Space Grotesk Project Authors, SIL Open Font License 1.1", "https://github.com/floriankarsten/space-grotesk"],
+    ["aiohttp by the aio-libs contributors, Apache License 2.0", "https://github.com/aio-libs/aiohttp"]]) {
+    const item = el("li"), link = el("a", "", text);
+    link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+    item.append(link); list.append(item);
+  }
+  credits.append(list);
 }
 
 function renderAgentSettings(detail) {
@@ -1065,6 +1202,7 @@ function saveSettings(changes, message) {
     if (epoch !== state.authEpoch) return;
     state.settings = data;
     window.roostTheme.setAccent(data.accent);
+    applyTimeZone(data.time_zone);
     notice(message);
   });
 }
@@ -1148,6 +1286,7 @@ $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
+$("nav-settings").append(icon("gear")); $("mobile-nav-settings").append(icon("gear"));
 $("nav-settings").addEventListener("click", () => setSection("settings"));
 $("mobile-nav-settings").addEventListener("click", () => setSection("settings"));
 $("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
@@ -1245,6 +1384,9 @@ $("cancel-job").addEventListener("click", () => $("job-dialog").close());
 $("delete-job").addEventListener("click", () => state.job && deleteJob(state.job));
 
 setInterval(() => { if (state.pending) { nextWorkingVerb(); refreshWorkingLabels(); } }, 2600);
+setInterval(() => {
+  if (!$("app").classList.contains("hidden") && state.section === "settings" && state.settingsGroup === "about") loadAbout();
+}, 5000);
 setInterval(() => {
   if ($("app").classList.contains("hidden") || state.section !== "messages" || state.busy) return;
   if (state.current) loadMessages().catch(() => {});

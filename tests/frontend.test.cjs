@@ -399,3 +399,52 @@ test('saving an agent name applies the name the server now reports', async () =>
   await find(f.get('settings-detail'), n => n.textContent === 'Save name').events.click(); await tick();
   assert.equal(f.run('agent()'), 'Robin');
 });
+
+test('times show in the chosen time zone, and the device zone when none is chosen', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`state.timeZone = 'Asia/Tokyo'`);
+  // 20:00 UTC on Jan 5 is 05:00 on Jan 6 in Tokyo.
+  assert.match(f.run(`messageTime('2020-01-05T20:00:00Z')`), /Jan 6, 2020, 5:00/);
+  f.run(`state.timeZone = 'America/Los_Angeles'`);
+  assert.match(f.run(`messageTime('2020-01-05T20:00:00Z')`), /Jan 5, 2020, 12:00/);
+  f.run(`state.timeZone = 'Not/AZone'`);
+  assert.notEqual(f.run(`messageTime('2020-01-05T20:00:00Z')`), '');
+});
+
+test('the gear opens Settings and the section tabs stay for Messages and Jobs', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
+  f.get('nav-settings').events.click(); await tick();
+  assert.equal(f.run('state.section'), 'settings');
+  assert.equal(f.get('nav-settings').classList.contains('active'), true);
+  assert.equal(f.get('nav-messages').classList.contains('active'), false);
+  f.get('nav-messages').events.click();
+  assert.equal(f.get('nav-settings').classList.contains('active'), false);
+});
+
+test('About shows the build, live stats and Hermes, or says Hermes is unreachable', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.about = {roost:{version:'0.1.0', revision:'e2ebc26784892de5558fd5bb95f589a1d3fe62b4'},
+      runtime:{python:'3.14.0', aiohttp:'3.14.4'},
+      stats:{uptime_seconds:7260, cpu_percent:1.5, memory_bytes:52428800, memory_limit_bytes:null, process_memory_bytes:41943040,
+             state_bytes:24576, disk_total_bytes:1e12, disk_free_bytes:4e11},
+      hermes:{reachable:true, latency_ms:12, version:'2026.9.24', gateway_running:true, active_sessions:2}};
+    api = async path => path === '/about' ? about : ${SETTINGS};`);
+  f.run(`setSection('settings'); selectSettingsGroup('about')`); await tick(); await tick();
+  const shown = text(f.get('settings-detail'));
+  for (const part of [/0\.1\.0/, /e2ebc26/, /2h 1m/, /50 MB/, /Running/, /12 ms/, /Space Grotesk/]) assert.match(shown, part);
+  f.run(`about.hermes = {reachable:false}; loadAbout()`); await tick(); await tick();
+  assert.match(text(f.get('settings-detail')), /Unreachable/);
+});
+
+test('choosing a time zone saves it and re-renders times', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.sent = []; api = async (path, options = {}) => {
+    if (options.method === 'PATCH') { sent.push(JSON.parse(options.body)); return {...${SETTINGS}, time_zone:'Asia/Tokyo'}; }
+    return ${SETTINGS}; };`);
+  f.run(`setSection('settings'); selectSettingsGroup('time')`); await tick();
+  const select = find(f.get('settings-detail'), n => n.id === 'settings-time-zone');
+  select.value = 'Asia/Tokyo'; await select.events.change(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{time_zone:'Asia/Tokyo'}]);
+  assert.equal(f.run('state.timeZone'), 'Asia/Tokyo');
+});

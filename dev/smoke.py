@@ -119,6 +119,12 @@ async def checks():
         await request(client, "PATCH", "/api/settings", body={"agent_name": ""})
         assert (await request(client, "GET", "/api/me"))["agent"] == "Kestrel"
         await request(client, "PATCH", "/api/settings", 400, {"accent": "neon"})
+        await request(client, "PATCH", "/api/settings", 400, {"time_zone": "Mars/Olympus Mons"})
+        await request(client, "PATCH", "/api/settings", body={"time_zone": "America/New_York"})
+        assert (await request(client, "GET", "/api/me"))["time_zone"] == "America/New_York"
+        about = await request(client, "GET", "/api/about")
+        assert about["hermes"]["reachable"] and about["hermes"]["version"] == "demo" and "hermes_home" not in about["hermes"]
+        assert about["roost"]["version"] and about["stats"]["state_bytes"] > 0 and about["stats"]["disk_total_bytes"] > 0
         await request(client, "PUT", "/api/settings/soul", body={"content": "Be brief."})
         assert (await request(client, "GET", "/api/settings/soul"))["content"] == "Be brief."
         await request(client, "POST", "/api/service/restart-agent")
@@ -131,7 +137,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

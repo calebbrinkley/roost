@@ -1,1 +1,3 @@
 """Roost: a small, owner-only Hermes client."""
+
+__version__ = "0.1.0"

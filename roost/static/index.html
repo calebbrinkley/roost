@@ -32,11 +32,14 @@
         <nav class="segmented desktop-only" aria-label="Sections">
           <button id="nav-messages" class="segment active" type="button">Messages</button>
           <button id="nav-jobs" class="segment" type="button">Jobs</button>
-          <button id="nav-settings" class="segment" type="button">Settings</button>
         </nav>
+        <button id="nav-settings" class="icon-button settings-button desktop-only" type="button" aria-label="Settings" title="Settings"></button>
         <div class="mobile-list-heading mobile-only">
           <h1 id="mobile-list-title">Messages</h1>
-          <button id="top-action" class="icon-button" type="button" aria-label="New conversation" title="New conversation"></button>
+          <div class="mobile-list-actions">
+            <button id="mobile-nav-settings" class="icon-button settings-button" type="button" aria-label="Settings" title="Settings"></button>
+            <button id="top-action" class="icon-button" type="button" aria-label="New conversation" title="New conversation"></button>
+          </div>
         </div>
       </div>
       <div id="sidebar-search" class="search-wrap">
@@ -98,7 +101,6 @@
     <nav id="mobile-tabbar" class="mobile-tabbar mobile-only" aria-label="Sections">
       <button id="mobile-nav-messages" class="tab active" type="button"><span aria-hidden="true">▤</span>Messages</button>
       <button id="mobile-nav-jobs" class="tab" type="button"><span aria-hidden="true">◷</span>Jobs</button>
-      <button id="mobile-nav-settings" class="tab" type="button"><span aria-hidden="true">⚙︎</span>Settings</button>
     </nav>
   </div>
 
