@@ -54,6 +54,8 @@ The agent's name comes from Roost's Settings if set there, otherwise from the di
 
 The Python server holds the Hermes dashboard credential. The browser receives only Roost's conversation, Job and Settings routes; it does not receive dashboard credentials, inference keys or direct gateway access. Conversation text and Job prompts are rendered without raw HTML injection.
 
+**Passkeys.** Once signed in, add a passkey in Settings › Account; the sign-in page then offers it. Passkeys are bound to the host name in `ROOST_PUBLIC_ORIGIN` (the WebAuthn relying party ID), so changing that name makes existing passkeys unusable; the password keeps working. Every passkey use requires user verification (Face ID, Touch ID or the device PIN). No attestation is requested, because only a signed-in owner can add one. Removing a passkey in Roost doesn't delete it from the device, so also remove it from the device's passwords. Passkeys need HTTPS, or `localhost`; an IP-address origin can't use them. Failed passkey sign-ins count toward the same per-device limit as passwords.
+
 Sessions last up to 30 days and use revocable, server-side records with HttpOnly, SameSite Strict cookies. HTTPS enables Secure cookies. Sign-in is rate limited.
 
 Run `set-password` again to change your Roost password; no restart is needed. **Existing sessions remain valid.** To revoke them, sign out on each device, or stop Roost and remove its session database before restarting.

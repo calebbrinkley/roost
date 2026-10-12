@@ -5,6 +5,7 @@ The integration targets Hermes **`v2026.9.24`**. The project records a successfu
 
 - Phone layouts are implemented; a phone browser has not been verified.
 - Voice, push notifications and a direct Hermes plugin are not implemented.
+- Passkeys are tested against a software authenticator with real ES256 and Ed25519 signatures, not yet against Face ID or Touch ID on a device.
 - Schedules are sent to Hermes as entered; there is no schedule builder yet.
 - Settings uses the dashboard's profile routes (`/api/profiles`, `/api/profiles/active`, `/api/profiles/{name}/soul`), `/api/gateway/restart` and `/api/status` (About shows only its version, gateway state and active sessions), read from the `v2026.9.24` source. The profile name and SOUL routes were checked against a live dashboard on 2026-10-11; the others have not been.
 - Job history shows what Hermes returns; push delivery of full reports is future work.

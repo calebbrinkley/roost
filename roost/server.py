@@ -17,6 +17,7 @@ from . import __version__
 
 from .auth import Sessions, verify_password
 from .hermes import Hermes, HermesError
+from .passkeys import PasskeyError, Passkeys
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "roost_session"
@@ -75,7 +76,7 @@ async def guard(request: web.Request, handler):
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 if request.headers.get("Origin") != request.app["origin"] or request.headers.get("X-Roost-Request") != "1":
                     raise bad("Request origin was not accepted.", 403)
-            if request.path not in {"/api/login", "/api/me", "/api/health"}:
+            if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login"}:
                 if not request.app["sessions"].valid(request.cookies.get(COOKIE, "")):
                     raise web.HTTPUnauthorized(text="Sign in to Roost.")
         response = await handler(request)
@@ -109,7 +110,8 @@ def client_address(request: web.Request) -> str:
     return remote
 
 
-async def login(request: web.Request):
+def reserve_attempt(request: web.Request) -> str:
+    """Count a sign-in attempt (password or passkey) against the device and overall limits."""
     address = client_address(request)
     now = time.monotonic()
     failures = request.app["login_attempts"]
@@ -124,6 +126,26 @@ async def login(request: web.Request):
             sum(map(len, failures.values())) + sum(inflight.values()) >= ALL_FAILURES):
         raise web.HTTPTooManyRequests(text="Too many attempts. Try again in a few minutes.")
     inflight[address] = inflight.get(address, 0) + 1
+    return address
+
+
+def release_attempt(request: web.Request, address: str) -> None:
+    inflight = request.app["login_inflight"]
+    inflight[address] -= 1
+    if not inflight[address]:
+        del inflight[address]
+
+
+def signed_in_response(request: web.Request, address: str) -> web.Response:
+    request.app["login_attempts"].pop(address, None)
+    response = web.json_response({"signed_in": True, "demo": request.app["demo"]})
+    secured_cookie(response, request, request.app["sessions"].issue())
+    return response
+
+
+async def login(request: web.Request):
+    address = reserve_attempt(request)
+    failures = request.app["login_attempts"]
     try:
         data = await json_body(request)
         password = data.get("password")
@@ -137,14 +159,64 @@ async def login(request: web.Request):
         if not await asyncio.to_thread(verify_password, password, encoded):
             failures.setdefault(address, []).append(time.monotonic())
             raise web.HTTPUnauthorized(text="Incorrect password.")
-        failures.pop(address, None)
-        response = web.json_response({"signed_in": True, "demo": request.app["demo"]})
-        secured_cookie(response, request, request.app["sessions"].issue())
-        return response
+        return signed_in_response(request, address)
     finally:
-        inflight[address] -= 1
-        if not inflight[address]:
-            del inflight[address]
+        release_attempt(request, address)
+
+
+async def passkey_login_options(request: web.Request):
+    return web.json_response(request.app["passkeys"].authentication_options())
+
+
+async def passkey_login(request: web.Request):
+    address = reserve_attempt(request)
+    try:
+        data = await json_body(request)
+        try:
+            # Runs here, not in a worker thread: the sessions database belongs to this thread,
+            # and checking one signature takes well under a millisecond.
+            request.app["passkeys"].authenticate(data)
+        except PasskeyError as error:
+            request.app["login_attempts"].setdefault(address, []).append(time.monotonic())
+            raise web.HTTPUnauthorized(text=str(error)) from None
+        return signed_in_response(request, address)
+    finally:
+        release_attempt(request, address)
+
+
+def session_key(request: web.Request) -> str:
+    """Binds a registration challenge to the session that asked for it."""
+    return Sessions._hash(request.cookies.get(COOKIE, ""))
+
+
+async def list_passkeys(request: web.Request):
+    return web.json_response({"passkeys": request.app["passkeys"].list()})
+
+
+async def passkey_registration_options(request: web.Request):
+    return web.json_response(request.app["passkeys"].registration_options(session_key(request)))
+
+
+async def add_passkey(request: web.Request):
+    data = await json_body(request)
+    name = clean_name(data.pop("name", ""))
+    if not name:
+        raise bad("Name the passkey (1 to 40 characters), for example the device it's on.")
+    try:
+        added = request.app["passkeys"].register(data, session_key(request), name)
+    except PasskeyError as error:
+        raise bad(str(error)) from None
+    return web.json_response(added, status=201)
+
+
+async def remove_passkey(request: web.Request):
+    credential_id = request.match_info["pid"]
+    data = await json_body(request)
+    if set(data) != {"confirm"} or data["confirm"] is not True:
+        raise bad("Confirm removing the passkey.")
+    if len(credential_id) > 1400 or not request.app["passkeys"].remove(credential_id):
+        raise web.HTTPNotFound(text="That passkey isn't set up for Roost.")
+    return web.json_response({"ok": True})
 
 
 async def logout(request: web.Request):
@@ -160,7 +232,9 @@ async def me(request: web.Request):
     settings = load_settings(request.app)
     return web.json_response({"signed_in": signed_in, "demo": request.app["demo"], "agent": agent,
                               "accent": settings["accent"] if signed_in else ACCENTS[0],
-                              "time_zone": settings["time_zone"] if signed_in else ""})
+                              "time_zone": settings["time_zone"] if signed_in else "",
+                              # Whether the sign-in page offers passkeys; not which ones exist.
+                              "passkeys": request.app["passkeys"].count() > 0})
 
 
 def clean_name(value) -> str:
@@ -557,6 +631,8 @@ def create_app() -> web.Application:
     app["login_attempts"] = {}
     app["login_inflight"] = {}
     app["sessions"] = Sessions(state / "sessions.sqlite3")
+    # Passkeys are bound to the browser origin's host name (the WebAuthn relying party ID).
+    app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
     app.on_startup.append(startup)
@@ -580,6 +656,12 @@ def create_app() -> web.Application:
     app.router.add_post("/api/jobs/{jid}/{action}", job_action)
     app.router.add_delete("/api/jobs/{jid}", delete_job)
     app.router.add_delete("/api/jobs", delete_all_jobs)
+    app.router.add_post("/api/passkeys/login/options", passkey_login_options)
+    app.router.add_post("/api/passkeys/login", passkey_login)
+    app.router.add_get("/api/passkeys", list_passkeys)
+    app.router.add_post("/api/passkeys/register/options", passkey_registration_options)
+    app.router.add_post("/api/passkeys", add_passkey)
+    app.router.add_delete("/api/passkeys/{pid}", remove_passkey)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
     app.router.add_get("/api/settings/soul", get_soul)
