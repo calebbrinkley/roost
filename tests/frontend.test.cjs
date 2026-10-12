@@ -160,8 +160,10 @@ test('ambiguous or invalid cron expressions are not described as a different sch
   assert.equal(f.run(`scheduleLabel('0 8 * * 1-5')`),'Weekdays at 08:00');
 });
 
-test('refreshing loaded pages after insertion leaves no gap and Load more advances correctly', async () => {
+test('refreshing loaded pages after insertion leaves no gap and loading more advances correctly', async () => {
   const f = fixture(); await tick();
+  // A list taller than the screen, scrolled to the top: nothing loads until asked.
+  f.get('conversation-list').scrollHeight = 5000;
   f.run(`state.current = 'd'; state.conversations = ['a','b','c','d'].map(id => ({id}));
     api = async path => { const offset = Number(path.split('offset=')[1]);
       return {sessions:['new','a','b','c','d'].slice(offset,offset+2).map(id => ({id})), total:5}; };
@@ -447,4 +449,42 @@ test('choosing a time zone saves it and re-renders times', async () => {
   select.value = 'Asia/Tokyo'; await select.events.change(); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{time_zone:'Asia/Tokyo'}]);
   assert.equal(f.run('state.timeZone'), 'Asia/Tokyo');
+});
+
+test('older conversations load near the end of the list, with no button', async () => {
+  const f = fixture(); await tick();
+  const list = f.get('conversation-list');
+  Object.assign(list, {scrollHeight: 3000, clientHeight: 800, scrollTop: 0});
+  f.run(`globalThis.offsets = []; state.conversations = [{id:'a'}]; state.conversationOffset = 100; state.conversationsMore = true;
+    api = async path => { offsets.push(Number(path.split('offset=')[1])); return {sessions:[{id:'b'}], total:101}; };`);
+  list.events.scroll(); await tick();
+  assert.deepEqual(Array.from(f.run('offsets')), []);
+  list.scrollTop = 1900; list.events.scroll(); await tick(); await tick();
+  assert.deepEqual(Array.from(f.run('offsets')), [100]);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['a','b']);
+  assert.equal(f.run('state.conversationsMore'), false);
+  assert.equal(f.run('state.loadingMore'), false);
+});
+
+test('pulling the list down past the threshold refreshes it; a short pull or a sideways drag does not', async () => {
+  const f = fixture(); await tick();
+  const list = f.get('conversation-list');
+  Object.assign(list, {scrollHeight: 3000, clientHeight: 800, scrollTop: 0});
+  f.run(`phoneWidth.matches = true; globalThis.refreshes = 0; loadConversations = async () => { refreshes++; };
+    globalThis.setTimeout = (fn) => { fn(); return 1; };`);
+  const touch = (type, x, y) => ({type, touches:[{clientX:x, clientY:y}], changedTouches:[{clientX:x, clientY:y}], preventDefault() {}});
+  const drag = async (dx, dy) => {
+    list.events.touchstart(touch('touchstart', 100, 100));
+    list.events.touchmove(touch('touchmove', 100 + dx / 4, 100 + dy / 4));
+    list.events.touchmove(touch('touchmove', 100 + dx, 100 + dy));
+    await list.events.touchend(touch('touchend', 100 + dx, 100 + dy)); await tick(); await tick();
+  };
+  await drag(0, 60);
+  assert.equal(f.run('refreshes'), 0);
+  await drag(160, 40);
+  assert.equal(f.run('refreshes'), 0);
+  await drag(0, 200);
+  assert.equal(f.run('refreshes'), 1);
+  assert.equal(f.get('pull-indicator').style.height, '0px');
+  assert.equal(f.run('state.refreshing'), false);
 });
