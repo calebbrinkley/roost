@@ -37,7 +37,6 @@
       remember(key, choice);
       apply();
     },
-    toggle() { this.set(current() === "dark" ? "light" : "dark"); },
     // Text size is this device's own choice, like the theme: a phone and a desktop often want different sizes.
     textSize() { return textSizes.includes(document.documentElement.dataset.textSize) ? document.documentElement.dataset.textSize : "default"; },
     setTextSize(name) {
