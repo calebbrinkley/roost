@@ -4,9 +4,11 @@
 
 <p align="center">A private Progressive Web App for your Hermes agent.</p>
 
-<a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml">
-  <img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks">
-</a>
+<p align="center">
+  <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml">
+    <img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks">
+  </a>
+</p>
 
 <p align="center">
   · <a href="docs/setup.md">Setup</a>
