@@ -56,7 +56,7 @@ def sample_data():
         ],
         "terminal_ntfy": [
             {"role": "user", "content": "Can you fix the ntfy port?"},
-            {"role": "assistant", "content": "Moved the listener to 2586; containers drop the capability for low ports."},
+            {"role": "assistant", "content": "Moved the listener to 2586; containers drop the capability for low ports.", "reasoning": "The bind fails with permission denied. Rootless containers cannot bind below 1024, so moving to a high port is simpler than adding a capability."},
         ],
         "roost_packing": [
             {"role": "user", "content": "Add a rain shell to the packing list."},

@@ -26,9 +26,9 @@ function applyAgentName(name) {
   for (const node of document.querySelectorAll("[data-agent-initial]")) node.textContent = agent().charAt(0).toUpperCase();
 }
 
-// While a reply is on its way, the label rotates through these instead of always saying "typing".
-const WORKING_VERBS = ["thinking", "pondering", "mulling it over", "digging in", "connecting the dots",
-                       "drafting", "weighing options", "putting it together", "double-checking", "typing"];
+// While a reply is on its way, the label rotates through these.
+const WORKING_VERBS = ["thinking", "pondering", "mulling it over", "musing", "reflecting",
+                       "considering", "contemplating", "turning it over", "ruminating", "deliberating"];
 
 function nextWorkingVerb() {
   const choices = WORKING_VERBS.filter((verb) => verb !== state.workingVerb);
@@ -39,6 +39,17 @@ function workingLabel(ellipsis = false) {
   const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
   label.textContent = `${agent()} is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
   return label;
+}
+
+// Hermes saves each tool round as it happens, so the newest row says whether a turn is still going:
+// your message or a tool result is waiting on the agent, and a reply that calls tools has more to come.
+// A turn that ended in an error, or has been quiet for ten minutes, is over.
+function turnInProgress(rows) {
+  const last = rows.at(-1);
+  if (!last || ["error", "agent_error", "content_filter"].includes(last.finish_reason)) return false;
+  if (!(Date.now() / 1000 - Number(last.timestamp) < 600)) return false;
+  return last.role === "user" || last.role === "tool"
+    || (last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0);
 }
 
 function refreshWorkingLabels() {
@@ -96,7 +107,7 @@ function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
+    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set() });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null });
@@ -572,6 +583,23 @@ function addMarkdown(parent, value) {
   addPlainMarkdown(parent, value.slice(last));
 }
 
+// The same field precedence as Hermes's own desktop app.
+function reasoningText(row) {
+  const value = row.display_reasoning !== undefined ? row.display_reasoning
+    : row.reasoning || row.reasoning_content || (typeof row.reasoning_details === "string" ? row.reasoning_details : "");
+  return typeof value === "string" ? value.trim() : "";
+}
+
+// Collapsed by default; one opened stays open across the transcript's polls.
+function thoughtsBlock(texts, key) {
+  const details = el("details", "thoughts");
+  details.open = state.openThoughts.has(key);
+  details.append(el("summary", "", "Thoughts"));
+  const body = el("div", "thoughts-body"); addMarkdown(body, texts.join("\n\n")); details.append(body);
+  details.addEventListener("toggle", () => { if (details.open) state.openThoughts.add(key); else state.openThoughts.delete(key); });
+  return details;
+}
+
 function renderMessages(rows) {
   const transcript = $("transcript");
   // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
@@ -579,12 +607,22 @@ function renderMessages(rows) {
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   const keepScroll = transcript.scrollTop;
   state.renderedConversation = state.current;
-  if (fresh) state.shownTimes = new Set();
+  if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   const visible = records(rows).filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
+  // Thoughts from every step since the last message shown, including steps that only called tools,
+  // go in one block above the next message; a turn still going shows its thoughts so far at the end.
+  const thoughtsBefore = new Map(), shownRows = new Set(visible);
+  let thoughts = [], thoughtsKey = null;
+  records(rows).forEach((row, index) => {
+    const text = row.role === "assistant" && row.display_kind !== "hidden" ? reasoningText(row) : "";
+    if (text) { thoughts.push(text); thoughtsKey ??= String(row.id ?? `at ${index}`); }
+    if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
+  });
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
+    if (thoughtsBefore.has(row)) transcript.append(thoughtsBlock(...thoughtsBefore.get(row)));
     const key = String(row.id ?? index), time = messageTime(row.timestamp);
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-wren"));
     const body = el("div", "message-body"); addMarkdown(body, messageText(row)); wrapper.append(body);
@@ -604,17 +642,20 @@ function renderMessages(rows) {
       });
     }
   }
+  if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
+  const working = turnInProgress(records(rows));
   if (state.pending?.id === state.current) {
+    // Until Hermes saves the message just sent, the transcript cannot say whether its turn is over.
     let ownMessage = -1;
     for (let i = visible.length - 1; i >= 0; i--) {
       if (visible[i].role === "user" && messageText(visible[i]) === state.pending.text) { ownMessage = i; break; }
     }
-    if ((ownMessage >= 0 && visible.slice(ownMessage + 1).some((row) => row.role === "assistant")) || Date.now() - state.pending.since > 600000) state.pending = null;
-    else {
-      const typing = el("div", "typing-row");
-      const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
-      typing.append(dots, workingLabel()); transcript.append(typing);
-    }
+    if ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000) state.pending = null;
+  }
+  if (working || state.pending?.id === state.current) {
+    const typing = el("div", "typing-row");
+    const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
+    typing.append(dots, workingLabel()); transcript.append(typing);
   }
   renderConversations();
   transcript.scrollTop = fresh || atBottom ? transcript.scrollHeight : keepScroll;
@@ -1615,7 +1656,7 @@ $("close-dialog").addEventListener("click", () => $("job-dialog").close());
 $("cancel-job").addEventListener("click", () => $("job-dialog").close());
 $("delete-job").addEventListener("click", () => state.job && deleteJob(state.job));
 
-setInterval(() => { if (state.pending) { nextWorkingVerb(); refreshWorkingLabels(); } }, 2600);
+setInterval(() => { if (document.querySelectorAll(".working-label").length) { nextWorkingVerb(); refreshWorkingLabels(); } }, 6000);
 setInterval(() => {
   if (!$("app").classList.contains("hidden") && state.section === "settings" && state.settingsGroup === "about") loadAbout();
 }, 5000);
