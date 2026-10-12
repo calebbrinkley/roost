@@ -305,6 +305,19 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(("GET", "/api/profiles/default/soul"), calls)
 
+    async def test_agent_name_is_asked_of_hermes_right_after_boot(self):
+        await self.signed_in()
+
+        async def request(method, path, *rest):
+            if path == "/api/profiles/active":
+                return {"current": "default"}
+            return {"profiles": [{"name": "default", "display_name": "Kestrel"}]}
+        self.app["hermes"].request = request
+        # A host that has just booted reports a small monotonic clock.
+        with patch.object(server.time, "monotonic", return_value=5.0):
+            response = await self.client.get("/api/me")
+        self.assertEqual((await response.json())["agent"], "Kestrel")
+
     async def test_ipv6_loopback_origin_and_invalid_port(self):
         config = {"ROOST_STATE_DIR": str(self.state), "ROOST_HERMES_URL": "http://127.0.0.1:1",
                   "ROOST_HERMES_USERNAME": "demo", "ROOST_HERMES_PASSWORD_FILE": str(self.state / "password")}

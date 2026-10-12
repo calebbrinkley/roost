@@ -189,7 +189,8 @@ async def hermes_profile(app: web.Application) -> str:
 async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
     """The name Hermes shows for its profile ("" when it has none), cached for a few minutes."""
     cached, fetched = app["hermes_agent_name"]
-    if ask and time.monotonic() - fetched > AGENT_NAME_CACHE_SECONDS:
+    # `fetched` is None until the first lookup: monotonic time can be small just after boot.
+    if ask and (fetched is None or time.monotonic() - fetched > AGENT_NAME_CACHE_SECONDS):
         try:
             current = await hermes_profile(app)
             listed = await app["hermes"].request("GET", "/api/profiles")
@@ -462,7 +463,7 @@ def create_app() -> web.Application:
     app["demo"] = os.environ.get("ROOST_DEMO") == "1"
     # The agent's display name comes from Roost's settings or Hermes; it is not a secret.
     app["settings_file"] = state / "settings.json"
-    app["hermes_agent_name"] = ("", 0.0)
+    app["hermes_agent_name"] = ("", None)
     app["exit"] = os._exit
     app["trust_forwarded"] = os.environ.get("ROOST_TRUST_FORWARDED") == "1"
     app["secure_cookie"] = origin.startswith("https://")
