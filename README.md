@@ -14,6 +14,14 @@ Roost puts conversations and jobs in one simple interface. It is an **early prev
 - View Job status and the run history Hermes provides.
 - Choose an agent display name and switch between light and dark themes.
 
+## Preview
+
+<p align="center">
+  <a href="assets/roost-iphone-chat-dark.png"><img src="assets/roost-iphone-chat-dark.png" alt="Roost chat in dark mode with a sample conversation" width="280"></a>
+  <a href="assets/roost-iphone-dark.png"><img src="assets/roost-iphone-dark.png" alt="Roost Jobs in dark mode with sample scheduled work" width="280"></a>
+</p>
+<p align="center"><sub>Chat and scheduled Jobs in dark mode. iPhone mockups with demo data.</sub></p>
+
 ## Quick start: try the demo
 
 Requires **Python 3.11+**. The demo uses sample conversations and Jobs with a local Hermes stand-in; it does not contact a live agent.
