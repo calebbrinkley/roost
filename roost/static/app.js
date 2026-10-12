@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
-                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", conversationOffset: 0, conversationsMore: false };
+                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -110,7 +110,7 @@ function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, search: "", conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
+    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
@@ -140,7 +140,11 @@ function setSection(section) {
   $("nav-jobs").classList.toggle("active", section === "jobs");
   $("mobile-nav-messages").classList.toggle("active", section === "messages");
   $("mobile-nav-jobs").classList.toggle("active", section === "jobs");
-  show("sidebar-search", section === "messages");
+  // Both sections share the sidebar's search field and + button; each keeps its own query.
+  const jobs = section === "jobs", noun = jobs ? "jobs" : "conversations", create = jobs ? "New job" : "New conversation";
+  $("search").value = jobs ? state.jobSearch : state.search;
+  $("search").placeholder = $("search-label").textContent = "Search " + noun;
+  $("sidebar-new").setAttribute("aria-label", create); $("sidebar-new").title = create;
   show("conversation-list", section === "messages");
   show("sidebar-jobs-list", section === "jobs");
   $("mobile-list-title").textContent = section === "jobs" ? "Jobs" : "Messages";
@@ -643,8 +647,10 @@ function updateSchedulePreview() {
 
 function renderJobs() {
   const list = $("sidebar-jobs-list"); list.replaceChildren();
-  if (!state.jobs.length) list.append(el("p", "empty-list", `No jobs yet. Add one for ${agent()} to handle on a schedule.`));
-  for (const job of state.jobs) {
+  const rows = state.jobs.filter((job) =>
+    [jobValue(job, "name"), jobValue(job, "prompt"), jobScheduleLabel(job)].join(" ").toLowerCase().includes(state.jobSearch));
+  if (!rows.length) list.append(el("p", "empty-list", state.jobSearch ? "No matching jobs." : `No jobs yet. Add one for ${agent()} to handle on a schedule.`));
+  for (const job of rows) {
     const id = job.id || job.job_id;
     if (!id) continue;
     const row = el("button", "job-list-row" + (state.selectedJob === id ? " selected" : ""));
@@ -769,12 +775,34 @@ async function loadJobRuns(id) {
   } finally { loading.delete(id); }
 }
 
+// Hermes answers a create, edit, pause or resume with the job as saved. Show that at once, and keep
+// it over the next few list refreshes: a list read straight after a change has come back without it.
+const JOB_PATCH_MS = 30000;
+
+function applyJob(job) {
+  const id = job && typeof job === "object" && (job.id || job.job_id);
+  if (!id) return;
+  state.jobPatches[id] = { job, at: Date.now() };
+  state.jobs = withJobPatches(state.jobs);
+  renderJobs();
+}
+
+function withJobPatches(rows) {
+  const now = Date.now(), merged = [...rows];
+  for (const [id, patch] of Object.entries(state.jobPatches)) {
+    if (now - patch.at > JOB_PATCH_MS) { delete state.jobPatches[id]; continue; }
+    const index = merged.findIndex((job) => (job.id || job.job_id) === id);
+    if (index >= 0) merged[index] = patch.job; else merged.push(patch.job);
+  }
+  return merged;
+}
+
 async function loadJobs() {
   const epoch = state.authEpoch;
   const serial = state.jobsRequest = (state.jobsRequest || 0) + 1;
   const data = await api("/jobs");
   if (epoch !== state.authEpoch || serial !== state.jobsRequest) return;
-  state.jobs = records(Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []));
+  state.jobs = withJobPatches(records(Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : [])));
   if (!state.selectedJob || !state.jobs.some((job) => (job.id || job.job_id) === state.selectedJob)) {
     state.selectedJob = state.jobs[0]?.id || state.jobs[0]?.job_id || null;
   }
@@ -787,9 +815,10 @@ async function jobAction(id, action) {
   const epoch = state.authEpoch;
   state.jobBusy = true; renderJobDetail();
   try {
-    await api(`/jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+    const result = await api(`/jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
     if (epoch !== state.authEpoch) return;
     notice(action === "trigger" ? `${agent()} is running this Job.` : `Job ${action === "pause" ? "paused" : "resumed"}.`);
+    if (action !== "trigger") applyJob(result);
     await loadJobs();
   } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
   finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
@@ -804,7 +833,7 @@ async function deleteJob(job) {
   try {
     await api(`/jobs/${encodeURIComponent(job.id || job.job_id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     if (epoch !== state.authEpoch) return;
-    delete state.jobRuns[job.id || job.job_id]; delete state.jobRunsError[job.id || job.job_id];
+    delete state.jobRuns[job.id || job.job_id]; delete state.jobRunsError[job.id || job.job_id]; delete state.jobPatches[job.id || job.job_id];
     $("job-dialog").close(); state.selectedJob = null; $("app").classList.remove("job-open"); notice("Job deleted."); await loadJobs();
   } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
   finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
@@ -839,6 +868,7 @@ async function saveJob(event) {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
     if (epoch !== state.authEpoch) return;
     $("job-dialog").close(); notice(id ? "Job updated." : "Job created.");
+    applyJob(result);
     if (!id) {
       state.selectedJob = result.id || result.job_id || null;
       await loadJobs();
@@ -870,8 +900,7 @@ $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
-$("new-conversation").addEventListener("click", newConversation);
-$("new-job").addEventListener("click", () => openJob());
+$("sidebar-new").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("back-to-list").addEventListener("click", () => $("app").classList.remove("chat-open"));
 $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
 
@@ -931,7 +960,10 @@ $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job
 })();
 $("run-selected-job").addEventListener("click", () => state.selectedJob && jobAction(state.selectedJob, "trigger"));
 $("edit-selected-job").addEventListener("click", () => currentJob() && openJob(currentJob()));
-$("search").addEventListener("input", () => { state.search = $("search").value.trim().toLowerCase(); renderConversations(); });
+$("search").addEventListener("input", () => {
+  const query = $("search").value.trim().toLowerCase();
+  if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = query; renderConversations(); }
+});
 $("more-conversations").addEventListener("click", () => loadConversations(true).catch((error) => notice(error.message)));
 $("composer").addEventListener("submit", submitMessage);
 $("sheet-rename").addEventListener("click", () => {
