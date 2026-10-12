@@ -2,6 +2,12 @@
   <img src="assets/roost-logo.png" alt="roost" width="240">
 </p>
 
+<p align="center">
+  <a href="assets/roost-iphone-chat-dark.png"><img src="assets/roost-iphone-chat-dark.png" alt="Roost chat in dark mode with a sample conversation" width="280"></a>
+  <a href="assets/roost-iphone-dark.png"><img src="assets/roost-iphone-dark.png" alt="Roost Jobs in dark mode with sample scheduled work" width="280"></a>
+</p>
+<p align="center"><sub>Chat and scheduled Jobs in dark mode. iPhone mockups with demo data.</sub></p>
+
 A simple, lightweight Progressive Web App (PWA) for chatting with your Hermes agent and managing its scheduled work.
 
 Roost puts conversations and jobs in one simple interface. It is an **early preview**: text chat and Jobs are implemented; voice and push notifications are planned.
@@ -13,14 +19,6 @@ Roost puts conversations and jobs in one simple interface. It is an **early prev
 - Create, edit, pause, resume, run and delete scheduled Jobs.
 - View Job status and the run history Hermes provides.
 - Choose an agent display name and switch between light and dark themes.
-
-## Preview
-
-<p align="center">
-  <a href="assets/roost-iphone-chat-dark.png"><img src="assets/roost-iphone-chat-dark.png" alt="Roost chat in dark mode with a sample conversation" width="280"></a>
-  <a href="assets/roost-iphone-dark.png"><img src="assets/roost-iphone-dark.png" alt="Roost Jobs in dark mode with sample scheduled work" width="280"></a>
-</p>
-<p align="center"><sub>Chat and scheduled Jobs in dark mode. iPhone mockups with demo data.</sub></p>
 
 ## Quick start: try the demo
 
