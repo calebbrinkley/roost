@@ -335,6 +335,11 @@ button:disabled { cursor: default; }
   .day, .under, .typing-row { font-size: calc(13px * var(--text-scale)); }
   .shell { --under-line: calc(17px * var(--text-scale)); }
   .composer { padding: 8px 12px calc(14px + env(safe-area-inset-bottom)); }
+  /* Keyboard up: the app fills only the part of the screen still visible (fitViewport in app.js), so the
+     header and the bubbles stay where they were and only the message bar rises. The home indicator's
+     inset is under the keyboard then, so the bar needs no room for it. */
+  .shell.keyboard-open { position: fixed; top: var(--keyboard-top); left: 0; right: 0; height: var(--keyboard-height); }
+  .shell.keyboard-open .composer { padding-bottom: 14px; }
   .jobs-header { height: 66px; flex-basis: 66px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 8px; padding: 3px 12px; }
   .jobs-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
   .jobs-heading strong { font-size: calc(16px * var(--text-scale)); }
