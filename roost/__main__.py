@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -22,7 +23,7 @@ def main() -> None:
         state = Path(os.environ.get("ROOST_STATE_DIR", "./.roost-state"))
         set_password(state / "password.hash")
     else:
-        if os.environ.get("ROOST_PUBLIC_ORIGIN", "").startswith("http://") and args.host not in {"127.0.0.1", "::1", "localhost"}:
+        if urlsplit(os.environ.get("ROOST_PUBLIC_ORIGIN", "")).scheme == "http" and args.host not in {"127.0.0.1", "::1", "localhost"}:
             parser.error("An HTTP preview may bind only to loopback.")
         web.run_app(create_app(), host=args.host, port=args.port, access_log=None)
 

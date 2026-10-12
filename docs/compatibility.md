@@ -13,3 +13,5 @@ Integration with **local-ai-stack** is planned as a CPU-only service. Packaging,
 
 
 The README images are AI-generated device mockups based on demo captures. They are not evidence of physical iPhone testing.
+
+Runtime and UI fixes and their regression coverage are recorded in the [code review](code-review.md). Those checks use fake data and do not repeat the historical live Hermes validation.

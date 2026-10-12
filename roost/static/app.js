@@ -1,8 +1,8 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: {}, conversations: [], jobs: [],
-                busy: false, job: null, draft: false, pending: null, search: "" };
+const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
+                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", conversationOffset: 0, conversationsMore: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -10,6 +10,8 @@ function el(tag, className, text) {
   if (text !== undefined) node.textContent = String(text);
   return node;
 }
+
+function records(rows) { return rows.filter((row) => row && typeof row === "object" && !Array.isArray(row)); }
 
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
@@ -79,13 +81,16 @@ for (const button of document.querySelectorAll("[data-theme-toggle]")) {
 }
 window.addEventListener("roostthemechange", refreshThemeControls);
 refreshThemeControls();
+let noticeTimer;
 function notice(message) {
+  clearTimeout(noticeTimer);
   $("notice").textContent = message;
   show("notice", Boolean(message));
-  if (message) setTimeout(() => { if ($("notice").textContent === message) show("notice", false); }, 6000);
+  if (message) noticeTimer = setTimeout(() => { if ($("notice").textContent === message) show("notice", false); }, 6000);
 }
 
 async function api(path, options = {}) {
+  const epoch = state.authEpoch;
   const response = await fetch("/api" + path, {
     credentials: "same-origin",
     headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
@@ -93,6 +98,7 @@ async function api(path, options = {}) {
   });
   let data;
   try { data = await response.json(); } catch { data = {}; }
+  if (epoch !== state.authEpoch) throw new Error("This request belongs to an earlier sign-in.");
   if (!response.ok) {
     if (response.status === 401 && path !== "/login") { signedOut(); throw new Error("Please sign in again."); }
     throw new Error(data.error || `Request failed (${response.status}).`);
@@ -101,16 +107,28 @@ async function api(path, options = {}) {
 }
 
 function signedOut() {
+  state.authEpoch++; state.viewEpoch++;
+  Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
+    jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
+    draft: false, pending: null, search: "", conversationOffset: 0, conversationsMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
-  $("app").classList.remove("chat-open");
-  $("password").value = "";
+  $("app").classList.remove("chat-open", "job-open", "peek");
+  for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
+  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail"]) $(id).replaceChildren();
+  for (const id of ["job-dialog", "conversation-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
+  $("more-conversations").disabled = false; $("more-conversations").textContent = "Load more";
+  $("send").disabled = false;
+  $("composer").classList.remove("has-text");
+  notice("");
 }
 
 async function signedIn() {
   show("login", false); show("app", true);
+  $("password").value = "";
   $("login-error").textContent = "";
   setSection("messages");
-  await loadConversations();
+  try { await loadConversations(); } catch (error) { notice(error.message); }
 }
 
 function setSection(section) {
@@ -218,13 +236,14 @@ function swipeToDelete(wrapper, row, item) {
     drag.offset = Math.min(0, drag.base + dx);
     row.style.transform = `translateX(${drag.offset}px)`;
   }, { passive: false });
-  const end = () => {
+  const end = (event) => {
     if (!drag) return;
     const { active, offset } = drag; drag = null;
     if (!active) return;
     row.classList.remove("dragging"); row.style.transform = "";
     // Swallow the click a drag may produce, but never the next real tap.
     row.dataset.swiped = "1"; setTimeout(() => delete row.dataset.swiped, 350);
+    if (event.type === "touchcancel") { setSwipeOpen(null); return; }
     if (offset < -wrapper.clientWidth * 0.6) { setSwipeOpen(null); confirmDeleteConversation(item); }
     else setSwipeOpen(offset < -SWIPE_REVEAL / 2 ? wrapper.dataset.id : null);
   };
@@ -242,6 +261,7 @@ function sheetView(name) {
 }
 
 function openConversationSheet(item) {
+  if (state.sheetBusy) return;
   state.sheetItem = item;
   $("sheet-title").textContent = sessionName(item);
   $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = "";
@@ -252,30 +272,42 @@ function openConversationSheet(item) {
 
 async function renameConversation(event) {
   event.preventDefault();
+  if (state.sheetBusy) return;
   const item = state.sheetItem, id = item && conversationId(item);
   if (!id) return;
   const title = $("sheet-name").value.trim();
+  const epoch = state.authEpoch;
+  state.sheetBusy = true;
   try {
     const result = await api(`/conversations/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    if (epoch !== state.authEpoch) return;
     item.title = result.title ?? title;
     if (state.current === id) $("chat-title").textContent = sessionName(item);
     $("conversation-sheet").close(); renderConversations(); notice("Conversation renamed.");
-  } catch (error) { $("sheet-error").textContent = error.message; }
+  } catch (error) { if (epoch === state.authEpoch) $("sheet-error").textContent = error.message; }
+  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
 }
 
 async function deleteConversation() {
+  if (state.sheetBusy) return;
   const item = state.sheetItem, id = item && conversationId(item);
   if (!id) return;
+  const epoch = state.authEpoch;
+  state.sheetBusy = true;
   try {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    if (epoch !== state.authEpoch) return;
+    if (state.pending?.id === id) state.pending = null;
     state.conversations = state.conversations.filter((row) => conversationId(row) !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
-    if (state.current === id) { state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
+    if (state.current === id) { state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
     $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
-  } catch (error) { $("sheet-confirm-error").textContent = error.message; }
+  } catch (error) { if (epoch === state.authEpoch) $("sheet-confirm-error").textContent = error.message; }
+  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
 }
 
 function renderConversations() {
+  show("more-conversations", state.section === "messages" && state.conversationsMore);
   const list = $("conversation-list"); list.replaceChildren();
   const rows = state.conversations.filter((item) =>
     (sessionName(item) + " " + (item.preview || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
@@ -314,41 +346,51 @@ function renderConversations() {
 }
 
 async function loadConversations(more = false) {
+  const epoch = state.authEpoch;
   const button = $("more-conversations");
-  if (more) {
-    if (button.disabled) return;
-    button.disabled = true; button.textContent = "Loading…";
-  }
+  if (button.disabled) return;
+  if (more) { button.disabled = true; button.textContent = "Loading…"; }
+  const serial = state.conversationRequest = (state.conversationRequest || 0) + 1;
   try {
-    // Page from what is already loaded: Hermes may return fewer rows than Roost asks for.
-    const data = await api(`/conversations?offset=${more ? state.conversations.length : 0}`);
+    // Refresh the loaded range, not just its first page: insertions would otherwise
+    // push a conversation into an unfetched gap. Page offsets count raw server rows.
+    const target = more ? 0 : state.conversations.length;
+    let offset = more ? state.conversationOffset : 0, data, rows;
+    const loaded = more ? [...state.conversations] : [];
+    const known = new Set(loaded.map(conversationId));
+    do {
+      data = await api(`/conversations?offset=${offset}`);
+      if (epoch !== state.authEpoch || serial !== state.conversationRequest) return;
+      rows = Array.isArray(data.sessions) ? data.sessions : [];
+      offset += rows.length;
+      for (const item of rows) {
+        const id = conversationId(item);
+        if (typeof id === "string" && id && !known.has(id)) { known.add(id); loaded.push(item); }
+      }
+    } while (!more && rows.length && offset < target && offset <= 100000 &&
+             (!Number.isInteger(data.total) || offset < data.total));
     $("presence").textContent = "Online";
-    const rows = Array.isArray(data.sessions) ? data.sessions : [];
-    if (more) {
-      const known = new Set(state.conversations.map(conversationId));
-      state.conversations.push(...rows.filter((item) => !known.has(conversationId(item))));
-    } else {
-      // A refresh replaces the first page but keeps older pages already loaded with Load more.
-      const fresh = new Set(rows.map(conversationId));
-      state.conversations = [...rows, ...state.conversations.slice(rows.length).filter((item) => !fresh.has(conversationId(item)))];
-    }
-    finishLoadingConversations(data, rows, more);
+    state.conversations = loaded;
+    state.conversationOffset = offset;
+    state.conversationsMore = rows.length > 0 && offset <= 100000 &&
+      (!Number.isInteger(data.total) || offset < data.total);
+    finishLoadingConversations(data, loaded, more);
   } finally {
-    if (more) { button.disabled = false; button.textContent = "Load more"; }
+    if (more && epoch === state.authEpoch) { button.disabled = false; button.textContent = "Load more"; }
   }
 }
 
-function conversationId(item) { return item.session_id || item.id; }
+function conversationId(item) { return item?.session_id || item?.id; }
 
 function finishLoadingConversations(data, rows, more) {
   if (!state.current && !state.draft && !more && rows.length) {
-    state.current = rows[0].session_id || rows[0].id;
-    $("chat-title").textContent = sessionName(rows[0]);
-    loadMessages(state.current).catch((error) => notice(error.message));
+    selectConversation(conversationId(rows[0]), rows[0].source);
+    // Initial selection stays in the list on phones.
+    $("app").classList.remove("chat-open");
   }
   renderConversations();
   if (!state.current && !more) renderWelcome();
-  if (data.total !== undefined) show("more-conversations", state.conversations.length < data.total && (!more || rows.length > 0));
+  show("more-conversations", state.section === "messages" && state.conversationsMore);
 }
 
 function renderWelcome() {
@@ -364,8 +406,8 @@ function renderWelcome() {
 function messageText(message) {
   const value = message.display_content ?? message.content;
   if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : (part.text || part.type || "")).join("\n");
-  if (value && typeof value === "object") return value.text || JSON.stringify(value);
+  if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : (part?.text || part?.type || "")).join("\n");
+  if (value && typeof value === "object") return typeof value.text === "string" ? value.text : JSON.stringify(value);
   return "";
 }
 
@@ -433,7 +475,7 @@ function renderMessages(rows) {
   state.renderedConversation = state.current;
   if (fresh) state.shownTimes = new Set();
   transcript.replaceChildren();
-  const visible = rows.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
+  const visible = records(rows).filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
@@ -473,6 +515,7 @@ function renderMessages(rows) {
 }
 
 async function selectConversation(id, source) {
+  state.viewEpoch++;
   state.current = id;
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -487,11 +530,16 @@ async function selectConversation(id, source) {
 
 async function loadMessages(id = state.current) {
   if (!id) return;
+  const epoch = state.authEpoch;
+  const serial = state.messageRequest = (state.messageRequest || 0) + 1;
   const data = await api(`/conversations/${encodeURIComponent(id)}`);
-  if (state.current === id) renderMessages(Array.isArray(data.messages) ? data.messages : []);
+  if (epoch === state.authEpoch && state.current === id && serial === state.messageRequest) {
+    renderMessages(Array.isArray(data.messages) ? data.messages : []);
+  }
 }
 
 function newConversation() {
+  state.viewEpoch++;
   state.current = null;
   state.draft = true;
   $("app").classList.add("chat-open");
@@ -504,27 +552,45 @@ async function submitMessage(event) {
   if (state.busy) return;
   const text = $("message").value.trim();
   if (!text) return;
+  const epoch = state.authEpoch, view = state.viewEpoch, oldId = state.current;
+  const sameView = () => epoch === state.authEpoch && view === state.viewEpoch && state.current === oldId;
+  let accepted = false;
   state.busy = true; $("send").disabled = true; $("message").value = "";
   $("composer").classList.remove("has-text");
-  const oldId = state.current;
-  $("transcript").append(el("p", "empty-transcript", "Sending…"));
+  const sending = el("p", "empty-transcript", "Sending…");
+  $("transcript").append(sending);
   $("transcript").scrollTop = $("transcript").scrollHeight;
   try {
     const result = oldId
       ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text }) })
       : await api("/conversations", { method: "POST", body: JSON.stringify({ text }) });
-    state.current = result.session_id;
-    state.draft = false;
+    if (epoch !== state.authEpoch) return;
+    accepted = true;
+    if (sameView()) { state.current = result.session_id; state.draft = false; }
     state.pending = { id: result.session_id, text, since: Date.now() };
     nextWorkingVerb();
-    await loadConversations();
-    await loadMessages();
+    // A failed refresh must never turn an accepted message back into an unsent draft.
+    const updates = await Promise.allSettled([loadConversations(), loadMessages()]);
+    if (epoch === state.authEpoch && updates.some((update) => update.status === "rejected")) {
+      notice("Message sent. The conversation could not refresh; it will retry shortly.");
+    }
   } catch (error) {
-    $("message").value = text;
-    $("composer").classList.add("has-text");
+    if (epoch !== state.authEpoch) return;
+    if (!accepted && sameView() && !$("message").value) {
+      $("message").value = text;
+      $("composer").classList.add("has-text");
+    }
     notice(error.message);
-    if (oldId) await loadMessages(oldId).catch(() => {}); else renderWelcome();
-  } finally { state.busy = false; $("send").disabled = false; $("message").focus(); }
+    if (sameView()) {
+      if (oldId) await loadMessages(oldId).catch(() => {}); else renderWelcome();
+    }
+  } finally {
+    sending.remove();
+    if (epoch === state.authEpoch) {
+      state.busy = false; $("send").disabled = false;
+      if (view === state.viewEpoch && state.section === "messages") $("message").focus();
+    }
+  }
 }
 
 function jobValue(job, key) { return job[key] == null ? "" : String(job[key]); }
@@ -547,7 +613,9 @@ function jobPaused(job) { return job.paused === true || job.enabled === false; }
 
 function scheduleLabel(schedule) {
   const match = /^(\d{1,2}) (\d{1,2}) (\*|\d{1,2}) \* (\*|0|1-5)$/.exec(schedule);
-  if (!match) return schedule;
+  if (!match || Number(match[1]) > 59 || Number(match[2]) > 23 ||
+      (match[3] !== "*" && (Number(match[3]) < 1 || Number(match[3]) > 31)) ||
+      (match[3] !== "*" && match[4] !== "*")) return schedule;
   const at = match[2].padStart(2, "0") + ":" + match[1].padStart(2, "0");
   if (match[3] !== "*") {
     const day = Number(match[3]);
@@ -631,6 +699,8 @@ function renderJobDetail() {
   top.append(el("span", "pill " + status.kind, status.label));
   const paused = jobPaused(job);
   const toggle = el("button", "job-toggle" + (paused ? " off" : ""));
+  toggle.disabled = state.jobBusy;
+  for (const id of ["run-selected-job", "edit-selected-job"]) $(id).disabled = state.jobBusy;
   toggle.type = "button"; toggle.setAttribute("role", "switch");
   toggle.setAttribute("aria-checked", String(!paused));
   toggle.setAttribute("aria-label", (paused ? "Resume " : "Pause ") + (jobValue(job, "name") || "job"));
@@ -654,7 +724,8 @@ function renderJobDetail() {
   historyHeading.append(el("h2", "", "Recent runs"), refresh);
   history.append(historyHeading);
   const runs = state.jobRuns[job.id || job.job_id];
-  if (!runs) history.append(el("p", "job-history-empty", "Loading recent runs…"));
+  if (!runs) history.append(el("p", "job-history-empty", state.jobRunsError[job.id || job.job_id] ?
+    "Recent runs could not load. Use Refresh to try again." : "Loading recent runs…"));
   else if (!runs.length) history.append(el("p", "job-history-empty", "No runs yet."));
   else for (const run of runs) {
     const row = el("article", "run-row");
@@ -676,40 +747,64 @@ function renderJobDetail() {
 }
 
 async function loadJobRuns(id) {
-  const data = await api(`/jobs/${encodeURIComponent(id)}/runs`);
-  state.jobRuns[id] = Array.isArray(data) ? data : (data.runs || []);
-  if (state.selectedJob === id) renderJobDetail();
+  if (state.jobRunsLoading.has(id)) return;
+  const epoch = state.authEpoch, loading = state.jobRunsLoading;
+  loading.add(id);
+  try {
+    const data = await api(`/jobs/${encodeURIComponent(id)}/runs`);
+    if (epoch !== state.authEpoch) return;
+    delete state.jobRunsError[id];
+    state.jobRuns[id] = records(Array.isArray(data) ? data : (Array.isArray(data.runs) ? data.runs : []));
+    if (state.selectedJob === id) renderJobDetail();
+  } catch (error) {
+    if (epoch === state.authEpoch) { state.jobRunsError[id] = true; if (state.selectedJob === id) renderJobDetail(); }
+    throw error;
+  } finally { loading.delete(id); }
 }
 
 async function loadJobs() {
+  const epoch = state.authEpoch;
+  const serial = state.jobsRequest = (state.jobsRequest || 0) + 1;
   const data = await api("/jobs");
-  state.jobs = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+  if (epoch !== state.authEpoch || serial !== state.jobsRequest) return;
+  state.jobs = records(Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []));
   if (!state.selectedJob || !state.jobs.some((job) => (job.id || job.job_id) === state.selectedJob)) {
     state.selectedJob = state.jobs[0]?.id || state.jobs[0]?.job_id || null;
   }
   renderJobs();
-  if (state.selectedJob && !Object.hasOwn(state.jobRuns, state.selectedJob)) loadJobRuns(state.selectedJob).catch((error) => notice(error.message));
+  if (state.selectedJob) await loadJobRuns(state.selectedJob).catch((error) => notice(error.message));
 }
 
 async function jobAction(id, action) {
+  if (state.jobBusy) return;
+  const epoch = state.authEpoch;
+  state.jobBusy = true; renderJobDetail();
   try {
     await api(`/jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+    if (epoch !== state.authEpoch) return;
     notice(action === "trigger" ? `${agent()} is running this Job.` : `Job ${action === "pause" ? "paused" : "resumed"}.`);
     await loadJobs();
-    if (action === "trigger") { delete state.jobRuns[id]; await loadJobRuns(id); }
-  } catch (error) { notice(error.message); }
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
 }
 
 async function deleteJob(job) {
+  if (state.jobBusy) return;
   const name = jobValue(job, "name") || "this Job";
   if (!window.confirm(`Delete “${name}”? This cannot be undone.`)) return;
+  const epoch = state.authEpoch;
+  state.jobBusy = true;
   try {
     await api(`/jobs/${encodeURIComponent(job.id || job.job_id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    if (epoch !== state.authEpoch) return;
+    delete state.jobRuns[job.id || job.job_id]; delete state.jobRunsError[job.id || job.job_id];
     $("job-dialog").close(); state.selectedJob = null; $("app").classList.remove("job-open"); notice("Job deleted."); await loadJobs();
-  } catch (error) { notice(error.message); }
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
 }
 
 function openJob(job = null) {
+  if (state.jobBusy) return;
   state.job = job;
   $("job-dialog-title").textContent = job ? "Edit job" : "New job";
   $("job-name").value = job ? jobValue(job, "name") : "";
@@ -723,18 +818,29 @@ function openJob(job = null) {
 
 async function saveJob(event) {
   event.preventDefault();
+  if (state.jobBusy) return;
+  state.jobBusy = true;
+  const epoch = state.authEpoch;
+  const buttons = [...$("job-form").querySelectorAll("button")];
+  buttons.forEach((button) => { button.disabled = true; });
   const data = { name: $("job-name").value.trim(), prompt: $("job-prompt").value.trim(),
                  schedule: $("job-schedule").value.trim(), deliver: $("job-deliver").value.trim() };
   const id = state.job && (state.job.id || state.job.job_id);
   try {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
+    if (epoch !== state.authEpoch) return;
     $("job-dialog").close(); notice(id ? "Job updated." : "Job created.");
     if (!id) {
       state.selectedJob = result.id || result.job_id || null;
       await loadJobs();
       if (state.selectedJob) selectJob(state.selectedJob);
     } else await loadJobs();
-  } catch (error) { notice(error.message); }
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  finally {
+    if (epoch === state.authEpoch) {
+      state.jobBusy = false; buttons.forEach((button) => { button.disabled = false; }); renderJobDetail();
+    }
+  }
 }
 
 $("login-form").addEventListener("submit", async (event) => {
@@ -744,7 +850,12 @@ $("login-form").addEventListener("submit", async (event) => {
     await signedIn();
   } catch (error) { $("login-error").textContent = error.message; }
 });
-$("logout").addEventListener("click", async () => { try { await api("/logout", { method: "POST" }); } finally { signedOut(); } });
+$("logout").addEventListener("click", async () => {
+  $("logout").disabled = true;
+  try { await api("/logout", { method: "POST" }); signedOut(); }
+  catch (error) { notice(error.message); }
+  finally { $("logout").disabled = false; }
+});
 $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
@@ -831,7 +942,7 @@ $("conversation-sheet").addEventListener("click", (event) => {
   if (event.target === $("conversation-sheet") && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) $("conversation-sheet").close();
 });
 $("message").addEventListener("input", () => $("composer").classList.toggle("has-text", Boolean($("message").value.trim())));
-$("message").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("composer").requestSubmit(); } });
+$("message").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); $("composer").requestSubmit(); } });
 $("job-form").addEventListener("submit", saveJob);
 $("job-schedule").addEventListener("input", updateSchedulePreview);
 $("close-dialog").addEventListener("click", () => $("job-dialog").close());

@@ -40,6 +40,7 @@ def sample_data():
          "source": "terminal", "last_active_at": now - 2 * 86400},
         {"id": "roost_packing", "title": "Trip packing list", "preview": "Added rain shell and the travel adapter.",
          "source": "roost", "last_active_at": now - 4 * 86400},
+        {"id": "cron_job_vault_sample", "title": "Vault tidy run", "source": "cron", "last_active_at": now - 3 * 86400},
         {"id": "cron_job_morning_sample", "title": "Morning briefing run", "source": "cron", "last_active_at": now - 7200},
     ]
     messages = {
@@ -60,6 +61,9 @@ def sample_data():
         "roost_packing": [
             {"role": "user", "content": "Add a rain shell to the packing list."},
             {"role": "assistant", "content": "Added rain shell and the travel adapter."},
+        ],
+        "cron_job_vault_sample": [
+            {"role": "assistant", "content": "Two sample notes link to pages that no longer exist."},
         ],
         "cron_job_morning_sample": [
             {"role": "assistant", "content": "Morning briefing\n\n• Your project outline is the main focus today.\n• A short reading break fits after lunch.\n• The evening walk is still on the calendar."},
@@ -240,6 +244,8 @@ def mock_hermes():
 
                 async def reply(sid, prompt):
                     await asyncio.sleep(1)
+                    if sid not in messages:
+                        return  # The owner may delete a conversation while its demo reply is pending.
                     messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nThe agent's real answer will appear here when Roost is connected to Hermes."})
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
 

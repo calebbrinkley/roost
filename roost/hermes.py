@@ -1,10 +1,15 @@
 """Server-only, narrow client for the pinned Hermes dashboard API."""
 
 import asyncio
+import json
 from pathlib import Path
 from urllib.parse import quote
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, CookieJar, WSMsgType
+
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+RPC_TIMEOUT = 40
 
 
 class HermesError(Exception):
@@ -41,7 +46,7 @@ class Hermes:
                 }, allow_redirects=False) as response:
                     if response.status != 200:
                         raise HermesError(502, "Hermes dashboard sign-in failed.")
-            except (OSError, ClientError, asyncio.TimeoutError) as exc:
+            except (OSError, UnicodeError, ClientError, asyncio.TimeoutError) as exc:
                 raise HermesError(503, "Hermes dashboard is unavailable.") from exc
             self.authenticated = True
 
@@ -58,9 +63,20 @@ class Hermes:
                         # 400 is Hermes rejecting the request itself (such as a duplicate title), not a fault.
                         raise HermesError(response.status if response.status in {400, 404} else 502,
                                           "Hermes could not complete that request.")
-                    if response.content_length and response.content_length > 8 * 1024 * 1024:
+                    if response.content_length and response.content_length > MAX_RESPONSE_BYTES:
                         raise HermesError(502, "Hermes returned too much data.")
-                    return await response.json()
+                    payload = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        if len(payload) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise HermesError(502, "Hermes returned too much data.")
+                        payload.extend(chunk)
+                    try:
+                        result = json.loads(payload)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise HermesError(502, "Hermes returned invalid data.") from None
+                    if not isinstance(result, (dict, list)):
+                        raise HermesError(502, "Hermes returned invalid data.")
+                    return result
             except (ClientError, asyncio.TimeoutError) as exc:
                 raise HermesError(503, "Hermes is unavailable.") from exc
         raise HermesError(502, "Hermes dashboard sign-in expired.")
@@ -69,7 +85,7 @@ class Hermes:
         """Submit a turn then detach; Hermes persists and finishes the turn itself."""
         await self._login()
         ticket_data = await self.request("POST", "/api/auth/ws-ticket")
-        ticket = ticket_data.get("ticket")
+        ticket = ticket_data.get("ticket") if isinstance(ticket_data, dict) else None
         if not isinstance(ticket, str) or not ticket:
             raise HermesError(502, "Hermes did not provide a chat ticket.")
         ws_url = self.base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
@@ -86,20 +102,33 @@ class Hermes:
                 if not isinstance(runtime_id, str) or not runtime_id:
                     raise HermesError(502, "Hermes did not open the conversation.")
                 await self._rpc_on_socket(ws, 2, "prompt.submit", {"session_id": runtime_id, "text": text})
-                return str(first.get("stored_session_id") or stored_id or runtime_id)
+                session_id = first.get("stored_session_id") or stored_id or runtime_id
+                if not isinstance(session_id, str) or not session_id:
+                    raise HermesError(502, "Hermes returned an invalid conversation identifier.")
+                return session_id
         except (ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise HermesError(503, "Hermes chat is unavailable.") from exc
 
     @staticmethod
     async def _rpc_on_socket(ws, request_id: int, method: str, params: dict) -> dict:
-        await ws.send_json({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        while True:
-            message = await asyncio.wait_for(ws.receive(), timeout=40)
-            if message.type != WSMsgType.TEXT:
-                raise HermesError(502, "Hermes closed the chat connection.")
-            frame = message.json()
-            if frame.get("id") != request_id:
-                continue
-            if "error" in frame:
-                raise HermesError(502, "Hermes rejected the chat request.")
-            return frame.get("result") or {}
+        # Unrelated gateway events must not restart the deadline indefinitely.
+        async with asyncio.timeout(RPC_TIMEOUT):
+            await ws.send_json({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            while True:
+                message = await ws.receive()
+                if message.type != WSMsgType.TEXT:
+                    raise HermesError(502, "Hermes closed the chat connection.")
+                try:
+                    frame = message.json()
+                except (ValueError, RecursionError):
+                    raise HermesError(502, "Hermes returned invalid chat data.") from None
+                if not isinstance(frame, dict):
+                    raise HermesError(502, "Hermes returned invalid chat data.")
+                if frame.get("id") != request_id:
+                    continue
+                if "error" in frame:
+                    raise HermesError(502, "Hermes rejected the chat request.")
+                result = frame.get("result")
+                if not isinstance(result, dict):
+                    raise HermesError(502, "Hermes returned invalid chat data.")
+                return result

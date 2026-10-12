@@ -24,11 +24,11 @@ jobs:
           # Full history, so the content guard also scans earlier commits and their identities.
           fetch-depth: 0
           persist-credentials: false
-      - name: Check public content, links and tests
-        run: make check
       - name: Install Roost in an isolated environment
         run: |
           python3 -m venv /tmp/roost
           /tmp/roost/bin/python -m pip install -e .
+      - name: Check public content, links and tests
+        run: make PYTHON=/tmp/roost/bin/python check
       - name: Run the demo smoke check
         run: make PYTHON=/tmp/roost/bin/python smoke
