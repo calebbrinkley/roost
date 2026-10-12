@@ -48,6 +48,10 @@ EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 PLACEHOLDER_DOMAINS = {"example.com", "example.org", "example.net", "example.invalid", "users.noreply.github.com"}
 # Service no-reply addresses that appear in merge commits and co-author trailers.
 SERVICE_ADDRESSES = {"noreply@github.com", "noreply@anthropic.com"}
+# Dependabot uses a public service address in this exact footer. It is permitted only in a
+# bot-authored commit message, not in files, general message text or commit identities.
+DEPENDABOT_AUTHOR = "49699333+dependabot[bot]@users.noreply.github.com"
+DEPENDABOT_SIGNOFF = "Signed-off-by: dependabot[bot] <support" + "@github.com>"
 # NAME_API_KEY=..., "client_secret": "...", HF_TOKEN: ...  The name may carry any prefix or suffix.
 ASSIGNMENT_PATTERN = re.compile(
     r'''(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|auth[_-]?key|private[_-]?key|credential)'''
@@ -120,7 +124,7 @@ def allowed_address(address: str) -> bool:
     return domain in PLACEHOLDER_DOMAINS or address.lower() in SERVICE_ADDRESSES
 
 
-def inspect_text(text: str, name: str, label: str = "") -> list[Finding]:
+def inspect_text(text: str, name: str, label: str = "", *, allow_dependabot_signoff: bool = False) -> list[Finding]:
     """Findings for text. `name` selects exemptions; `label` (default: name) is what gets reported."""
     findings = []
     label = label or name
@@ -147,6 +151,8 @@ def inspect_text(text: str, name: str, label: str = "") -> list[Finding]:
                 categories.add("non-placeholder tailnet hostname")
         for match in EMAIL_PATTERN.finditer(line):
             if not allowed_address(match.group()):
+                if allow_dependabot_signoff and line.strip() == DEPENDABOT_SIGNOFF:
+                    continue
                 categories.add("non-placeholder contact address")
         for match in ASSIGNMENT_PATTERN.finditer(line):
             if not is_placeholder(match.group(1)):
@@ -230,7 +236,9 @@ def inspect_commits(root: Path, revs: list[str]) -> tuple[list[Finding], int]:
             if "@" not in address or not allowed_address(address):
                 findings.append(Finding(where, 1, "non-noreply commit identity"))
                 break
-        findings.extend(inspect_text(message, where + " message"))
+        findings.extend(inspect_text(message, where + " message", allow_dependabot_signoff=(
+            _author == "dependabot[bot]" and author_email == DEPENDABOT_AUTHOR
+        )))
     return findings, count
 
 
