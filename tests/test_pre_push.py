@@ -71,6 +71,25 @@ class GitSandbox(unittest.TestCase):
 
 
 class HistoryScanTests(GitSandbox):
+    def test_dependabot_signoff_is_allowed_only_for_the_exact_bot_commit_footer(self):
+        bot = ("dependabot[bot]", guard.DEPENDABOT_AUTHOR)
+        valid = self.commit("a.txt", "fine\n", identity=bot,
+                            message="dependency update\n\n" + guard.DEPENDABOT_SIGNOFF)
+        self.assertEqual(guard.inspect_revisions(self.work, [valid])[0], [])
+        self.assertTrue(guard.inspect_text(guard.DEPENDABOT_SIGNOFF, "notes.md"))
+        self.assertFalse(guard.allowed_address("support" + "@github.com"))
+
+        # Human-authored copies and additional addresses still trigger the contact rule.
+        self.commit("b.txt", "fine\n", message="change\n\n" + guard.DEPENDABOT_SIGNOFF)
+        self.commit("c.txt", "fine\n", identity=bot,
+                    message="dependency update\n\n" + guard.DEPENDABOT_SIGNOFF + "\n" +
+                    "Contact: person" + "@private-domain.test")
+        self.commit("d.txt", "fine\n", identity=bot,
+                    message="Contact: support" + "@github.com")
+        findings = guard.inspect_revisions(self.work, ["--all"])[0]
+        self.assertEqual(len(findings), 3)
+        self.assertEqual({f.category for f in findings}, {"non-placeholder contact address"})
+
     def test_secret_added_then_deleted_is_still_found_in_history(self):
         self.commit("config.txt", secret_line())
         self.git("rm", "-q", "config.txt")
