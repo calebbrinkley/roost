@@ -86,7 +86,7 @@ async function api(path, options = {}) {
   try { data = await response.json(); } catch { data = {}; }
   if (epoch !== state.authEpoch) throw new Error("This request belongs to an earlier sign-in.");
   if (!response.ok) {
-    if (response.status === 401 && path !== "/login") { signedOut(); throw new Error("Please sign in again."); }
+    if (response.status === 401 && path !== "/login" && path !== "/passkeys/login") { signedOut(); throw new Error("Please sign in again."); }
     throw new Error(data.error || `Request failed (${response.status}).`);
   }
   return data;
@@ -99,7 +99,7 @@ function signedOut() {
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set() });
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
-                         timeZone: "", about: null });
+                         timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null });
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
@@ -108,6 +108,57 @@ function signedOut() {
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
   notice("");
+  offerPasskeySignIn();
+}
+
+// Passkeys (WebAuthn). The browser API takes and returns ArrayBuffers; Roost's API uses base64url.
+function passkeysSupported() { return Boolean(window.PublicKeyCredential && window.isSecureContext && navigator.credentials); }
+
+function fromB64url(value) {
+  const text = atob(value.replaceAll("-", "+").replaceAll("_", "/") + "===".slice((value.length + 3) % 4));
+  return Uint8Array.from(text, (char) => char.charCodeAt(0)).buffer;
+}
+
+function toB64url(buffer) {
+  let text = "";
+  for (const byte of new Uint8Array(buffer)) text += String.fromCharCode(byte);
+  return btoa(text).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+// iOS Safari shows the Face ID prompt only straight from a tap, so challenges are fetched ahead of
+// time; a tap then goes directly to the prompt. A challenge is good for five minutes on the server.
+const PASSKEY_OPTIONS_MS = 240000;
+
+function fresh(prefetched) { return prefetched && Date.now() - prefetched.at < PASSKEY_OPTIONS_MS ? prefetched.options : null; }
+
+async function prefetch(path) {
+  try { return { options: await api(path, { method: "POST" }), at: Date.now() }; } catch { return null; }
+}
+
+async function offerPasskeySignIn() {
+  const offered = Boolean(state.passkeysAvailable && passkeysSupported());
+  show("passkey-signin", offered);
+  if (offered) state.passkeyLogin = await prefetch("/passkeys/login/options");
+}
+
+async function passkeySignIn() {
+  $("login-error").textContent = "";
+  $("passkey-signin").disabled = true;
+  try {
+    const options = fresh(state.passkeyLogin) || await api("/passkeys/login/options", { method: "POST" });
+    state.passkeyLogin = null;
+    const credential = await navigator.credentials.get({ publicKey: {
+      challenge: fromB64url(options.challenge), rpId: options.rpId, userVerification: options.userVerification,
+      allowCredentials: [], timeout: options.timeout } });
+    await api("/passkeys/login", { method: "POST", body: JSON.stringify({
+      id: toB64url(credential.rawId), clientDataJSON: toB64url(credential.response.clientDataJSON),
+      authenticatorData: toB64url(credential.response.authenticatorData), signature: toB64url(credential.response.signature),
+      userHandle: credential.response.userHandle ? toB64url(credential.response.userHandle) : null }) });
+    await signedIn();
+  } catch (error) {
+    $("login-error").textContent = error.name === "NotAllowedError" ? "Passkey sign-in was cancelled or timed out." : error.message;
+    if ($("app").classList.contains("hidden")) offerPasskeySignIn();
+  } finally { $("passkey-signin").disabled = false; }
 }
 
 async function signedIn() {
@@ -933,7 +984,7 @@ async function saveJob(event) {
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
           ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", `Restart Roost or ${agent()}`], ["account", "Account", "Sign out of this device"],
+          ["service", "Service", `Restart Roost or ${agent()}`], ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
@@ -958,6 +1009,7 @@ function selectSettingsGroup(id) {
   $("settings-detail").scrollTop = 0;
   if (id === "agent") loadSoul();
   if (id === "about") loadAbout();
+  if (id === "account") loadPasskeys();
 }
 
 function renderSettings() {
@@ -1188,9 +1240,105 @@ function renderDataSettings(detail) {
   }
 }
 
+function deviceName() {
+  const agent = navigator.userAgent || "";
+  if (/iPhone/.test(agent)) return "iPhone";
+  if (/iPad/.test(agent) || (/Macintosh/.test(agent) && navigator.maxTouchPoints > 1)) return "iPad";
+  if (/Macintosh/.test(agent)) return "Mac";
+  if (/Android/.test(agent)) return "Android phone";
+  if (/Windows/.test(agent)) return "Windows PC";
+  return "This device";
+}
+
+async function loadPasskeys() {
+  const epoch = state.authEpoch;
+  try {
+    const data = await api("/passkeys");
+    if (epoch !== state.authEpoch) return;
+    state.passkeyList = data.passkeys;
+    state.passkeysAvailable = data.passkeys.length > 0;
+    if (state.settingsGroup === "account") renderSettings();
+    if (passkeysSupported()) state.passkeyRegister = await prefetch("/passkeys/register/options");
+  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+}
+
+function dateLabel(seconds) {
+  return new Date(seconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", ...zone() });
+}
+
+function renderPasskeys(detail) {
+  const section = settingsSection(detail, "Passkeys",
+    "Sign in with Face ID, Touch ID or your device’s PIN instead of your password. Your password keeps working.");
+  if (!state.passkeyList) { section.append(el("p", "", "Loading…")); return; }
+  if (state.passkeyList.length) {
+    const list = el("ul", "passkey-list");
+    for (const passkey of state.passkeyList) {
+      const item = el("li"), text = el("div");
+      text.append(el("strong", "", passkey.name),
+                  el("small", "", "Added " + dateLabel(passkey.created) + (passkey.last_used ? " · last used " + dateLabel(passkey.last_used) : " · not used yet")));
+      const confirming = state.removingPasskey === passkey.id;
+      const remove = settingsButton("secondary" + (confirming ? " confirming" : ""), confirming ? "Confirm remove" : "Remove",
+        () => confirming ? removePasskey(passkey) : (state.removingPasskey = passkey.id, renderSettings()));
+      remove.setAttribute("aria-label", (confirming ? "Confirm removing " : "Remove ") + passkey.name);
+      item.append(text, remove);
+      list.append(item);
+    }
+    section.append(list);
+  }
+  if (!passkeysSupported()) {
+    section.append(el("p", "", "This browser can’t add passkeys here. Open Roost in Safari, Chrome or Edge over HTTPS."));
+    return;
+  }
+  const label = el("label", "", "Name for a new passkey"); label.htmlFor = "passkey-name";
+  const input = el("input"); input.id = "passkey-name"; input.maxLength = 40; input.autocomplete = "off";
+  input.value = state.passkeyNameDraft ?? deviceName();
+  input.addEventListener("input", () => { state.passkeyNameDraft = input.value; });
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("primary", "Add a passkey", () => addPasskey(input.value.trim())));
+  section.append(label, input, actions);
+}
+
+function addPasskey(name) {
+  return withSettingsBusy(async (epoch) => {
+    const options = fresh(state.passkeyRegister) || await api("/passkeys/register/options", { method: "POST" });
+    state.passkeyRegister = null;
+    let credential;
+    const excluded = options.excludeCredentials.map((item) => ({ ...item, id: fromB64url(item.id) }));
+    try {
+      credential = await navigator.credentials.create({ publicKey: {
+        ...options, challenge: fromB64url(options.challenge), user: { ...options.user, id: fromB64url(options.user.id) },
+        excludeCredentials: excluded } });
+    } catch (error) {
+      // The prompt didn't finish: fetch a fresh challenge so the next tap goes straight to it.
+      if (epoch === state.authEpoch) loadPasskeys();
+      if (error.name === "InvalidStateError") throw new Error("This device already has a passkey for Roost.");
+      if (error.name === "NotAllowedError") throw new Error("Adding the passkey was cancelled or timed out.");
+      throw error;
+    }
+    await api("/passkeys", { method: "POST", body: JSON.stringify({
+      name, id: toB64url(credential.rawId), clientDataJSON: toB64url(credential.response.clientDataJSON),
+      attestationObject: toB64url(credential.response.attestationObject) }) });
+    if (epoch !== state.authEpoch) return;
+    state.passkeyNameDraft = undefined;
+    notice(`Passkey added. Next time, sign in with ${name}.`);
+    await loadPasskeys();
+  });
+}
+
+function removePasskey(passkey) {
+  return withSettingsBusy(async (epoch) => {
+    await api("/passkeys/" + encodeURIComponent(passkey.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    if (epoch !== state.authEpoch) return;
+    state.removingPasskey = null;
+    notice(`Removed the passkey “${passkey.name}”. Also delete it from the device’s passwords to stop it being offered.`);
+    await loadPasskeys();
+  });
+}
+
 function renderAccount(detail) {
+  renderPasskeys(detail);
   const section = settingsSection(detail, "Sign out",
-    "Signs this device out of Roost. Other devices stay signed in. You’ll need your Roost password to sign back in.");
+    "Signs this device out of Roost. Other devices stay signed in. Sign back in with your password or a passkey.");
   const actions = el("div", "settings-actions");
   actions.append(settingsButton("secondary", "Sign out", signOut));
   section.append(actions);
@@ -1299,6 +1447,7 @@ function restartRoost() {
   });
 }
 
+$("passkey-signin").addEventListener("click", passkeySignIn);
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -1480,4 +1629,8 @@ setInterval(() => {
   else if (state.section === "jobs") loadJobs().catch(() => {});
 }, 20000);
 
-api("/me").then((data) => { applyAgentName(data.agent); return data.signed_in ? signedIn() : signedOut(); }).catch(() => signedOut());
+api("/me").then((data) => {
+  applyAgentName(data.agent);
+  state.passkeysAvailable = Boolean(data.passkeys);
+  return data.signed_in ? signedIn() : signedOut();
+}).catch(() => signedOut());

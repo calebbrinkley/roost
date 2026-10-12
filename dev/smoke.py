@@ -63,6 +63,10 @@ async def checks():
             async with client.get(BASE + asset) as response:
                 assert response.status == 200, asset
         await request(client, "GET", "/api/conversations", 401)
+        # Passkeys: sign-in challenges are public, adding one needs a session.
+        assert (await request(client, "POST", "/api/passkeys/login/options"))["userVerification"] == "required"
+        await request(client, "POST", "/api/passkeys/register/options", 401)
+        assert (await request(client, "GET", "/api/me"))["passkeys"] is False
         async with client.post(BASE + "/api/login", headers={"Origin": "http://invalid.example", "X-Roost-Request": "1"},
                                json={"password": "roost-demo-only"}) as response:
             assert response.status == 403
@@ -122,6 +126,8 @@ async def checks():
         await request(client, "PATCH", "/api/settings", 400, {"time_zone": "Mars/Olympus Mons"})
         await request(client, "PATCH", "/api/settings", body={"time_zone": "America/New_York"})
         assert (await request(client, "GET", "/api/me"))["time_zone"] == "America/New_York"
+        assert (await request(client, "GET", "/api/passkeys"))["passkeys"] == []
+        assert (await request(client, "POST", "/api/passkeys/register/options"))["authenticatorSelection"]["residentKey"] == "required"
         about = await request(client, "GET", "/api/about")
         assert about["hermes"]["reachable"] and about["hermes"]["version"] == "demo" and "hermes_home" not in about["hermes"]
         assert about["roost"]["version"] and about["stats"]["state_bytes"] > 0 and about["stats"]["disk_total_bytes"] > 0
@@ -137,7 +143,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

@@ -24,7 +24,7 @@ function fixture() {
     querySelectorAll: () => [], querySelector: () => get('main'), addEventListener() {} };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
-    fetch: async () => ({ok: true, json: async () => ({signed_in: false})}), Date, Math });
+    fetch: async () => ({ok: true, json: async () => ({signed_in: false})}), Date, Math, atob, btoa });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
   return {context, get, run: code => vm.runInContext(code, context)};
 }
@@ -528,4 +528,67 @@ test('table cells render italics, bold and code; code blocks stay literal', asyn
   const pre = find(out, 'PRE')[0];
   assert.equal(pre.children[0].textContent, 'def f(*args, **kwargs): return a * b * c');
   assert.equal(tags(pre).includes('EM'), false);
+});
+
+function passkeyFixture() {
+  const f = settingsFixture();
+  Object.assign(f.context.window, { PublicKeyCredential: function () {}, isSecureContext: true });
+  const bytes = (...values) => Uint8Array.from(values).buffer;
+  f.context.navigator.credentials = {
+    get: async (request) => { f.context.requested = request.publicKey; return {
+      rawId: bytes(1, 2, 3), response: { clientDataJSON: bytes(4), authenticatorData: bytes(5), signature: bytes(250, 251), userHandle: bytes(9) } }; },
+    create: async (request) => { f.context.created = request.publicKey; return {
+      rawId: bytes(7, 7), response: { clientDataJSON: bytes(8), attestationObject: bytes(255) } }; },
+  };
+  return f;
+}
+
+test('passkey sign-in sends the authenticator response and signs in', async () => {
+  const f = passkeyFixture(); await tick();
+  f.run(`globalThis.sent = []; signedIn = async () => { globalThis.done = true; };
+    api = async (path, options = {}) => { sent.push([path, options.body && JSON.parse(options.body)]);
+      return path === '/passkeys/login/options' ? {challenge:'AQID', rpId:'roost.example.invalid', userVerification:'required', timeout:1000} : {}; };`);
+  await f.run('passkeySignIn()');
+  assert.equal(f.context.requested.rpId, 'roost.example.invalid');
+  assert.deepEqual(Array.from(new Uint8Array(f.context.requested.challenge)), [1, 2, 3]);
+  const [path, body] = f.run('sent').at(-1);
+  assert.equal(path, '/passkeys/login');
+  assert.deepEqual(JSON.parse(JSON.stringify(body)), {id:'AQID', clientDataJSON:'BA', authenticatorData:'BQ', signature:'-vs', userHandle:'CQ'});
+  assert.equal(f.run('globalThis.done'), true);
+});
+
+test('a cancelled passkey prompt says so and stays on the sign-in page', async () => {
+  const f = passkeyFixture(); await tick();
+  f.context.navigator.credentials.get = async () => { const error = new Error('x'); error.name = 'NotAllowedError'; throw error; };
+  f.run(`globalThis.signedOutCalls = 0; const original = signedOut; signedOut = () => { signedOutCalls++; original(); };
+    api = async () => ({challenge:'AQID', rpId:'r', userVerification:'required', timeout:1000});`);
+  await f.run('passkeySignIn()');
+  assert.equal(f.get('login-error').textContent, 'Passkey sign-in was cancelled or timed out.');
+  assert.equal(f.run('signedOutCalls'), 0);
+});
+
+test('Settings › Account adds a named passkey and removes one after confirming', async () => {
+  const f = passkeyFixture(); await tick();
+  f.run(`globalThis.sent = []; globalThis.listed = [{id:'old', name:'Mac', created:1760000000, last_used:null}];
+    api = async (path, options = {}) => {
+      sent.push([options.method || 'GET', path, options.body && JSON.parse(options.body)]);
+      if (path === '/settings') return ${SETTINGS};
+      if (path === '/passkeys') return options.method === 'POST' ? {id:'Bwc', name:'iPhone'} : {passkeys: listed};
+      if (path === '/passkeys/register/options') return {challenge:'AQID', rp:{id:'r', name:'Roost'}, user:{id:'CQ', name:'o', displayName:'o'},
+        pubKeyCredParams:[], authenticatorSelection:{}, attestation:'none', excludeCredentials:[{type:'public-key', id:'AQ'}], timeout:1000};
+      return {ok:true}; };`);
+  f.run(`setSection('settings'); selectSettingsGroup('account')`); await tick(); await tick(); await tick();
+  assert.match(text(f.get('settings-detail')), /Mac/);
+  const name = find(f.get('settings-detail'), n => n.id === 'passkey-name');
+  name.value = 'iPhone'; name.events.input();
+  await find(f.get('settings-detail'), n => n.textContent === 'Add a passkey').events.click(); await tick();
+  assert.deepEqual(Array.from(new Uint8Array(f.context.created.user.id)), [9]);
+  assert.deepEqual(Array.from(new Uint8Array(f.context.created.excludeCredentials[0].id)), [1]);
+  const added = f.run('sent').find(([method, path]) => method === 'POST' && path === '/passkeys');
+  assert.deepEqual(JSON.parse(JSON.stringify(added[2])), {name:'iPhone', id:'Bwc', clientDataJSON:'CA', attestationObject:'_w'});
+  const remove = () => find(f.get('settings-detail'), n => /^(Remove|Confirm remove)$/.test(n.textContent));
+  remove().events.click();
+  assert.equal(remove().textContent, 'Confirm remove');
+  await remove().events.click(); await tick();
+  assert.ok(f.run('sent').some(([method, path, body]) => method === 'DELETE' && path === '/passkeys/old' && body.confirm === true));
 });

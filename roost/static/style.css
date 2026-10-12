@@ -59,6 +59,13 @@ button:disabled { cursor: default; }
 .login-card input, .job-dialog input, .job-dialog textarea { width: 100%; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; outline: none; }
 .login-card input:focus, .job-dialog input:focus, .job-dialog textarea:focus, .composer textarea:focus { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 .login-card .primary { width: 100%; margin-top: 18px; }
+.login-card .secondary { width: 100%; margin-top: 10px; }
+.passkey-list { display: grid; gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; max-width: 620px; }
+.passkey-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-radius: 12px; background: var(--chip); }
+.passkey-list strong { display: block; font-size: calc(15px * var(--text-scale)); }
+.passkey-list small { color: var(--muted); font-size: calc(12px * var(--text-scale)); }
+.passkey-list .secondary { flex: 0 0 auto; padding: 7px 12px; background: var(--frame); }
+.passkey-list .confirming { color: #fff; background: #c05242; }
 
 .shell { height: 100dvh; display: flex; overflow: hidden; background: var(--frame); }
 .sidebar { width: 300px; flex: 0 0 300px; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--sheet); }
