@@ -62,8 +62,8 @@ REVIEWED_ASSETS = {
     "roost/static/SpaceGrotesk-Regular.ttf": "54f91de389ffe508d384a0a0f7e0ca489f170acf40ceebc458086903cf483bc7",
     "roost/static/SpaceGrotesk-Bold.ttf": "54c4dc92c236f5eca503670045125c77d61ef3a22601c76f2f252cf3cad4a088",
     "assets/roost-logo.png": "d4739d7b3dec098486d6e6e5adb71651e56d7ab457bbf535e5f2f5284020d377",
-    "assets/roost-macbook-light.png": "5b443696cf1fca80141d52287d3ca92e6207c86853c06c133ceac4b8670b9279",
-    "assets/roost-iphone-dark.png": "47bd3737d5d61418207dee8328342223cff6c063ca9ebcc5420ad0b9340f4db0",
+    "assets/roost-iphone-chat-dark.png": "4ea75dd5311e7a6ea775698071395ba176014221c541bcccf032c36b0760d5bc",
+    "assets/roost-iphone-dark.png": "9862004e1c1906df99ff07bdbebafd2b3fa141dc96e33b56bb55898531510294",
 }
 
 
@@ -80,8 +80,19 @@ REVIEWED_HISTORY = {
 }
 
 
-def reviewed_asset(name: str, body: bytes) -> bool:
-    return REVIEWED_ASSETS.get(name) == hashlib.sha256(body).hexdigest()
+# Previously published assets remain reviewed for history scans only. Current files must match
+# their current pin; a retired asset is not approved for reintroduction into the working tree.
+REVIEWED_ASSET_HISTORY = {
+    "assets/roost-iphone-dark.png": {"47bd3737d5d61418207dee8328342223cff6c063ca9ebcc5420ad0b9340f4db0"},
+    "assets/roost-macbook-light.png": {"5b443696cf1fca80141d52287d3ca92e6207c86853c06c133ceac4b8670b9279"},
+}
+
+
+def reviewed_asset(name: str, body: bytes, *, history: bool = False) -> bool:
+    digest = hashlib.sha256(body).hexdigest()
+    return REVIEWED_ASSETS.get(name) == digest or (
+        history and digest in REVIEWED_ASSET_HISTORY.get(name, set())
+    )
 
 
 @dataclass(frozen=True)
@@ -252,8 +263,8 @@ def inspect_objects(root: Path, revs: list[str]) -> tuple[list[Finding], int]:
                 if forbidden:
                     findings.append(Finding(where, 1, forbidden.category))
                     continue
-                if path in REVIEWED_ASSETS:
-                    if not reviewed_asset(path, body):
+                if path in REVIEWED_ASSETS or path in REVIEWED_ASSET_HISTORY:
+                    if not reviewed_asset(path, body, history=True):
                         findings.append(Finding(where, 1, "reviewed asset changed; review and update its pin"))
                     continue
                 if b"\x00" in body[:8192]:

@@ -1,8 +1,10 @@
 import importlib.util
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check_public_content.py"
 SPEC = importlib.util.spec_from_file_location("public_guard", SCRIPT)
@@ -129,6 +131,22 @@ class PublicContentTests(unittest.TestCase):
 
 
 class ReviewedAssetTests(unittest.TestCase):
+    def test_historical_asset_pin_does_not_approve_current_or_modified_files(self):
+        name = "assets/retired-example.png"
+        original = b"\x00reviewed example asset"
+        digest = hashlib.sha256(original).hexdigest()
+        with patch.dict(guard.REVIEWED_ASSET_HISTORY, {name: {digest}}):
+            self.assertTrue(guard.reviewed_asset(name, original, history=True))
+            self.assertFalse(guard.reviewed_asset(name, original))
+            self.assertFalse(guard.reviewed_asset(name, original + b"modified", history=True))
+            self.assertFalse(guard.reviewed_asset("assets/other.png", original, history=True))
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / name
+                path.parent.mkdir(parents=True)
+                path.write_bytes(original)
+                self.assertTrue(guard.inspect_file(path, root))
+
     def test_reviewed_font_passes_only_with_its_pinned_content(self):
         name = next(iter(guard.REVIEWED_ASSETS))
         with tempfile.TemporaryDirectory() as tmp:
