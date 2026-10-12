@@ -66,6 +66,7 @@
           <div class="chat-actions">
             <span id="origin-badge" class="source-tag hidden"></span>
             <span id="presence" class="presence desktop-only"></span>
+            <button id="chat-settings" class="icon-button settings-button hidden" type="button" aria-label="Conversation settings" title="Conversation settings"></button>
           </div>
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
@@ -118,10 +119,19 @@
   <dialog id="conversation-sheet" class="sheet" aria-labelledby="sheet-title">
     <div id="sheet-actions" class="sheet-view">
       <p id="sheet-title" class="sheet-title" tabindex="-1" autofocus></p>
+      <button id="sheet-instructions" class="sheet-action" type="button">Instructions</button>
+      <a id="sheet-export" class="sheet-action" href="#" download>Download as JSON</a>
       <button id="sheet-rename" class="sheet-action" type="button">Rename</button>
       <button id="sheet-delete" class="sheet-action danger-text" type="button">Delete</button>
       <button id="sheet-cancel" class="sheet-action sheet-cancel" type="button">Cancel</button>
     </div>
+    <form id="sheet-instructions-form" class="sheet-view hidden">
+      <label class="sheet-title" for="sheet-instructions-text">Instructions for this conversation</label>
+      <textarea id="sheet-instructions-text" maxlength="4000" rows="6" placeholder="How the agent should work in this conversation" data-agent-placeholder="How {agent} should work in this conversation"></textarea>
+      <p class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
+      <p id="sheet-instructions-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button id="sheet-instructions-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
+    </form>
     <form id="sheet-rename-form" class="sheet-view hidden">
       <label class="sheet-title" for="sheet-name">Rename conversation</label>
       <input id="sheet-name" maxlength="200" autocomplete="off">

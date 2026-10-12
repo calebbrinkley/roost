@@ -104,7 +104,14 @@ async def checks():
                 break
         assert len(transcript["messages"]) >= 2
         assert "local demo reply" in transcript["messages"][-1]["content"]
+        # Instructions ride once with the next message; the export has the whole conversation.
+        await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"instructions": "Be brief."})
         await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "And one more"})
+        async with client.get(BASE + f"/api/conversations/{sid}/export") as response:
+            assert response.status == 200 and response.headers["Content-Disposition"].startswith("attachment;")
+            exported = await response.json()
+        sent = [row["content"] for row in exported["messages"] if row["role"] == "user"]
+        assert exported["instructions"] == "Be brief." and sent[-1].endswith("\n\nAnd one more") and "Be brief." in sent[-1]
 
         await request(client, "PATCH", f"/api/conversations/{sid}", body={"title": "Smoke conversation"})
         await request(client, "PATCH", f"/api/conversations/{sid}", 400, {"title": "Benchmark at 96K"})
@@ -165,7 +172,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

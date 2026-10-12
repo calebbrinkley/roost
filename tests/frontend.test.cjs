@@ -826,3 +826,41 @@ test('a refused stream hands the turn back to the transcript, and leaving a conv
   assert.equal(opened[1].closed, true);
   assert.equal(f.run('state.live'), null);
 });
+
+test('a message that carried instructions shows as typed, in the transcript and the list', async () => {
+  const f = fixture(); await tick();
+  const begin = f.run('INSTRUCTIONS_BEGIN'), end = f.run('INSTRUCTIONS_END');
+  const sent = `${begin}\nAnswer in French.\n${end}\n\nhello there`;
+  f.context.rows = [{role: 'user', content: sent, timestamp: Date.now() / 1000}, {role: 'assistant', content: 'Bonjour.', timestamp: Date.now() / 1000}];
+  f.run(`state.current = 'one'; renderMessages(rows)`);
+  const transcript = text(f.get('transcript'));
+  assert.match(transcript, /hello there/);
+  assert.doesNotMatch(transcript, /Answer in French/);
+  assert.equal(f.run(`withoutInstructions(${JSON.stringify(sent.slice(0, 40))})`), '', 'a preview cut inside the instructions');
+  assert.equal(f.run(`sessionName({preview: ${JSON.stringify(sent)}})`), 'hello there');
+  assert.equal(f.run(`withoutInstructions(${JSON.stringify(sent.replaceAll('\n', ' '))})`), 'hello there', 'a preview flattened to one line');
+  assert.equal(f.run(`withoutInstructions('Write [Instructions for this conversation] as a heading')`), 'Write [Instructions for this conversation] as a heading');
+});
+
+test('the gear opens this conversation\'s menu: instructions load and save, and Download points at the export', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'chat:one'; state.conversations = [{id: 'chat:one', title: 'Plans'}]; globalThis.calls = [];
+    api = async (path, options = {}) => { calls.push([path, options.method || 'GET', options.body]);
+      return options.method === 'PUT' ? JSON.parse(options.body) : {instructions: 'Be brief.'}; };`);
+  f.context.rows = [{role: 'user', content: 'hi'}];
+  f.run('renderMessages(rows)');
+  assert.equal(f.get('chat-settings').classList.contains('hidden'), false);
+  f.get('chat-settings').events.click();
+  assert.equal(f.get('conversation-sheet').open, true);
+  assert.equal(f.get('sheet-title').textContent, 'Plans');
+  assert.equal(f.get('sheet-export').href, '/api/conversations/chat%3Aone/export');
+  await f.get('sheet-instructions').events.click();
+  assert.equal(f.get('sheet-instructions-text').value, 'Be brief.');
+  assert.equal(f.get('sheet-instructions-text').disabled, false);
+  f.get('sheet-instructions-text').value = 'Answer in French.';
+  await f.get('sheet-instructions-form').events.submit({preventDefault() {}});
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls').at(-1))), ['/conversations/chat%3Aone/settings', 'PUT', '{"instructions":"Answer in French."}']);
+  assert.equal(f.get('conversation-sheet').open, false);
+  f.run('renderWelcome()');
+  assert.equal(f.get('chat-settings').classList.contains('hidden'), true);
+});
