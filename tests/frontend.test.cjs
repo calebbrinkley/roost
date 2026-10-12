@@ -334,8 +334,9 @@ test('Jobs share the sidebar search and + button with Messages', async () => {
 
 function settingsFixture() {
   const f = fixture();
-  Object.assign(f.context.window.roostTheme, { mode: 'system', accent: 'forest',
-    choice() { return this.mode; }, set(mode) { this.mode = mode; }, setAccent(name) { this.accent = name; } });
+  Object.assign(f.context.window.roostTheme, { mode: 'system', accent: 'forest', size: 'default',
+    choice() { return this.mode; }, set(mode) { this.mode = mode; }, setAccent(name) { this.accent = name; },
+    textSize() { return this.size; }, setTextSize(name) { this.size = name; } });
   return f;
 }
 const SETTINGS = "{agent_name:'', hermes_agent_name:'Kestrel', accent:'forest', accents:['forest','ocean','violet','rose','amber','slate']}";
@@ -447,4 +448,14 @@ test('choosing a time zone saves it and re-renders times', async () => {
   select.value = 'Asia/Tokyo'; await select.events.change(); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{time_zone:'Asia/Tokyo'}]);
   assert.equal(f.run('state.timeZone'), 'Asia/Tokyo');
+});
+
+test("Appearance sets this device's text size", async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
+  f.run(`setSection('settings')`); await tick();
+  const larger = find(f.get('settings-detail'), n => n.textContent === 'Larger' && n.className.startsWith('segment'));
+  larger.events.click();
+  assert.equal(f.context.window.roostTheme.size, 'larger');
+  assert.equal(find(f.get('settings-detail'), n => n.textContent === 'Larger' && n.className.startsWith('segment')).className, 'segment active');
 });

@@ -1006,6 +1006,17 @@ function renderAppearance(detail) {
     choices.append(button);
   }
   theme.append(choices);
+  const text = settingsSection(detail, "Text size", "Applies to this device, across Roost.");
+  const sizes = el("div", "choice-row");
+  sizes.setAttribute("role", "radiogroup"); sizes.setAttribute("aria-label", "Text size");
+  for (const [size, label] of [["small", "Small"], ["default", "Default"], ["large", "Large"], ["larger", "Larger"]]) {
+    const chosen = window.roostTheme.textSize() === size;
+    const button = el("button", "segment" + (chosen ? " active" : ""), label);
+    button.type = "button"; button.setAttribute("role", "radio"); button.setAttribute("aria-checked", String(chosen));
+    button.addEventListener("click", () => { window.roostTheme.setTextSize(size); renderSettings(); });
+    sizes.append(button);
+  }
+  text.append(sizes);
   const accent = settingsSection(detail, "Accent colour", "Used for your messages, buttons and highlights on every device you sign in on.");
   const swatches = el("div", "swatches");
   swatches.setAttribute("role", "radiogroup"); swatches.setAttribute("aria-label", "Accent colour");
