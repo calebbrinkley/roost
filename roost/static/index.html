@@ -32,6 +32,7 @@
         <nav class="segmented desktop-only" aria-label="Sections">
           <button id="nav-messages" class="segment active" type="button">Messages</button>
           <button id="nav-jobs" class="segment" type="button">Jobs</button>
+          <button id="nav-settings" class="segment" type="button">Settings</button>
         </nav>
         <div class="mobile-list-heading mobile-only">
           <h1 id="mobile-list-title">Messages</h1>
@@ -46,6 +47,7 @@
       <div id="conversation-list" class="conversation-list" aria-label="Conversations"></div>
       <button id="more-conversations" class="more-button hidden" type="button">Load more</button>
       <div id="sidebar-jobs-list" class="job-sidebar-list hidden" aria-label="Scheduled jobs"></div>
+      <div id="sidebar-settings-list" class="job-sidebar-list hidden" aria-label="Settings"></div>
       <div class="sidebar-footer"><button id="logout" class="text-button" type="button">Sign out</button><button class="theme-toggle" type="button" data-theme-toggle></button></div>
     </aside>
 
@@ -83,11 +85,20 @@
           <button id="edit-selected-job" class="primary" type="button">Edit job</button>
         </div>
       </section>
+
+      <section id="settings-view" class="jobs-view hidden">
+        <header class="jobs-header">
+          <button id="back-to-settings" class="back-button mobile-only" type="button" aria-label="Back to Settings">‹</button>
+          <div class="jobs-heading"><strong id="settings-title">Settings</strong><small id="settings-subtitle"></small></div>
+        </header>
+        <div id="settings-detail" class="job-detail settings-detail"></div>
+      </section>
     </main>
 
     <nav id="mobile-tabbar" class="mobile-tabbar mobile-only" aria-label="Sections">
       <button id="mobile-nav-messages" class="tab active" type="button"><span aria-hidden="true">▤</span>Messages</button>
       <button id="mobile-nav-jobs" class="tab" type="button"><span aria-hidden="true">◷</span>Jobs</button>
+      <button id="mobile-nav-settings" class="tab" type="button"><span aria-hidden="true">⚙︎</span>Settings</button>
     </nav>
   </div>
 

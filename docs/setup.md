@@ -23,7 +23,6 @@ export ROOST_PUBLIC_ORIGIN="http://127.0.0.1:8787"
 export ROOST_HERMES_URL="https://REPLACE_HERMES_DASHBOARD_HOST:8445"
 export ROOST_HERMES_USERNAME="REPLACE_OPERATOR_USERNAME"
 export ROOST_HERMES_PASSWORD_FILE="/REPLACE_PRIVATE_DIRECTORY/hermes-password"
-export ROOST_AGENT_NAME="Agent"
 .venv/bin/python -m roost serve
 ```
 
@@ -41,15 +40,18 @@ Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and 
 | `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
 | `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
 | `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
-| `ROOST_AGENT_NAME` | Agent name shown in the interface. | `Agent` |
-| `ROOST_STATE_DIR` | Directory for the password hash and session database. | `.roost-state` |
+| `ROOST_STATE_DIR` | Directory for the password hash, session database and settings. | `.roost-state` |
 | `ROOST_TRUST_FORWARDED` | Set to `1` only when a trusted proxy is the service's sole entry point and controls `X-Forwarded-For`. | Off |
 
 The server command also accepts `--host` and `--port`; defaults are `127.0.0.1` and `8787`. With forwarded-header trust off, only loopback peers' forwarded addresses are trusted. Turning it on trusts that header from every peer, so direct access must be blocked.
 
+The agent's name comes from Roost's Settings if set there, otherwise from the display name of the Hermes profile the dashboard serves, otherwise "Agent".
+
+**Restart Roost** in Settings exits the process with status 75 so a service manager restarts it. Run Roost under one that restarts on failure (systemd `Restart=on-failure`, for example), or the button just stops it.
+
 ## Security
 
-The Python server holds the Hermes dashboard credential. The browser receives only Roost's conversation and Job routes; it does not receive dashboard credentials, inference keys or direct gateway access. Conversation text and Job prompts are rendered without raw HTML injection.
+The Python server holds the Hermes dashboard credential. The browser receives only Roost's conversation, Job and Settings routes; it does not receive dashboard credentials, inference keys or direct gateway access. Conversation text and Job prompts are rendered without raw HTML injection.
 
 Sessions last up to 30 days and use revocable, server-side records with HttpOnly, SameSite Strict cookies. HTTPS enables Secure cookies. Sign-in is rate limited.
 

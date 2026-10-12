@@ -1,6 +1,7 @@
 """Owner-only Roost HTTP service. No dashboard credential reaches the browser."""
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -17,6 +18,12 @@ STATIC = Path(__file__).with_name("static")
 COOKIE = "roost_session"
 ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
+# Accent presets; the browser holds each one's light and dark colours.
+ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
+AGENT_NAME_CACHE_SECONDS = 300
+# systemd restarts the service after a non-zero exit (Restart=on-failure); 75 is EX_TEMPFAIL.
+RESTART_EXIT = 75
+SOUL_LIMIT = 16000
 
 
 def bad(message: str, status: int = 400) -> web.HTTPException:
@@ -140,8 +147,165 @@ async def logout(request: web.Request):
 
 
 async def me(request: web.Request):
-    return web.json_response({"signed_in": request.app["sessions"].valid(request.cookies.get(COOKIE, "")),
-                              "demo": request.app["demo"], "agent": request.app["agent_name"]})
+    signed_in = request.app["sessions"].valid(request.cookies.get(COOKIE, ""))
+    agent = await agent_name(request.app, ask_hermes=signed_in)
+    settings = load_settings(request.app)
+    return web.json_response({"signed_in": signed_in, "demo": request.app["demo"], "agent": agent,
+                              "accent": settings["accent"] if signed_in else ACCENTS[0]})
+
+
+def clean_name(value) -> str:
+    return value.strip() if isinstance(value, str) and 0 < len(value.strip()) <= 40 and value.strip().isprintable() else ""
+
+
+def load_settings(app: web.Application) -> dict:
+    """Roost's own preferences, shared by every signed-in device."""
+    try:
+        stored = json.loads(app["settings_file"].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    return {"agent_name": clean_name(stored.get("agent_name")),
+            "accent": stored.get("accent") if stored.get("accent") in ACCENTS else ACCENTS[0]}
+
+
+def save_settings(app: web.Application, settings: dict) -> None:
+    path = app["settings_file"]
+    temporary = path.with_name(path.name + ".new")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(settings, stream)
+    os.replace(temporary, path)
+
+
+async def hermes_profile(app: web.Application) -> str:
+    """The profile this dashboard serves; its name is a path segment, so it must be a plain identifier."""
+    active = await app["hermes"].request("GET", "/api/profiles/active")
+    current = active.get("current") if isinstance(active, dict) else None
+    return current if isinstance(current, str) and ID.fullmatch(current) and current not in {".", ".."} else "default"
+
+
+async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
+    """The name Hermes shows for its profile ("" when it has none), cached for a few minutes."""
+    cached, fetched = app["hermes_agent_name"]
+    if ask and time.monotonic() - fetched > AGENT_NAME_CACHE_SECONDS:
+        try:
+            current = await hermes_profile(app)
+            listed = await app["hermes"].request("GET", "/api/profiles")
+            profiles = listed.get("profiles") if isinstance(listed, dict) else None
+            profile = next((item for item in profiles or [] if isinstance(item, dict) and item.get("name") == current), {})
+            cached = clean_name(profile.get("display_name")) or clean_name(profile.get("bot_title"))
+            app["hermes_agent_name"] = (cached, time.monotonic())
+        except HermesError:
+            pass
+    return cached
+
+
+async def agent_name(app: web.Application, *, ask_hermes: bool) -> str:
+    """Roost's own setting wins; then the name Hermes shows for its profile; then "Agent"."""
+    return load_settings(app)["agent_name"] or await hermes_agent_name(app, ask=ask_hermes) or "Agent"
+
+
+async def settings_view(app: web.Application) -> dict:
+    return {**load_settings(app), "hermes_agent_name": await hermes_agent_name(app, ask=True), "accents": list(ACCENTS)}
+
+
+async def get_settings(request: web.Request):
+    return web.json_response(await settings_view(request.app))
+
+
+async def update_settings(request: web.Request):
+    data = await json_body(request)
+    if not data or set(data) - {"agent_name", "accent"}:
+        raise bad("Unsupported setting.")
+    settings = load_settings(request.app)
+    if "agent_name" in data:
+        value = data["agent_name"]
+        if not isinstance(value, str) or (value.strip() and not clean_name(value)):
+            raise bad("The name must be 1 to 40 printable characters, or empty to use Hermes's name.")
+        settings["agent_name"] = value.strip()
+    if "accent" in data:
+        if data["accent"] not in ACCENTS:
+            raise bad("Choose one of the accent colours.")
+        settings["accent"] = data["accent"]
+    save_settings(request.app, settings)
+    return web.json_response(await settings_view(request.app))
+
+
+async def get_soul(request: web.Request):
+    profile = await hermes_profile(request.app)
+    result = await request.app["hermes"].request("GET", f"/api/profiles/{quote(profile, safe='')}/soul")
+    content = result.get("content") if isinstance(result, dict) else None
+    return web.json_response({"content": content if isinstance(content, str) else ""})
+
+
+async def update_soul(request: web.Request):
+    data = await json_body(request)
+    if set(data) != {"content"} or not isinstance(data["content"], str) or len(data["content"]) > SOUL_LIMIT:
+        raise bad(f"Instructions must be at most {SOUL_LIMIT} characters.")
+    profile = await hermes_profile(request.app)
+    await request.app["hermes"].request("PUT", f"/api/profiles/{quote(profile, safe='')}/soul", {"content": data["content"]})
+    return web.json_response({"ok": True})
+
+
+def confirmed_everything(data: dict) -> None:
+    if set(data) != {"confirm"} or data["confirm"] != "DELETE":
+        raise bad("Type DELETE to confirm.")
+
+
+async def delete_all_conversations(request: web.Request):
+    """Every conversation the Messages list shows. Cron run records stay with their jobs."""
+    confirmed_everything(await json_body(request))
+    hermes, deleted, attempted = request.app["hermes"], 0, set()
+    while True:
+        page = await hermes.request("GET", "/api/sessions?limit=100&order=recent&exclude_sources=cron&offset=0")
+        ids = [conversation_key(item) for item in (page.get("sessions") or [] if isinstance(page, dict) else [])]
+        ids = [sid for sid in ids if sid and sid not in attempted]
+        # Hermes kept rows it said it deleted: stop instead of asking again forever.
+        if not ids:
+            break
+        for sid in ids:
+            attempted.add(sid)
+            try:
+                await hermes.request("DELETE", f"/api/sessions/{quote(sid, safe='')}")
+            except HermesError as exc:
+                raise HermesError(exc.status, f"Deleted {deleted} conversations, then Hermes refused the next one.") from None
+            deleted += 1
+    return web.json_response({"deleted": deleted})
+
+
+def conversation_key(item) -> str:
+    value = item.get("session_id") or item.get("id") if isinstance(item, dict) else None
+    return value if isinstance(value, str) and ID.fullmatch(value) and value not in {".", ".."} else ""
+
+
+async def delete_all_jobs(request: web.Request):
+    confirmed_everything(await json_body(request))
+    hermes, deleted = request.app["hermes"], 0
+    listed = await hermes.request("GET", "/api/cron/jobs")
+    rows = listed if isinstance(listed, list) else (listed.get("jobs") or [] if isinstance(listed, dict) else [])
+    for job in rows:
+        jid = conversation_key({"id": job.get("id") or job.get("job_id")}) if isinstance(job, dict) else ""
+        if not jid:
+            continue
+        try:
+            await hermes.request("DELETE", f"/api/cron/jobs/{quote(jid, safe='')}")
+        except HermesError as exc:
+            raise HermesError(exc.status, f"Deleted {deleted} jobs, then Hermes refused the next one.") from None
+        deleted += 1
+    return web.json_response({"deleted": deleted})
+
+
+async def restart_agent(request: web.Request):
+    await request.app["hermes"].request("POST", "/api/gateway/restart")
+    return web.json_response({"ok": True})
+
+
+async def restart_roost(request: web.Request):
+    # Answer first; the service manager starts Roost again after this non-zero exit.
+    asyncio.get_running_loop().call_later(0.5, request.app["exit"], RESTART_EXIT)
+    return web.json_response({"ok": True})
 
 
 async def health(request: web.Request):
@@ -296,11 +460,10 @@ def create_app() -> web.Application:
     app = web.Application(middlewares=[guard], client_max_size=64 * 1024)
     app["origin"] = origin
     app["demo"] = os.environ.get("ROOST_DEMO") == "1"
-    # The agent's display name. The page shows it; it is not a secret.
-    agent_name = os.environ.get("ROOST_AGENT_NAME", "").strip() or "Agent"
-    if not agent_name or len(agent_name) > 40 or not agent_name.isprintable():
-        raise ValueError("ROOST_AGENT_NAME must be 1 to 40 printable characters.")
-    app["agent_name"] = agent_name
+    # The agent's display name comes from Roost's settings or Hermes; it is not a secret.
+    app["settings_file"] = state / "settings.json"
+    app["hermes_agent_name"] = ("", 0.0)
+    app["exit"] = os._exit
     app["trust_forwarded"] = os.environ.get("ROOST_TRUST_FORWARDED") == "1"
     app["secure_cookie"] = origin.startswith("https://")
     app["password_file"] = password_file
@@ -321,6 +484,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/conversations/{sid}/messages", send_message)
     app.router.add_patch("/api/conversations/{sid}", rename_conversation)
     app.router.add_delete("/api/conversations/{sid}", delete_conversation)
+    app.router.add_delete("/api/conversations", delete_all_conversations)
     app.router.add_get("/api/jobs", jobs)
     app.router.add_post("/api/jobs", create_job)
     app.router.add_get("/api/jobs/{jid}", get_job)
@@ -328,6 +492,13 @@ def create_app() -> web.Application:
     app.router.add_put("/api/jobs/{jid}", update_job)
     app.router.add_post("/api/jobs/{jid}/{action}", job_action)
     app.router.add_delete("/api/jobs/{jid}", delete_job)
+    app.router.add_delete("/api/jobs", delete_all_jobs)
+    app.router.add_get("/api/settings", get_settings)
+    app.router.add_patch("/api/settings", update_settings)
+    app.router.add_get("/api/settings/soul", get_soul)
+    app.router.add_put("/api/settings/soul", update_soul)
+    app.router.add_post("/api/service/restart-agent", restart_agent)
+    app.router.add_post("/api/service/restart-roost", restart_roost)
     app.router.add_get("/", static)
     app.router.add_get("/{name}", static)
     return app

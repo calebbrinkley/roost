@@ -91,6 +91,8 @@ def mock_hermes():
     app = web.Application()
     sessions, messages, jobs = sample_data()
     tickets = set()
+    # The profile's display name is where Hermes keeps the agent's name.
+    profile = {"name": "default", "display_name": "Kestrel", "soul": "You are a calm, concise assistant."}
 
     def require(request):
         if request.cookies.get("demo_hermes") != "signed-in":
@@ -257,7 +259,37 @@ def mock_hermes():
             await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "result": result})
         return socket
 
+    async def active_profile(request):
+        require(request)
+        return web.json_response({"active": "default", "current": "default"})
+
+    async def profiles(request):
+        require(request)
+        return web.json_response({"profiles": [{"name": "default", "display_name": profile["display_name"], "bot_title": ""}]})
+
+    async def get_soul(request):
+        require(request)
+        if request.match_info["name"] != "default":
+            raise web.HTTPNotFound()
+        return web.json_response({"content": profile["soul"], "exists": True})
+
+    async def put_soul(request):
+        require(request)
+        if request.match_info["name"] != "default":
+            raise web.HTTPNotFound()
+        profile["soul"] = (await request.json())["content"]
+        return web.json_response({"ok": True})
+
+    async def restart_gateway(request):
+        require(request)
+        return web.json_response({"ok": True, "pid": 1, "name": "gateway-restart"})
+
     app["runtime_map"] = {}
+    app.router.add_get("/api/profiles/active", active_profile)
+    app.router.add_get("/api/profiles", profiles)
+    app.router.add_get("/api/profiles/{name}/soul", get_soul)
+    app.router.add_put("/api/profiles/{name}/soul", put_soul)
+    app.router.add_post("/api/gateway/restart", restart_gateway)
     app.router.add_post("/auth/password-login", login)
     app.router.add_post("/api/auth/ws-ticket", ticket)
     app.router.add_get("/api/sessions", session_list)
