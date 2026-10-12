@@ -1,13 +1,17 @@
 """Owner-only Roost HTTP service. No dashboard credential reaches the browser."""
 
 import asyncio
+import base64
+import binascii
 import io
 import json
 import os
 import platform
 import re
 import time
+import wave
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -27,6 +31,10 @@ from .push import Push, PushError
 STATIC = Path(__file__).with_name("static")
 # The Hermes plugin Roost offers as a download; it runs inside Hermes, never in Roost.
 HERMES_PLUGIN = Path(__file__).with_name("hermes_plugin")
+# Voice: recordings up to 25 MB once encoded (Hermes's own limit); replies read up to 4,000 characters
+# (about four minutes, whose audio stays under the 8 MB Roost reads from Hermes even as 128 kbps MP3 in
+# base64); and the last few synthesized replies kept so a player's range requests don't synthesize again.
+RECORDING_LIMIT, SPEECH_CHARACTERS, SPEECH_CACHE = 25 * 1024 * 1024, 4000, 8
 # Hermes's plugin authenticates with Roost's delivery token instead of a signed-in browser's cookie.
 DELIVERY_PATH = "/api/hermes/deliveries"
 COOKIE = "roost_session"
@@ -605,6 +613,97 @@ async def hermes_plugin(request: web.Request):
                         headers={"Content-Disposition": 'attachment; filename="roost-hermes-plugin.zip"'})
 
 
+def speakable(text: str) -> str:
+    """A reply as it should sound: no code, link targets, table rules or Markdown symbols."""
+    text = re.sub(r"```.*?(```|\Z)", " ", text, flags=re.S)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^\s*\|?[\s:|-]{3,}\|?\s*$", " ", text, flags=re.M)
+    text = re.sub(r"[`*_#>|~]+", " ", text)
+    return " ".join(text.split())[:SPEECH_CHARACTERS]
+
+
+def audio_response(request: web.Request, mime: str, audio: bytes) -> web.Response:
+    """Audio with byte ranges: Safari plays media only from a server that answers them."""
+    size, match = len(audio), re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("Range", "").strip())
+    headers = {"Accept-Ranges": "bytes"}
+    if not match or not (match[1] or match[2]):
+        return web.Response(body=audio, content_type=mime, headers=headers)
+    if match[1]:
+        start, end = int(match[1]), min(int(match[2]) if match[2] else size - 1, size - 1)
+    else:
+        start, end = max(0, size - int(match[2])), size - 1
+    if start > end:
+        return web.Response(status=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    return web.Response(status=206, body=audio[start:end + 1], content_type=mime,
+                        headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}"})
+
+
+def silent_wav() -> bytes:
+    """A tenth of a second of silence. Playing it from a tap lets a later reply play without one."""
+    out = io.BytesIO()
+    with wave.open(out, "wb") as clip:
+        clip.setnchannels(1); clip.setsampwidth(1); clip.setframerate(8000)
+        clip.writeframes(b"\x80" * 800)
+    return out.getvalue()
+
+
+SILENCE = silent_wav()
+
+
+async def silence(request: web.Request):
+    return audio_response(request, "audio/wav", SILENCE)
+
+
+async def transcribe(request: web.Request):
+    data = await json_body(request, RECORDING_LIMIT + 4096)
+    data_url, mime = data.get("data_url"), data.get("mime_type")
+    if not (isinstance(data_url, str) and data_url.startswith("data:") and ";base64," in data_url[:200]
+            and isinstance(mime, str) and re.fullmatch(r"(audio/[a-z0-9.+-]+|video/webm)(;[ a-z0-9=.,\"-]*)?", mime)):
+        raise bad("Expected an audio recording.")
+    result = await request.app["hermes"].request("POST", "/api/audio/transcribe",
+                                                 {"data_url": data_url, "mime_type": mime}, timeout=180)
+    text = result.get("transcript") if isinstance(result, dict) else None
+    return web.json_response({"transcript": text.strip() if isinstance(text, str) else ""})
+
+
+async def synthesize(app: web.Application, sid: str, mid: str) -> tuple[str, bytes]:
+    data = await app["hermes"].request("GET", f"/api/sessions/{quote(sid, safe='')}/messages?inline_images=false")
+    rows = data.get("messages") if isinstance(data, dict) else None
+    row = next((row for row in rows or [] if isinstance(row, dict) and str(row.get("id")) == mid), None)
+    text = speakable(message_text(row)) if row and row.get("role") == "assistant" else ""
+    if not text:
+        raise web.HTTPNotFound(text="There is nothing to read aloud there.")
+    result = await app["hermes"].request("POST", "/api/audio/speak", {"text": text}, timeout=180)
+    spoken = result.get("data_url") if isinstance(result, dict) else None
+    header, _, encoded = spoken.partition(",") if isinstance(spoken, str) else ("", "", "")
+    mime = header[5:].split(";", 1)[0] if header.startswith("data:") and header.endswith(";base64") else ""
+    try:
+        audio = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        audio = b""
+    if not mime.startswith("audio/") or not audio:
+        raise HermesError(502, "Hermes returned no audio.")
+    return mime, audio
+
+
+async def speech(request: web.Request):
+    """One of the agent's replies, read aloud. The URL names the reply, so a tap can start the player at once."""
+    app = request.app
+    key = (item_id(request, "sid", encode=False), item_id(request, "mid", encode=False))
+    cache, pending = app["speech"], app["speech_pending"]
+    if key not in cache:
+        # A player's first range request and the next one share one synthesis.
+        if key not in pending:
+            pending[key] = asyncio.ensure_future(synthesize(app, *key))
+            pending[key].add_done_callback(lambda _task: pending.pop(key, None))
+        cache[key] = await asyncio.shield(pending[key])
+        while len(cache) > SPEECH_CACHE:
+            cache.popitem(last=False)
+    cache.move_to_end(key)
+    return audio_response(request, *cache[key])
+
+
 async def presence(request: web.Request):
     data = await json_body(request)
     conversation = data.get("conversation")
@@ -918,7 +1017,7 @@ def create_app() -> web.Application:
     app["chats"] = Chats(app["sessions"].db)
     app["deliveries"] = Deliveries(app["sessions"].db, state / "delivery-token")
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
-    app["watches"], app["presence"], app["live"] = {}, {}, {}
+    app["watches"], app["presence"], app["live"], app["speech"], app["speech_pending"] = {}, {}, {}, OrderedDict(), {}
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
     app.on_startup.append(startup)
@@ -963,6 +1062,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/hermes", hermes_link)
     app.router.add_post("/api/hermes/token", rotate_delivery_token)
     app.router.add_get("/api/hermes/plugin.zip", hermes_plugin)
+    app.router.add_post("/api/audio/transcribe", transcribe)
+    app.router.add_get("/api/audio/silence", silence)
+    app.router.add_get("/api/conversations/{sid}/speech/{mid}", speech)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
     app.router.add_get("/api/settings/soul", get_soul)

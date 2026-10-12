@@ -1,6 +1,7 @@
 """Loopback-only Roost preview with a small, disposable Hermes stand-in."""
 
 import asyncio
+import base64
 import os
 import re
 import secrets
@@ -10,7 +11,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from roost.auth import make_password_hash
-from roost.server import create_app
+from roost.server import SILENCE, create_app
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = ROOT / ".roost-demo-state"
@@ -125,7 +126,9 @@ def mock_hermes():
         sid = request.match_info["sid"]
         if sid not in messages:
             raise web.HTTPNotFound()
-        return web.json_response({"session_id": sid, "messages": messages[sid], "pagination": {"returned": len(messages[sid])}})
+        # Hermes numbers its rows; the play button reads a reply by its number.
+        rows = [{"id": index + 1, **row} for index, row in enumerate(messages[sid])]
+        return web.json_response({"session_id": sid, "messages": rows, "pagination": {"returned": len(rows)}})
 
     async def rename_session(request):
         require(request)
@@ -324,6 +327,23 @@ def mock_hermes():
     app.router.add_post("/api/cron/jobs/{jid}/{action}", job_action)
     app.router.add_delete("/api/cron/jobs/{jid}", delete_job)
     app.router.add_get("/api/ws", ws)
+
+    # Voice: a fixed transcript, and a moment of silence for any reply read aloud.
+    async def transcribe(request):
+        require(request)
+        data = await request.json()
+        if not str(data.get("data_url", "")).startswith("data:audio/"):
+            raise web.HTTPBadRequest()
+        return web.json_response({"ok": True, "transcript": "This is the demo transcript of a voice message."})
+
+    async def speak(request):
+        require(request)
+        if not (await request.json()).get("text"):
+            raise web.HTTPBadRequest()
+        return web.json_response({"ok": True, "data_url": "data:audio/wav;base64," + base64.b64encode(SILENCE).decode()})
+
+    app.router.add_post("/api/audio/transcribe", transcribe)
+    app.router.add_post("/api/audio/speak", speak)
     return app
 
 

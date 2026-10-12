@@ -78,6 +78,12 @@ async def checks():
         assert any(row.get("source") == "desktop" for row in conversations["sessions"])
         transcript = await request(client, "GET", "/api/conversations/roost_benchmark")
         assert len(transcript["messages"]) == 4
+        # Voice: a recording becomes text, and a reply is read aloud with byte ranges.
+        heard = await request(client, "POST", "/api/audio/transcribe", body={"data_url": "data:audio/mp4;base64,AAAA", "mime_type": "audio/mp4"})
+        assert heard["transcript"].startswith("This is the demo transcript")
+        reply = next(row for row in transcript["messages"] if row["role"] == "assistant")
+        async with client.get(BASE + f"/api/conversations/roost_benchmark/speech/{reply['id']}", headers={"Range": "bytes=0-3"}) as response:
+            assert response.status == 206 and await response.read() == b"RIFF"
 
         created = await request(client, "POST", "/api/conversations", 201, {"text": "Hello from the smoke check"})
         sid = created["session_id"]
@@ -183,7 +189,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, voice, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

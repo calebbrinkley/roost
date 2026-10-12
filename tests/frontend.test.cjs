@@ -897,3 +897,69 @@ test('Notifications shows how to connect Hermes, with the token, and replaces th
   assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls').at(-1))), ['/hermes/token', '{"confirm":true}']);
   assert.equal(f.run('state.hermesLink.token'), 'tok-2');
 });
+
+function voiceBrowser() {
+  const players = [];
+  class Audio { constructor() { this.src = ''; this.events = {}; players.push(this); }
+    addEventListener(type, fn) { this.events[type] = fn; } play() { this.played = this.src; return Promise.resolve(); } pause() { this.paused = true; } }
+  const recorders = [];
+  class MediaRecorder { constructor(stream, options) { this.mimeType = options?.mimeType || ''; this.state = 'inactive'; this.events = {}; recorders.push(this); }
+    static isTypeSupported(type) { return type === 'audio/mp4'; }
+    addEventListener(type, fn) { this.events[type] = fn; }
+    start() { this.state = 'recording'; }
+    stop() { this.state = 'inactive'; this.events.dataavailable({data: {size: 3, type: 'audio/mp4'}}); this.events.stop(); } }
+  class FileReader { readAsDataURL() { this.result = 'data:audio/mp4;base64,AAAA'; this.onload(); } }
+  const stream = {getTracks: () => [{stop() { stream.stopped = true; }}]};
+  const globals = {Audio, MediaRecorder, FileReader, clearInterval() {}, Blob: class { constructor(parts, options) { this.type = options.type; } },
+    navigator: {mediaDevices: {getUserMedia: async () => stream}}};
+  return {players, recorders, stream, globals};
+}
+
+test('every reply has a play button that reads it aloud, and a second tap stops it', async () => {
+  const {players, globals} = voiceBrowser();
+  const f = fixture(undefined, globals); await tick();
+  f.context.rows = [{id: 1, role: 'user', content: 'hi'}, {id: 2, role: 'assistant', content: 'Hello.'}];
+  f.run(`state.current = 'chat:one'; renderMessages(rows)`);
+  const play = () => find(f.get('transcript'), n => n.className?.startsWith('play-reply'));
+  assert.equal(play().className, 'play-reply');
+  play().events.click({stopPropagation() {}});
+  const player = players.at(-1);
+  assert.equal(player.src, '/api/conversations/chat%3Aone/speech/2');
+  assert.equal(player.played, player.src);
+  assert.equal(play().className, 'play-reply playing');
+  play().events.click({stopPropagation() {}});
+  assert.equal(player.paused, true);
+  assert.equal(play().className, 'play-reply');
+});
+
+test('hold the mic to record, let go to send the transcript, and its reply is read aloud', async () => {
+  const {players, recorders, stream, globals} = voiceBrowser();
+  const timers = [];
+  const f = fixture(undefined, {...globals, setTimeout: fn => { timers.push(fn); return 1; }}); await tick();
+  f.run(`state.current = 'one'; globalThis.calls = [];
+    api = async (path, options = {}) => { calls.push([path, options.body]);
+      return path === '/audio/transcribe' ? {transcript: 'what is on today'} : {session_id: 'one'}; };
+    loadConversations = async () => {}; loadMessages = async () => {};`);
+  const mic = f.get('voice-button');
+  await mic.events.pointerdown({preventDefault() {}});
+  assert.equal(f.get('composer').classList.contains('recording'), true);
+  assert.equal(players[0].src, '/api/audio/silence', 'the tap unlocks the player for the reply');
+  f.run('voice.started -= 2000');
+  mic.events.pointerup();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(stream.stopped, true);
+  assert.equal(f.get('composer').classList.contains('recording'), false);
+  const calls = JSON.parse(JSON.stringify(f.run('calls')));
+  assert.deepEqual(calls[0], ['/audio/transcribe', '{"data_url":"data:audio/mp4;base64,AAAA","mime_type":"audio/mp4"}']);
+  assert.deepEqual(calls[1], ['/conversations/one/messages', '{"text":"what is on today"}']);
+  f.context.rows = [{id: 1, role: 'user', content: 'what is on today', timestamp: Date.now() / 1000},
+                    {id: 2, role: 'assistant', content: 'Two meetings.', timestamp: Date.now() / 1000}];
+  f.run('renderMessages(rows)');
+  timers.forEach(fn => fn());
+  assert.equal(players[0].src, '/api/conversations/one/speech/2');
+  assert.equal(f.run('state.voiceReply'), null);
+  await mic.events.pointerdown({preventDefault() {}});
+  mic.events.pointerup();
+  assert.equal(recorders.length, 2);
+  assert.equal(JSON.parse(JSON.stringify(f.run('calls'))).length, 2, 'a quick tap sends nothing');
+});

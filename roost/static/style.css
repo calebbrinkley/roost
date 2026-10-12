@@ -179,7 +179,13 @@ button:disabled { cursor: default; }
 .composer { display: flex; align-items: end; gap: 8px; min-height: 64px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
 .mic-button, .send-button { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border: 0; border-radius: 50%; font-size: calc(21px * var(--text-scale)); }
 .mic-button, .send-button { color: var(--accent-ink); background: var(--accent); }
-.mic-button { opacity: .62; }
+/* Held to record: no text selection, callout or scrolling from the press. */
+.mic-button { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
+.composer.recording .mic-button { color: #fff; background: #c05242; animation: pulse 1.2s ease-in-out infinite; }
+.reply-under { display: flex; align-items: center; gap: 4px; margin-left: 2px; }
+.play-reply { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
+.play-reply:hover, .play-reply.playing { color: var(--accent-text); background: var(--chip); }
+.play-reply svg { width: 15px; height: 15px; }
 .mic-button svg { width: 18px; height: 18px; }
 .send-button { display: none; font-size: calc(23px * var(--text-scale)); }
 /* A one-line message box is 38 px (20 px line + 16 px padding + 2 px border); 2 px lifts the 34 px buttons to its center. */
