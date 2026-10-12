@@ -280,6 +280,11 @@ def mock_hermes():
         profile["soul"] = (await request.json())["content"]
         return web.json_response({"ok": True})
 
+    async def status(request):
+        # Public in Hermes too; the real one also carries paths and PIDs that Roost drops.
+        return web.json_response({"version": "demo", "release_date": "2026-09-24", "gateway_running": True,
+                                  "gateway_state": "running", "active_sessions": 1, "hermes_home": "/demo/home"})
+
     async def restart_gateway(request):
         require(request)
         return web.json_response({"ok": True, "pid": 1, "name": "gateway-restart"})
@@ -290,6 +295,7 @@ def mock_hermes():
     app.router.add_get("/api/profiles/{name}/soul", get_soul)
     app.router.add_put("/api/profiles/{name}/soul", put_soul)
     app.router.add_post("/api/gateway/restart", restart_gateway)
+    app.router.add_get("/api/status", status)
     app.router.add_post("/auth/password-login", login)
     app.router.add_post("/api/auth/ws-ticket", ticket)
     app.router.add_get("/api/sessions", session_list)

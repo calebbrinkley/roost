@@ -271,14 +271,15 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_settings_are_validated_and_survive_a_corrupt_file(self):
         await self.signed_in()
-        for body in ({"agent_name": "x" * 41}, {"agent_name": "line\nbreak"}, {"accent": "neon"}, {"theme": "dark"}, {}):
+        for body in ({"agent_name": "x" * 41}, {"agent_name": "line\nbreak"}, {"accent": "neon"}, {"theme": "dark"}, {},
+                     {"time_zone": "../etc"}, {"time_zone": "America/" + "x" * 70}, {"time_zone": 5}):
             response = await self.client.patch("/api/settings", headers=self.headers, json=body)
             self.assertEqual(response.status, 400, body)
         (self.state / "settings.json").write_text("{not json")
-        self.assertEqual(server.load_settings(self.app), {"agent_name": "", "accent": "forest"})
+        self.assertEqual(server.load_settings(self.app), {"agent_name": "", "accent": "forest", "time_zone": ""})
         response = await self.client.patch("/api/settings", headers=self.headers, json={"agent_name": "  Robin  ", "accent": "rose"})
         self.assertEqual(response.status, 200)
-        self.assertEqual(server.load_settings(self.app), {"agent_name": "Robin", "accent": "rose"})
+        self.assertEqual(server.load_settings(self.app), {"agent_name": "Robin", "accent": "rose", "time_zone": ""})
         self.assertEqual(oct((self.state / "settings.json").stat().st_mode & 0o777), "0o600")
 
     async def test_delete_all_needs_the_typed_word_and_stops_on_rows_hermes_keeps(self):
@@ -317,6 +318,20 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(server.time, "monotonic", return_value=5.0):
             response = await self.client.get("/api/me")
         self.assertEqual((await response.json())["agent"], "Kestrel")
+
+    async def test_about_reports_service_stats_and_only_public_hermes_fields(self):
+        await self.signed_in()
+        self.app["hermes"].request = AsyncMock(return_value={"version": "2026.9.24", "gateway_running": True,
+                                                             "hermes_home": "/private/path", "gateway_pid": 42})
+        response = await self.client.get("/api/about")
+        data = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(data["hermes"]["version"], "2026.9.24")
+        self.assertNotIn("hermes_home", data["hermes"]); self.assertNotIn("gateway_pid", data["hermes"])
+        self.assertGreater(data["stats"]["disk_total_bytes"], 0)
+        self.assertEqual(data["roost"]["revision"], "")
+        self.app["hermes"].request = AsyncMock(side_effect=HermesError(503, "Hermes is unavailable."))
+        self.assertEqual((await (await self.client.get("/api/about")).json())["hermes"], {"reachable": False})
 
     async def test_ipv6_loopback_origin_and_invalid_port(self):
         config = {"ROOST_STATE_DIR": str(self.state), "ROOST_HERMES_URL": "http://127.0.0.1:1",

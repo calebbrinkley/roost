@@ -28,7 +28,7 @@ Roost gives one owner a focused interface for conversations and scheduled work. 
 
 - **Messages:** continue conversations from Roost and other Hermes channels, with source badges and confirmed deletion.
 - **Jobs:** search, create schedules, edit instructions, pause or resume work, run a Job immediately, and view its history.
-- **Settings:** system, light or dark theme per device; an accent colour shared across devices; the agent's name (Hermes's own by default); the agent's SOUL instructions; delete all conversations or Jobs; restart Roost or the Hermes gateway.
+- **Settings** (the gear beside Messages and Jobs): system, light or dark theme per device; an accent colour and a display time zone shared across devices; the agent's name (Hermes's own by default); the agent's SOUL instructions; delete all conversations or Jobs; restart Roost or the Hermes gateway; and About, with the build, live service stats, Hermes status and credits.
 
 **Early preview:** text conversations and Jobs are implemented. Voice and push notifications are planned. See [compatibility and validation status](docs/compatibility.md).
 

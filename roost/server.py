@@ -3,13 +3,17 @@
 import asyncio
 import json
 import os
+import platform
 import re
 import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+import aiohttp
 from aiohttp import web
 from yarl import URL
+
+from . import __version__
 
 from .auth import Sessions, verify_password
 from .hermes import Hermes, HermesError
@@ -24,6 +28,10 @@ AGENT_NAME_CACHE_SECONDS = 300
 # systemd restarts the service after a non-zero exit (Restart=on-failure); 75 is EX_TEMPFAIL.
 RESTART_EXIT = 75
 SOUL_LIMIT = 16000
+# "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
+TIME_ZONE = re.compile(r"^(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})$")
+# Hermes status fields shown in About; the rest (paths, PIDs, auth) stays on the server.
+HERMES_STATUS_FIELDS = ("version", "release_date", "gateway_running", "gateway_state", "active_sessions")
 
 
 def bad(message: str, status: int = 400) -> web.HTTPException:
@@ -151,7 +159,8 @@ async def me(request: web.Request):
     agent = await agent_name(request.app, ask_hermes=signed_in)
     settings = load_settings(request.app)
     return web.json_response({"signed_in": signed_in, "demo": request.app["demo"], "agent": agent,
-                              "accent": settings["accent"] if signed_in else ACCENTS[0]})
+                              "accent": settings["accent"] if signed_in else ACCENTS[0],
+                              "time_zone": settings["time_zone"] if signed_in else ""})
 
 
 def clean_name(value) -> str:
@@ -166,8 +175,10 @@ def load_settings(app: web.Application) -> dict:
         stored = {}
     if not isinstance(stored, dict):
         stored = {}
+    zone = stored.get("time_zone")
     return {"agent_name": clean_name(stored.get("agent_name")),
-            "accent": stored.get("accent") if stored.get("accent") in ACCENTS else ACCENTS[0]}
+            "accent": stored.get("accent") if stored.get("accent") in ACCENTS else ACCENTS[0],
+            "time_zone": zone if isinstance(zone, str) and len(zone) <= 64 and TIME_ZONE.fullmatch(zone) else ""}
 
 
 def save_settings(app: web.Application, settings: dict) -> None:
@@ -218,7 +229,7 @@ async def get_settings(request: web.Request):
 
 async def update_settings(request: web.Request):
     data = await json_body(request)
-    if not data or set(data) - {"agent_name", "accent"}:
+    if not data or set(data) - {"agent_name", "accent", "time_zone"}:
         raise bad("Unsupported setting.")
     settings = load_settings(request.app)
     if "agent_name" in data:
@@ -230,6 +241,11 @@ async def update_settings(request: web.Request):
         if data["accent"] not in ACCENTS:
             raise bad("Choose one of the accent colours.")
         settings["accent"] = data["accent"]
+    if "time_zone" in data:
+        zone = data["time_zone"]
+        if not isinstance(zone, str) or len(zone) > 64 or (zone and not TIME_ZONE.fullmatch(zone)):
+            raise bad("Choose a time zone from the list, or the device's own.")
+        settings["time_zone"] = zone
     save_settings(request.app, settings)
     return web.json_response(await settings_view(request.app))
 
@@ -296,6 +312,67 @@ async def delete_all_jobs(request: web.Request):
             raise HermesError(exc.status, f"Deleted {deleted} jobs, then Hermes refused the next one.") from None
         deleted += 1
     return web.json_response({"deleted": deleted})
+
+
+def read_number(path: str) -> int | None:
+    try:
+        value = open(path, encoding="ascii").read().strip()
+    except OSError:
+        return None
+    return int(value) if value.isdigit() else None
+
+
+def directory_bytes(path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def process_stats(app: web.Application) -> dict:
+    """Roost's own footprint. Memory is the container's cgroup when it is visible, else this process."""
+    now, used = time.monotonic(), time.process_time()
+    last_now, last_used = app["cpu_sample"]
+    app["cpu_sample"] = (now, used)
+    rss = None
+    try:
+        for line in open("/proc/self/status", encoding="ascii"):
+            if line.startswith("VmRSS:"):
+                rss = int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    disk = os.statvfs(app["state_dir"])
+    return {
+        "uptime_seconds": int(now - app["started"]),
+        "cpu_percent": round(100 * (used - last_used) / (now - last_now), 1) if now > last_now else 0.0,
+        "memory_bytes": read_number("/sys/fs/cgroup/memory.current") or rss,
+        "memory_limit_bytes": read_number("/sys/fs/cgroup/memory.max"),
+        "process_memory_bytes": rss,
+        "state_bytes": directory_bytes(app["state_dir"]),
+        "disk_total_bytes": disk.f_frsize * disk.f_blocks,
+        "disk_free_bytes": disk.f_frsize * disk.f_bavail,
+    }
+
+
+async def about(request: web.Request):
+    app = request.app
+    started = time.monotonic()
+    try:
+        status = await app["hermes"].request("GET", "/api/status", timeout=10)
+        hermes = {key: status.get(key) for key in HERMES_STATUS_FIELDS} if isinstance(status, dict) else {}
+        hermes.update(reachable=True, latency_ms=round((time.monotonic() - started) * 1000))
+    except HermesError:
+        hermes = {"reachable": False}
+    return web.json_response({
+        "roost": {"version": __version__, "revision": app["revision"]},
+        "runtime": {"python": platform.python_version(), "aiohttp": aiohttp.__version__},
+        "stats": await asyncio.to_thread(process_stats, app),
+        "hermes": hermes,
+    })
 
 
 async def restart_agent(request: web.Request):
@@ -465,6 +542,12 @@ def create_app() -> web.Application:
     app["settings_file"] = state / "settings.json"
     app["hermes_agent_name"] = ("", None)
     app["exit"] = os._exit
+    app["state_dir"] = state
+    app["started"] = time.monotonic()
+    app["cpu_sample"] = (app["started"], time.process_time())
+    # The commit this build came from, set by whatever built it; "" when unknown (a checkout, say).
+    revision = os.environ.get("ROOST_REVISION", "").strip()
+    app["revision"] = revision if re.fullmatch(r"[0-9a-f]{7,40}", revision) else ""
     app["trust_forwarded"] = os.environ.get("ROOST_TRUST_FORWARDED") == "1"
     app["secure_cookie"] = origin.startswith("https://")
     app["password_file"] = password_file
@@ -498,6 +581,7 @@ def create_app() -> web.Application:
     app.router.add_patch("/api/settings", update_settings)
     app.router.add_get("/api/settings/soul", get_soul)
     app.router.add_put("/api/settings/soul", update_soul)
+    app.router.add_get("/api/about", about)
     app.router.add_post("/api/service/restart-agent", restart_agent)
     app.router.add_post("/api/service/restart-roost", restart_roost)
     app.router.add_get("/", static)
