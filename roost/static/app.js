@@ -1945,4 +1945,28 @@ function fitViewport() {
 }
 window.visualViewport?.addEventListener("resize", fitViewport);
 window.visualViewport?.addEventListener("scroll", fitViewport);
+
+// Even so, iOS slides the page up as the keyboard opens if the keyboard would cover the field, judging
+// by where the field was when it took focus. So a tap that opens the keyboard focuses the field while it
+// is lifted, unseen, to the top of the screen for one frame; nothing needs revealing, nothing slides, and
+// fitViewport then sets the bar above the keyboard.
+let messageTouch = null;
+$("message").addEventListener("touchstart", (event) => {
+  const touch = event.touches[0];
+  messageTouch = touch ? { x: touch.clientX, y: touch.clientY } : null;
+}, { passive: true });
+$("message").addEventListener("touchend", (event) => {
+  const field = $("message"), touch = event.changedTouches[0], start = messageTouch;
+  messageTouch = null;
+  if (document.activeElement === field || !window.visualViewport || !window.matchMedia("(max-width: 700px)").matches) return;
+  if (!touch || !start || Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10) return;  // a drag, not a tap
+  event.preventDefault();
+  field.style.transform = `translateY(${-field.getBoundingClientRect().top}px)`;
+  field.style.opacity = "0";
+  field.getBoundingClientRect();  // lay out the lifted field before it takes focus
+  field.focus({ preventScroll: true });
+  field.setSelectionRange(field.value.length, field.value.length);
+  const frame = window.requestAnimationFrame?.bind(window) || ((callback) => setTimeout(callback, 16));
+  frame(() => frame(() => { field.style.transform = ""; field.style.opacity = ""; }));
+});
 start();
