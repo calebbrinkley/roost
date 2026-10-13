@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="assets/roost-product-tour.gif"><img src="assets/roost-product-tour.gif" alt="Roost animation" width="400"></a>
+  <a href="assets/roost-product-tour.gif"><img src="assets/roost-product-tour.gif" alt="Roost animation" width="550"></a>
 </p>
 
 Roost is an owner-only Progressive Web App for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It connects to your existing Hermes dashboard and brings conversations and scheduled Jobs into a focused interface for desktop and phone layouts. Your dashboard credentials stay on the Roost server.
