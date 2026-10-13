@@ -16,10 +16,8 @@
 </p>
 
 <p align="center">
-  <a href="assets/roost-iphone-chat-dark.png"><img src="assets/roost-iphone-chat-dark.png" alt="Roost Messages in dark mode with a demo conversation" width="280"></a>
-  <a href="assets/roost-iphone-dark.png"><img src="assets/roost-iphone-dark.png" alt="Roost Jobs in dark mode with sample scheduled work" width="280"></a>
+  <a href="assets/roost-product-tour.gif"><img src="assets/roost-product-tour.gif" alt="Roost animation" width="400"></a>
 </p>
-<p align="center"><sub>Messages and Jobs. AI-generated device mockups with demo data; not physical-device test captures.</sub></p>
 
 Roost is an owner-only Progressive Web App for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It connects to your existing Hermes dashboard and brings conversations and scheduled Jobs into a focused interface for desktop and phone layouts. Your dashboard credentials stay on the Roost server.
 
