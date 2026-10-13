@@ -71,6 +71,7 @@ REVIEWED_ASSETS = {
     "assets/roost-logo.png": "d4739d7b3dec098486d6e6e5adb71651e56d7ab457bbf535e5f2f5284020d377",
     "assets/roost-iphone-chat-dark.png": "4ea75dd5311e7a6ea775698071395ba176014221c541bcccf032c36b0760d5bc",
     "assets/roost-iphone-dark.png": "9862004e1c1906df99ff07bdbebafd2b3fa141dc96e33b56bb55898531510294",
+    "assets/roost-product-tour.gif": "250423f875fef1245cd5fed409fc1a09fd44e2ba1ccc4c5b42dffaa79133293a",
 }
 
 
