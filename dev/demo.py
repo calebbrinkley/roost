@@ -93,6 +93,7 @@ def mock_hermes():
     app = web.Application()
     sessions, messages, jobs = sample_data()
     tickets = set()
+    pending_approvals = {}
     # The profile's display name is where Hermes keeps the agent's name.
     profile = {"name": "default", "display_name": "Kestrel", "soul": "You are a calm, concise assistant."}
 
@@ -221,7 +222,9 @@ def mock_hermes():
                 continue
             frame = message.json()
             method, params = frame.get("method"), frame.get("params") or {}
-            if method == "session.create":
+            if method == "client.capabilities":
+                result = {}
+            elif method == "session.create":
                 stored_id = "roost_" + secrets.token_hex(5)
                 runtime_id = "runtime_" + secrets.token_hex(5)
                 sessions.insert(0, {"id": stored_id, "title": "New conversation", "preview": "", "source": "roost", "last_active_at": time.time()})
@@ -233,9 +236,22 @@ def mock_hermes():
                 if stored_id not in messages:
                     await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                     continue
-                runtime_id = "runtime_" + secrets.token_hex(5)
+                # Hermes reuses a live runtime on resume; approval frames keep that identity.
+                runtime_id = next((key for key, value in app["runtime_map"].items() if value == stored_id), None)
+                if runtime_id is None:
+                    runtime_id = "runtime_" + secrets.token_hex(5)
                 app["runtime_map"][runtime_id] = stored_id
-                result = {"session_id": runtime_id, "stored_session_id": stored_id}
+                result = {"session_id": runtime_id, "stored_session_id": stored_id,
+                          "open_requests": [pending_approvals[stored_id]["frame"]] if stored_id in pending_approvals else []}
+            elif method == "approval.respond":
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                pending = pending_approvals.get(stored_id)
+                if pending and pending["frame"]["params"]["request_id"] == params.get("request_id") and params.get("choice") in {"once", "deny"}:
+                    pending["choice"] = params["choice"]
+                    pending["answered"].set()
+                    result = {"resolved": 1}
+                else:
+                    result = {"resolved": 0}
             elif method == "prompt.submit":
                 stored_id = app["runtime_map"].get(params.get("session_id"))
                 if not stored_id:
@@ -256,6 +272,24 @@ def mock_hermes():
                                 "type": kind, "session_id": runtime_id, **({"payload": payload} if payload else {})}})
                     answer = (f"This is the local demo reply to: “{prompt}”\n\n"
                               "The agent's real answer will appear here when Roost is connected to Hermes.")
+                    if prompt == "/approval-demo":
+                        # A protocol demonstration only. This command is never executed.
+                        request_id = secrets.token_hex(8)
+                        frame = {"jsonrpc": "2.0", "id": "demo-" + request_id, "method": "approval", "params": {
+                            "session_id": runtime_id, "request_id": request_id, "tool_name": "terminal",
+                            "command": "printf 'example note' > /workspace/example.md",
+                            "description": "Create a sample note in the execution workspace.", "choices": ["once", "deny"]}}
+                        pending = {"frame": frame, "answered": asyncio.Event()}
+                        pending_approvals[sid] = pending
+                        await socket.send_json(frame)
+                        try:
+                            await asyncio.wait_for(pending["answered"].wait(), 120)
+                            answer = "Demo decision: " + ("Allowed once." if pending["choice"] == "once" else "Denied.") + " No command was executed."
+                        except TimeoutError:
+                            answer = "The demo request expired. No command was executed."
+                        finally:
+                            pending_approvals.pop(sid, None)
+                            await emit("request.cancel", {"id": frame["id"], "method": "approval", "reason": "resolved"})
                     thoughts = "The owner sent a message to the demo. I'll answer with the demo reply and say where the real one comes from."
                     await emit("message.start")
                     for kind, text in (("reasoning.delta", thoughts), ("message.delta", answer)):

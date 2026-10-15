@@ -32,6 +32,16 @@ Open **http://127.0.0.1:8787** and sign in with the password you set in step 1.
 
 Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and set `ROOST_PUBLIC_ORIGIN` to the exact browser origin, with no path or trailing slash. Keep access restricted to your private network: authenticated users can submit work to the agent.
 
+### Approval requests
+
+When Hermes asks permission to run a tool, the conversation shows its redacted command and reason with **Allow once** and **Deny**. Reopening the conversation reloads pending requests from Hermes. The decision applies to that exact request; it does not grant a session-wide or permanent allowance, or change filesystem permissions. Expired requests and requests answered elsewhere cannot be approved again.
+
+Enable notifications for each device in **Settings › Notifications**. Requests from turns Roost is following send a summary notification when that conversation is not visible. Supporting browsers (including Chrome on macOS) offer **Allow once** and **Deny** directly on the notification. Safari/macOS web apps and iOS Home Screen apps open the conversation instead, because WebKit does not support custom notification actions. iOS requires Roost installed on the Home Screen with notification permission. OS notification settings control whether summaries appear on a locked device.
+
+Direct actions require an existing Roost login and network access to Roost. If either is unavailable, or Hermes has already resolved the request, Roost opens the conversation for review without replaying the decision. Closing a notification does not deny the request. Hermes owns the timeout and final decision; push messages expire after two minutes but never extend Hermes' deadline. After restarting Roost, reopen the conversation to recover an existing pending request; notification watches are held in memory.
+
+To exercise the flow without executing a command, run the loopback demo and send `/approval-demo`. This is a disposable protocol stand-in, not a live Hermes security test.
+
 ### 4. Optional: job reports from Hermes
 
 Roost's reply notifications work on their own. To also get the agent's job reports, and messages it sends on its own, Hermes needs Roost's platform plugin. It ships with Roost, and **Settings › Notifications** has it as a download, along with these steps and the values to paste:

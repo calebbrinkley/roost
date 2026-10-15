@@ -367,3 +367,12 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 }
 @media (prefers-reduced-motion: reduce) { .main.settling, .conversation-row, .pull-indicator.settling { transition: none; }
   .pull-indicator.refreshing .spinner, .list-loading .spinner { animation-duration: 2.4s; } }
+
+/* A pending decision stays visible above the composer on phone and desktop. */
+.approval-panel { flex: 0 1 auto; max-height: 45%; overflow-y: auto; border-top: 1px solid var(--line); padding: 14px 20px; }
+.approval-card + .approval-card { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.approval-summary, .approval-status { margin: 8px 0; font-size: calc(13px * var(--text-scale)); color: var(--muted); }
+.approval-command { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow-y: auto; font-size: calc(12px * var(--text-scale)); padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.approval-actions { display: flex; gap: 8px; margin-top: 10px; }
+.approval-actions button { min-height: 44px; padding: 8px 18px; }
+@media (max-width: 700px) { .approval-panel { padding: 12px; } }

@@ -536,6 +536,20 @@ async def check_replies(app: web.Application) -> None:
         if time.monotonic() - watch["started"] > WATCH_SECONDS:
             app["watches"].pop(sid, None)
             continue
+        turn = app.get("live", {}).get(sid)
+        if turn is not None:
+            sent = watch.setdefault("approvals_notified", set())
+            for item in list(turn.approvals.values()):
+                if item["request_id"] not in sent:
+                    sent.add(item["request_id"])
+                    if not looking_at(app, sid):
+                        await notify(app, {
+                            "title": await agent_name(app, ask_hermes=True) + " needs approval",
+                            "body": preview("\n".join(filter(None, [item["description"], item["command"]])) or "Review this action in Roost.", 300),
+                            "url": "/?c=" + quote(sid, safe="") + "&a=" + quote(item["request_id"], safe=""),
+                            "tag": "approval-" + item["request_id"],
+                            "approval": {"conversation": sid, "request_id": item["request_id"],
+                                         "choices": item["choices"]}})
         try:
             data = await app["hermes"].request("GET", f"/api/sessions/{quote(sid, safe='')}/messages?inline_images=false")
         except HermesError:
@@ -779,6 +793,25 @@ async def conversation(request: web.Request):
     if isinstance(result, dict):
         # Says a reply is being written that /stream can show before Hermes saves it.
         result["live"] = item_id(request, "sid", encode=False) in request.app["live"]
+    return web.json_response(result)
+
+
+async def pending_approvals(request: web.Request):
+    sid = item_id(request, "sid", encode=False)
+    return web.json_response({"approvals": await request.app["hermes"].approvals(sid)})
+
+
+async def respond_approval(request: web.Request):
+    sid = item_id(request, "sid", encode=False)
+    data = await json_body(request)
+    if set(data) != {"request_id", "choice"} or data.get("choice") not in ("once", "deny"):
+        raise bad("Choose Allow once or Deny for this request.")
+    request_id = body_text(data.get("request_id"), "Request identifier", 256)
+    result = await request.app["hermes"].approvals(sid, request_id, data["choice"])
+    turn = request.app["live"].get(sid)
+    if turn is not None:
+        turn.approvals.pop(request_id, None)
+        turn.notify()
     return web.json_response(result)
 
 
@@ -1031,6 +1064,8 @@ def create_app() -> web.Application:
     app.router.add_post("/api/conversations", create_conversation)
     app.router.add_get("/api/conversations/{sid}", conversation)
     app.router.add_get("/api/conversations/{sid}/stream", stream)
+    app.router.add_get("/api/conversations/{sid}/approvals", pending_approvals)
+    app.router.add_post("/api/conversations/{sid}/approvals", respond_approval)
     app.router.add_get("/api/conversations/{sid}/settings", get_chat_settings)
     app.router.add_put("/api/conversations/{sid}/settings", update_chat_settings)
     app.router.add_get("/api/conversations/{sid}/export", export_conversation)
