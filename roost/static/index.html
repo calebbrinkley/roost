@@ -71,10 +71,11 @@
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <section id="approvals" class="approval-panel hidden" aria-label="Approval requests" aria-live="polite"></section>
+        <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
         <form id="composer" class="composer">
           <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
           <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
-          <button id="voice-button" class="mic-button" type="button" aria-label="Hold to record a voice message" title="Hold to record a voice message"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+          <button id="voice-button" class="mic-button" type="button" aria-label="Start recording" title="Start recording" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
           <button id="send" class="send-button" type="submit" aria-label="Send message">↑</button>
         </form>
       </section>

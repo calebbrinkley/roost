@@ -179,8 +179,7 @@ button:disabled { cursor: default; }
 .composer { display: flex; align-items: end; gap: 8px; min-height: 64px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
 .mic-button, .send-button { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border: 0; border-radius: 50%; font-size: calc(21px * var(--text-scale)); }
 .mic-button, .send-button { color: var(--accent-ink); background: var(--accent); }
-/* Held to record: no text selection, callout or scrolling from the press. */
-.mic-button { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
+.mic-button { touch-action: manipulation; }
 .composer.recording .mic-button { color: #fff; background: #c05242; animation: pulse 1.2s ease-in-out infinite; }
 .reply-under { display: flex; flex-wrap: wrap; max-width: 100%; align-items: center; gap: 4px; margin-left: 2px; }
 .play-reply { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
@@ -191,6 +190,10 @@ button:disabled { cursor: default; }
 /* A one-line message box is 38 px (20 px line + 16 px padding + 2 px border); 2 px lifts the 34 px buttons to its center. */
 .composer .mic-button, .composer .send-button { margin-bottom: 2px; }
 .composer.has-text .mic-button { display: none; }.composer.has-text .send-button { display: grid; }
+.composer.voice-active .mic-button { display: grid; }
+.composer.voice-active .send-button { display: none; }
+.voice-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 20px 0; color: var(--muted); font-size: calc(13px * var(--text-scale)); }
+.voice-status button { border: 0; padding: 6px; color: var(--accent-text); background: transparent; }
 .composer textarea { flex: 1; min-width: 0; min-height: 36px; max-height: 145px; resize: none; padding: 8px 12px; border: 1px solid var(--line); border-radius: 18px; outline: none; background: var(--frame); color: var(--ink); font-size: calc(15px * var(--text-scale)); line-height: 20px; }
 .composer textarea::placeholder { color: var(--muted); }
 

@@ -30,7 +30,7 @@ Roost is an owner-only Progressive Web App for [Hermes Agent](https://github.com
 | **Conversations** | Start a chat or continue one from another Hermes channel. Search, rename, delete, add conversation instructions, and download history as JSON. Replies to messages sent from Roost stream as they are written. |
 | **Reply details** | Tap or click an assistant reply to reveal its timestamp, whole-reply input/output tokens and TPS. Requires the bundled Hermes plugin; unrecorded measurements show —. |
 | **Approvals** | Review Hermes tool requests with Allow once or Deny. Get a summary notification; supporting browsers offer direct actions, while Safari and iOS open the approval card. |
-| **Voice** | Hold the microphone to send a voice message. Play replies aloud, with automatic playback for voice-message replies, using Hermes's configured speech services. |
+| **Voice** | Tap the microphone to start recording, tap again to stop, then review and send the transcript. Play replies aloud, with automatic playback for voice-message replies, using Hermes's configured speech services. |
 | **Jobs** | Create and edit scheduled work, search Jobs, pause or resume them, run one immediately, and inspect its history. Schedules are entered directly; there is no schedule builder yet. |
 | **Notifications** | Enable reply notifications per device. Install the bundled Hermes platform plugin to receive Job reports and messages the agent sends on its own. |
 | **Personalization** | Choose a system, light, or dark theme per device. Set a shared accent color and display time zone, name your agent, and edit its SOUL instructions. |

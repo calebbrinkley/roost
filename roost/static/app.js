@@ -108,7 +108,7 @@ async function api(path, options = {}) {
 function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   closeStream();
-  stopRecording(true); state.player?.pause();
+  stopRecording(true); state.voiceDraft = false; state.player?.pause();
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
@@ -241,6 +241,7 @@ function applyTimeZone(name) {
 }
 
 function setSection(section) {
+  if (section !== "messages") stopRecording(true);
   state.section = section;
   $("app").classList.toggle("section-jobs", section === "jobs");
   $("app").classList.toggle("section-settings", section === "settings");
@@ -467,7 +468,7 @@ async function deleteConversation() {
     state.conversationRequest = (state.conversationRequest || 0) + 1;
     state.conversations = state.conversations.filter((row) => conversationId(row) !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
-    if (state.current === id) { state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
+    if (state.current === id) { stopRecording(true); state.voiceDraft = false; state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
     $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
   } catch (error) { if (epoch === state.authEpoch) $("sheet-confirm-error").textContent = error.message; }
   finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
@@ -801,7 +802,8 @@ function renderMessages(rows) {
 
 async function selectConversation(id, source) {
   state.viewEpoch++;
-  if (state.current !== id) leaveLive();
+  stopRecording(true);
+  if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.current = id;
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -946,6 +948,7 @@ function closeStream() {
 
 // Another conversation is opening: nothing live or rendered here belongs to it.
 function leaveLive() {
+  stopRecording(true); state.voiceDraft = false;
   closeStream();
   Object.assign(state, { approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null });
   renderApprovals();
@@ -1002,9 +1005,9 @@ function newConversation() {
 
 async function submitMessage(event) {
   event.preventDefault();
-  if (state.busy) return;
+  if (state.busy || voice.take) return;
   const text = $("message").value.trim();
-  if (text) await sendText(text);
+  if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
 
 // Sends what was typed, or a voice message's transcript (`voice`), whose reply is then read aloud.
@@ -1013,6 +1016,7 @@ async function sendText(text, { voice = false } = {}) {
   const epoch = state.authEpoch, view = state.viewEpoch, oldId = state.current;
   const sameView = () => epoch === state.authEpoch && view === state.viewEpoch && state.current === oldId;
   let accepted = false;
+  state.voiceDraft = false;
   state.busy = true; $("send").disabled = true; $("message").value = "";
   $("composer").classList.remove("has-text");
   const sending = el("p", "empty-transcript", "Sending…");
@@ -1037,7 +1041,7 @@ async function sendText(text, { voice = false } = {}) {
   } catch (error) {
     if (epoch !== state.authEpoch) return;
     if (!accepted && sameView() && !$("message").value) {
-      $("message").value = text;
+      $("message").value = text; state.voiceDraft = voice;
       $("composer").classList.add("has-text");
     }
     notice(error.message);
@@ -1989,7 +1993,7 @@ $("mobile-nav-settings").addEventListener("click", () => setSection("settings"))
 $("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("sidebar-new").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
-$("back-to-list").addEventListener("click", () => { $("app").classList.remove("chat-open"); reportPresence(); });
+$("back-to-list").addEventListener("click", () => { stopRecording(true); $("app").classList.remove("chat-open"); reportPresence(); });
 $("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
 
 // Swipe right on a phone to leave a conversation or job, like iOS's back gesture (which installed
@@ -2138,7 +2142,11 @@ $("conversation-sheet").addEventListener("click", (event) => {
   const box = $("conversation-sheet").getBoundingClientRect();
   if (event.target === $("conversation-sheet") && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) $("conversation-sheet").close();
 });
-$("message").addEventListener("input", () => $("composer").classList.toggle("has-text", Boolean($("message").value.trim())));
+$("message").addEventListener("input", () => {
+  const hasText = Boolean($("message").value.trim());
+  $("composer").classList.toggle("has-text", hasText);
+  if (!hasText) state.voiceDraft = false;
+});
 $("message").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); $("composer").requestSubmit(); } });
 $("job-form").addEventListener("submit", saveJob);
 $("job-schedule").addEventListener("input", updateSchedulePreview);
@@ -2160,59 +2168,85 @@ setInterval(() => {
   else if (state.section === "jobs") loadJobs().catch(() => {});
 }, 20000);
 
-// Voice: hold the mic to record and let go to send; the transcript is the message. Every reply has a
-// play button, and the reply to a voice message is read aloud by itself.
-const voice = { recorder: null, stream: null, chunks: [], started: 0, held: false, cancelled: false, timer: null, placeholder: "" };
+// Dictation stays in the composer for review. Sending that draft opts into a spoken reply.
+const voice = { take: null };
 
-async function startRecording(event) {
-  event.preventDefault();
-  if (voice.held || voice.recorder || state.busy) return;
+function recordingUI(text = "") {
+  const take = voice.take, recording = take?.phase === "recording";
+  $("composer").classList.toggle("recording", recording);
+  $("composer").classList.toggle("voice-active", Boolean(take));
+  $("voice-button").disabled = Boolean(take && take.phase === "transcribing");
+  const label = take ? (recording ? "Stop recording" : "Cancel recording") : "Start recording";
+  $("voice-button").setAttribute("aria-label", label); $("voice-button").title = label;
+  $("voice-button").setAttribute("aria-pressed", String(recording));
+  $("send").disabled = Boolean(take || state.busy);
+  $("voice-status-text").textContent = text;
+  show("voice-status", Boolean(take));
+}
+
+function currentTake(take) {
+  return voice.take === take && take.epoch === state.authEpoch && take.view === state.viewEpoch && take.id === state.current;
+}
+
+function releaseRecording(take) {
+  take.stream?.getTracks().forEach((track) => track.stop());
+  clearInterval(take.timer);
+}
+
+async function startRecording() {
+  if (voice.take || state.busy) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder !== "function") { notice("This browser can’t record audio."); return; }
-  if (event.pointerId !== undefined) $("voice-button").setPointerCapture?.(event.pointerId);
-  voice.held = true; voice.cancelled = false;
+  const take = { epoch: state.authEpoch, view: state.viewEpoch, id: state.current, phase: "requesting", chunks: [] };
+  voice.take = take; recordingUI("Waiting for microphone permission…");
   unlockPlayer();
-  let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-  catch { voice.held = false; notice("Roost can’t use the microphone. Allow it for Roost in this device’s settings."); return; }
-  // Let go while the permission prompt was up: nothing to record.
-  if (!voice.held) { stream.getTracks().forEach((track) => track.stop()); return; }
-  const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((name) => MediaRecorder.isTypeSupported?.(name));
-  const recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-  Object.assign(voice, { recorder, stream, chunks: [], started: Date.now(), placeholder: $("message").placeholder });
-  recorder.addEventListener("dataavailable", (chunk) => { if (chunk.data.size) voice.chunks.push(chunk.data); });
-  recorder.addEventListener("stop", () => finishRecording(recorder));
-  recorder.start();
-  $("composer").classList.add("recording");
-  const tick = () => {
-    const seconds = Math.floor((Date.now() - voice.started) / 1000);
-    $("message").placeholder = `Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · let go to send`;
-  };
-  tick(); voice.timer = setInterval(tick, 500);
+  try {
+    take.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!currentTake(take)) { releaseRecording(take); return; }
+    const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((name) => MediaRecorder.isTypeSupported?.(name));
+    const recorder = take.recorder = new MediaRecorder(take.stream, type ? { mimeType: type } : undefined);
+    recorder.addEventListener("dataavailable", (chunk) => { if (chunk.data.size) take.chunks.push(chunk.data); });
+    recorder.addEventListener("stop", () => finishRecording(take));
+    recorder.addEventListener("error", () => {
+      if (currentTake(take)) { stopRecording(true); notice("Recording stopped unexpectedly. Please try again."); }
+    });
+    recorder.start(); take.phase = "recording"; take.started = Date.now();
+    const tick = () => {
+      const seconds = Math.floor((Date.now() - take.started) / 1000);
+      recordingUI(`Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · tap the mic to stop`);
+    };
+    tick(); take.timer = setInterval(tick, 500);
+  } catch {
+    releaseRecording(take);
+    if (currentTake(take)) {
+      voice.take = null; recordingUI();
+      notice("Roost couldn’t start recording. Check microphone permission and try again.");
+    }
+  }
 }
 
 function stopRecording(cancel) {
-  voice.held = false;
-  if (!voice.recorder || voice.recorder.state === "inactive") return;
-  voice.cancelled = cancel ? "cancelled" : Date.now() - voice.started < 600 ? "short" : false;
-  voice.recorder.stop();
+  const take = voice.take;
+  if (!take) return;
+  if (cancel || take.phase === "requesting") {
+    voice.take = null; recordingUI();
+  } else {
+    take.phase = "transcribing"; recordingUI("Transcribing…");
+  }
+  releaseRecording(take);
+  if (take.recorder?.state === "recording") take.recorder.stop();
 }
 
-function finishRecording(recorder) {
-  voice.stream?.getTracks().forEach((track) => track.stop());
-  clearInterval(voice.timer);
-  $("composer").classList.remove("recording");
-  $("message").placeholder = voice.placeholder;
-  const chunks = voice.chunks;
-  Object.assign(voice, { recorder: null, stream: null, chunks: [] });
-  if (voice.cancelled === "short") notice("Hold the mic while you speak, then let go to send.");
-  if (voice.cancelled || !chunks.length) return;
-  sendRecording(new Blob(chunks, { type: recorder.mimeType || chunks[0].type || "audio/mp4" }));
+function finishRecording(take) {
+  releaseRecording(take);
+  if (!currentTake(take)) return;
+  take.phase = "transcribing"; recordingUI("Transcribing…");
+  if (!take.chunks.length) {
+    voice.take = null; recordingUI(); notice("No audio was recorded. Please try again."); return;
+  }
+  sendRecording(new Blob(take.chunks, { type: take.recorder.mimeType || take.chunks[0].type || "audio/mp4" }), take);
 }
 
-async function sendRecording(recording) {
-  const epoch = state.authEpoch;
-  const status = el("p", "empty-transcript", "Transcribing…");
-  $("transcript").append(status); $("transcript").scrollTop = $("transcript").scrollHeight;
+async function sendRecording(recording, take) {
   try {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -2220,13 +2254,17 @@ async function sendRecording(recording) {
       reader.onerror = () => reject(new Error("Roost couldn’t read the recording."));
       reader.readAsDataURL(recording);
     });
+    if (!currentTake(take)) return;
     const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type }) });
-    if (epoch !== state.authEpoch) return;
-    status.remove();
-    if (!data.transcript) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
-    await sendText(data.transcript, { voice: true });
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
-  finally { status.remove(); }
+    if (!currentTake(take)) return;
+    const text = String(data.transcript || "").trim();
+    if (!text) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
+    const draft = [$("message").value.trimEnd(), text].filter(Boolean).join("\n");
+    if (draft.length > $("message").maxLength) { notice("The transcript won’t fit in this message. Shorten the draft and try a shorter recording."); return; }
+    $("message").value = draft; state.voiceDraft = true;
+    $("composer").classList.add("has-text");
+  } catch (error) { if (currentTake(take)) notice(error.message); }
+  finally { if (voice.take === take) { voice.take = null; recordingUI(); } }
 }
 
 function audioPlayer() {
@@ -2296,12 +2334,9 @@ function readVoiceReply(visible, working, live) {
   setTimeout(() => playReply(conversation, reply.id), 0);
 }
 
-$("voice-button").addEventListener("pointerdown", startRecording);
-$("voice-button").addEventListener("pointerup", () => stopRecording(false));
-$("voice-button").addEventListener("pointercancel", () => stopRecording(true));
-$("voice-button").addEventListener("contextmenu", (event) => event.preventDefault());
-$("voice-button").addEventListener("keydown", (event) => { if ((event.key === " " || event.key === "Enter") && !event.repeat) startRecording(event); });
-$("voice-button").addEventListener("keyup", (event) => { if (event.key === " " || event.key === "Enter") stopRecording(false); });
+$("voice-button").addEventListener("click", () => voice.take ? stopRecording(false) : startRecording());
+$("voice-cancel").addEventListener("click", () => stopRecording(true));
+window.addEventListener("pagehide", () => stopRecording(true));
 
 // iOS reloads a home-screen app that sat in the background, often before the network (or VPN) is
 // back. Until Roost answers, say so and keep trying, rather than leaving a blank page or signing out.
@@ -2322,7 +2357,11 @@ async function start() {
   state.passkeysAvailable = Boolean(data.passkeys);
   return data.signed_in ? signedIn() : signedOut();
 }
-document.addEventListener("visibilitychange", () => { reportPresence(); if (document.visibilityState === "visible") { boot.delay = 2000; start(); } });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopRecording(true);
+  reportPresence();
+  if (document.visibilityState === "visible") { boot.delay = 2000; start(); }
+});
 setInterval(reportPresence, 15000);
 // A notification tapped while Roost is already open.
 navigator.serviceWorker?.addEventListener("message", (event) => {
