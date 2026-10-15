@@ -686,6 +686,17 @@ function thoughtsBlock(texts, key) {
   return details;
 }
 
+function replyUsage(row) {
+  const usage = row.roost_usage || {};
+  const count = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const input = count(usage.input_tokens) ? usage.input_tokens.toLocaleString() : "—";
+  const output = count(usage.output_tokens) ? usage.output_tokens.toLocaleString() : "—";
+  const duration = usage.model_seconds;
+  const rate = count(usage.output_tokens) && typeof duration === "number" && Number.isFinite(duration) && duration > 0
+    ? usage.output_tokens / duration : null;
+  return `${input} in / ${output} out · ${rate !== null && Number.isFinite(rate) ? rate.toFixed(1) : "—"} TPS`;
+}
+
 function selectingTranscript() {
   const selection = window.getSelection?.();
   return Boolean(selection && !selection.isCollapsed && selection.rangeCount &&
@@ -751,7 +762,11 @@ function renderMessages(rows) {
     } else {
       const under = el("div", "under reply-under");
       if (row.id != null) under.append(playButton(row.id));
-      if (shown) under.append(time);
+      if (shown) {
+        const details = el("span", "reply-usage", `${time} · ${replyUsage(row)}`);
+        details.title = "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
+        under.append(details);
+      }
       if (under.children.length) transcript.append(under);
     }
     if (time) {
@@ -1786,7 +1801,7 @@ async function loadHermesLink() {
 function renderHermesLink(detail) {
   const link = state.hermesLink;
   const section = settingsSection(detail, "Job reports from " + agent(),
-    `Install Roost’s plugin in Hermes to get ${agent()}’s job reports and the messages it sends on its own here, with a notification.`);
+    `Install Roost’s plugin in Hermes for reply token counts and TPS, plus ${agent()}’s job reports and messages it sends on its own.`);
   if (!link) { section.append(el("p", "", "Loading…")); return; }
   section.append(el("p", "", link.last_delivery ? "Last report received " + dateTimeLabel(link.last_delivery) + "." : "Nothing received from Hermes yet."));
   const steps = el("ol", "setup-steps");

@@ -42,9 +42,9 @@ Direct actions require an existing Roost login and network access to Roost. If e
 
 To exercise the flow without executing a command, run the loopback demo and send `/approval-demo`. This is a disposable protocol stand-in, not a live Hermes security test.
 
-### 4. Optional: job reports from Hermes
+### 4. Optional: reply measurements and job reports from Hermes
 
-Roost's reply notifications work on their own. To also get the agent's job reports, and messages it sends on its own, Hermes needs Roost's platform plugin. It ships with Roost, and **Settings › Notifications** has it as a download, along with these steps and the values to paste:
+Roost's reply notifications work on their own. To record reply token counts and TPS, or get the agent's job reports and messages it sends on its own, Hermes needs Roost's platform plugin. It ships with Roost, and **Settings › Notifications** has it as a download, along with these steps and the values to paste:
 
 1. Unzip the plugin into Hermes's plugins folder, so it becomes `$HERMES_HOME/plugins/roost`.
 2. Enable it: `hermes plugins enable roost` (or add `roost` to `plugins.enabled` in Hermes's `config.yaml`).
@@ -52,6 +52,10 @@ Roost's reply notifications work on their own. To also get the agent's job repor
 4. Restart Hermes's gateway, then set a job's Deliver to `roost`.
 
 The plugin needs nothing beyond Python's standard library. It posts each delivery to `/api/hermes/deliveries` with the token; Roost keeps the newest 200 and notifies every device. A tapped job report opens the job; any other message opens in Roost. **New token** in Settings replaces the token, and the old one stops working at once.
+
+Plugin **1.1.0 or later** also records whole-reply input/output tokens and model-call time. For an existing installation, download the plugin again, replace both files in `$HERMES_HOME/plugins/roost`, and restart the Hermes process serving Roost (including the dashboard/TUI gateway, not just a separate messaging gateway). Keep the existing `.env` values. No new token or notification permission is needed for measurements.
+
+Tap or click an assistant reply to show its timestamp and measurements. Input tokens count the prompts across every completed main-model call, including cache reads; output tokens include provider-reported thinking and tool-call rounds. TPS is output tokens divided by the sum of those model-call durations, including prompt processing and network time, excluding tool execution and approval waits. It is an effective model-call rate, not a decode-only GPU benchmark. Auxiliary calls and delegated agents have separate accounting and are excluded. The metrics belong to the turn's final saved assistant reply. Older replies, interrupted turns, missing provider usage/timing, or failed telemetry deliveries show **—**; Roost never substitutes character estimates, conversation totals or rolling TPS. Measurements persist in Roost state and are removed with the conversation; they cannot be backfilled from old transcripts.
 
 ## Configuration
 

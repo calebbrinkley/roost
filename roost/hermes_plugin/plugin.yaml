@@ -1,10 +1,10 @@
 name: roost
 label: Roost
 kind: platform
-version: 1.0.0
+version: 1.1.0
 description: >
   Delivers job reports and messages the agent sends to Roost, which keeps them and
-  notifies the owner's devices. Outbound only: conversations happen in Roost itself.
+  notifies the owner's devices. Records whole-reply token usage and model-call timing. Outbound only: conversations happen in Roost itself.
   Ships with Roost; Settings › Notifications in Roost has the token and setup steps.
 requires_env:
   - name: ROOST_URL

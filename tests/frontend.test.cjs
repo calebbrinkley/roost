@@ -415,6 +415,42 @@ test('times show in the chosen time zone, and the device zone when none is chose
   assert.notEqual(f.run(`messageTime('2020-01-05T20:00:00Z')`), '');
 });
 
+
+test('tapping an assistant reply toggles whole-reply token usage and TPS beside its timestamp', async () => {
+  const f = fixture(); await tick();
+  f.context.rows = [
+    {id:1, role:'user', content:'Question', timestamp:1700000000, roost_usage:{input_tokens:999,output_tokens:999,model_seconds:1}},
+    {id:2, role:'assistant', content:'Reply', timestamp:1700000020, roost_usage:{input_tokens:1200,output_tokens:240,model_seconds:6}}
+  ];
+  f.run(`state.current = 'one'; renderMessages(rows)`);
+  const body = () => find(f.get('transcript'), n => n.classList?.contains('has-time') && text(n) === 'Reply');
+  assert.doesNotMatch(text(f.get('transcript')), /TPS|1,200/);
+  body().events.click({target:{closest:()=>null}});
+  assert.match(text(f.get('transcript')), /1,200 in \/ 240 out · 40\.0 TPS/);
+  const metadata = find(f.get('transcript'), n => n.className === 'reply-usage');
+  assert.ok(text(metadata).startsWith(f.run('messageTime(rows[1].timestamp)') + ' · '));
+  f.run('renderMessages(rows)');
+  assert.match(text(f.get('transcript')), /40\.0 TPS/, 'polling preserves the revealed metadata');
+  body().events.click({target:{closest:()=>null}});
+  assert.doesNotMatch(text(f.get('transcript')), /TPS/);
+  const own = find(f.get('transcript'), n => n.classList?.contains('has-time') && text(n) === 'Question');
+  own.events.click({target:{closest:()=>null}});
+  assert.doesNotMatch(text(f.get('transcript')), /TPS|999/, 'owner messages only reveal their timestamp');
+});
+
+test('reply metrics distinguish unavailable and zero values without guessing from text', async () => {
+  const f = fixture(); await tick();
+  assert.equal(f.run('replyUsage({})'), '— in / — out · — TPS');
+  assert.equal(f.run('replyUsage({token_count:100,usage:{avg_tps:50}})'), '— in / — out · — TPS');
+  assert.equal(f.run('replyUsage({roost_usage:{input_tokens:0,output_tokens:0,model_seconds:2}})'), '0 in / 0 out · 0.0 TPS');
+  for (const seconds of ['6', 0, -1, NaN, Infinity]) {
+    f.context.seconds = seconds;
+    assert.match(f.run('replyUsage({roost_usage:{input_tokens:10,output_tokens:5,model_seconds:seconds}})'), /— TPS$/);
+  }
+  f.context.badUsage = {input_tokens:true,output_tokens:'40',model_seconds:4};
+  assert.equal(f.run('replyUsage({roost_usage:badUsage})'), '— in / — out · — TPS');
+});
+
 test('the gear opens Settings and the section tabs stay for Messages and Jobs', async () => {
   const f = settingsFixture(); await tick();
   f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
