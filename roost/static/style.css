@@ -182,7 +182,7 @@ button:disabled { cursor: default; }
 /* Held to record: no text selection, callout or scrolling from the press. */
 .mic-button { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
 .composer.recording .mic-button { color: #fff; background: #c05242; animation: pulse 1.2s ease-in-out infinite; }
-.reply-under { display: flex; align-items: center; gap: 4px; margin-left: 2px; }
+.reply-under { display: flex; flex-wrap: wrap; max-width: 100%; align-items: center; gap: 4px; margin-left: 2px; }
 .play-reply { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
 .play-reply:hover, .play-reply.playing { color: var(--accent-text); background: var(--chip); }
 .play-reply svg { width: 15px; height: 15px; }

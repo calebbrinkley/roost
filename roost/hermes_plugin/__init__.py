@@ -10,6 +10,10 @@ ROOST_HOME_CHANNEL=roost, which lets jobs deliver to Roost (``deliver: roost``).
 import asyncio
 import json
 import logging
+import math
+import threading
+import time
+from collections import OrderedDict
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -113,7 +117,92 @@ def _env_enablement() -> dict | None:
     return {"url": url.rstrip("/"), "home_channel": {"chat_id": home, "name": "Roost"}}
 
 
+# Hooks run in concurrent Hermes turn threads. Keep only numeric measurements, never prompts or replies.
+_usage_lock = threading.Lock()
+_turn_usage = OrderedDict()
+_usage_uploads = threading.BoundedSemaphore(2)
+
+
+def _token_count(value):
+    return value if type(value) is int and 0 <= value <= 2 ** 53 - 1 else None
+
+
+def _model_seconds(value):
+    return value if type(value) in (int, float) and 0 < value < 1e9 and math.isfinite(value) else None
+
+
+def _record_usage(*, turn_id=None, usage=None, api_duration=None, started_at=None, api_call_count=None, **_):
+    if not turn_id:
+        return
+    usage = usage if isinstance(usage, dict) else {}
+    values = {"input_tokens": _token_count(usage.get("prompt_tokens")),
+              "output_tokens": _token_count(usage.get("output_tokens")),
+              "model_seconds": _model_seconds(api_duration)}
+    with _usage_lock:
+        now = time.monotonic()
+        for key, old in list(_turn_usage.items()):
+            if now - old["created"] > 3600:
+                del _turn_usage[key]
+        current = _turn_usage.get(turn_id)
+        # Eviction, a missed callback or a plugin enabled mid-turn must not look like a whole reply.
+        expected = current["calls"] + 1 if current and type(current["calls"]) is int else 1
+        if type(api_call_count) is not int or api_call_count != expected:
+            values = {key: None for key in values}
+        if current is None:
+            current = {"created": now, "started_at": started_at, "calls": api_call_count, **values}
+            _turn_usage[turn_id] = current
+        else:
+            for key, value in values.items():
+                current[key] = current[key] + value if current[key] is not None and value is not None else None
+        current["calls"] = api_call_count
+        while len(_turn_usage) > 128:
+            _turn_usage.popitem(last=False)
+
+
+def _upload_usage(url, token, body):
+    try:
+        request = urllib.request.Request(url + "/api/hermes/reply-usage", data=json.dumps(body).encode(), method="POST",
+                                         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            response.read(4096)
+    except Exception:  # telemetry must never fail a reply or print its configuration
+        logger.warning("Roost reply measurements could not be delivered.")
+    finally:
+        _usage_uploads.release()
+
+
+def _finish_usage(*, session_id=None, turn_id=None, conversation_history=None, **_):
+    with _usage_lock:
+        measured = _turn_usage.pop(turn_id, None)
+    history = conversation_history if isinstance(conversation_history, list) else []
+    last = history[-1] if history and isinstance(history[-1], dict) else {}
+    row_id, timestamp = last.get("_row_id"), last.get("timestamp")
+    started = measured.get("started_at") if measured else None
+    # Only the structurally final, durably identified row created during THIS turn. Never match by text.
+    if (not measured or not session_id or last.get("role") != "assistant" or last.get("tool_calls")
+            or type(row_id) is not int or row_id <= 0 or type(timestamp) not in (int, float) or not math.isfinite(timestamp)
+            or type(started) not in (int, float) or not math.isfinite(started) or timestamp < started):
+        return
+    body = {"session_id": session_id, "message_id": row_id,
+            **{key: measured[key] for key in ("input_tokens", "output_tokens", "model_seconds")}}
+    url, token = _settings(None)
+    if url and token and _usage_uploads.acquire(blocking=False):
+        # Bounded background uploads: a slow/offline Roost must not delay Hermes's completed reply.
+        try:
+            threading.Thread(target=_upload_usage, args=(url, token, body), daemon=True).start()
+        except Exception:
+            _usage_uploads.release()
+
+
+def _discard_usage(*, turn_id=None, **_):
+    with _usage_lock:
+        _turn_usage.pop(turn_id, None)
+
+
 def register(ctx) -> None:
+    ctx.register_hook("post_api_request", _record_usage)
+    ctx.register_hook("post_llm_call", _finish_usage)
+    ctx.register_hook("on_session_end", _discard_usage)
     ctx.register_platform(
         name="roost", label="Roost", adapter_factory=lambda cfg: RoostAdapter(cfg),
         check_fn=check_requirements, validate_config=validate_config, is_connected=validate_config,

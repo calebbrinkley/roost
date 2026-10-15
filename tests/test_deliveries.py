@@ -113,6 +113,37 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/deliveries/" + delivered, cookies=cookies)
         self.assertEqual((await response.json())["text"], "Dinner is at 7.")
 
+    async def test_reply_usage_requires_plugin_auth_and_exact_numeric_fields(self):
+        body = {"session_id": "one", "message_id": 12, "input_tokens": 1200, "output_tokens": 240, "model_seconds": 6.0}
+        cookies = await self.sign_in()
+        for headers in ({}, {"Authorization": "Bearer wrong"}, self.headers):
+            response = await self.client.post(server.USAGE_PATH, headers=headers, cookies=cookies, json=body)
+            self.assertEqual(response.status, 401)
+        auth = {"Authorization": "Bearer " + self.app["deliveries"].token()}
+        for change in ({"extra": "not allowed"}, {"message_id": True}, {"message_id": 0}, {"input_tokens": -1},
+                       {"output_tokens": "240"}, {"output_tokens": 2 ** 53}, {"model_seconds": 0},
+                       {"model_seconds": float("nan")}, {"model_seconds": 10 ** 1000}, {"session_id": "../bad"}):
+            response = await self.client.post(server.USAGE_PATH, headers=auth, json={**body, **change})
+            self.assertEqual(response.status, 400, change.keys())
+        response = await self.client.post(server.USAGE_PATH, headers={**auth, "Content-Type": "application/json"}, data=b"x" * 5000)
+        self.assertEqual(response.status, 413)
+        self.assertEqual((await self.client.post(server.USAGE_PATH, headers=auth, json=body)).status, 200)
+        # A retried delivery replaces the same durable identity rather than double-counting it.
+        self.assertEqual((await self.client.post(server.USAGE_PATH, headers=auth, json=body)).status, 200)
+        self.app["hermes"].request.return_value = {"session_id": "one", "messages": [
+            {"id": 12, "role": "assistant", "content": "Reply"}, {"id": 13, "role": "user", "content": "Question"}]}
+        result = await (await self.client.get("/api/conversations/one", cookies=cookies)).json()
+        self.assertEqual(result["messages"][0]["roost_usage"], {key: body[key] for key in ("input_tokens", "output_tokens", "model_seconds")})
+        self.assertNotIn("roost_usage", result["messages"][1])
+        self.app["hermes"].request.return_value = {"session_id": "two", "messages": [{"id": 12, "role": "assistant", "content": "Other"}]}
+        result = await (await self.client.get("/api/conversations/two", cookies=cookies)).json()
+        self.assertNotIn("roost_usage", result["messages"][0])
+        self.assertEqual(self.sent, [], "measurement uploads do not create notifications")
+        response = await self.client.delete("/api/conversations/one", headers=self.headers, cookies=cookies, json={"confirm": True})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.app["sessions"].db.execute("SELECT COUNT(*) FROM reply_usage").fetchone()[0], 0)
+
+
     async def test_settings_show_the_token_offer_the_plugin_and_replace_the_token(self):
         response = await self.client.get("/api/hermes")
         self.assertEqual(response.status, 401)
@@ -158,12 +189,15 @@ def hermes_stand_in():
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.received = []
+        self.received_event = asyncio.Event()
         self.status = 201
         async def deliveries_route(request):
             self.received.append((request.headers.get("Authorization"), await request.json()))
+            self.received_event.set()
             return web.json_response({"id": "abc"}, status=self.status)
         app = web.Application()
         app.router.add_post("/api/hermes/deliveries", deliveries_route)
+        app.router.add_post("/api/hermes/reply-usage", deliveries_route)
         self.roost = TestServer(app)
         await self.roost.start_server()
         self.env = patch.dict(os.environ, {"ROOST_URL": str(self.roost.make_url("")).rstrip("/") + "/",
@@ -181,9 +215,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.roost.close()
 
     def test_it_registers_a_platform_jobs_can_deliver_to(self):
-        ctx = SimpleNamespace(register_platform=lambda **fields: setattr(ctx, "fields", fields))
+        hooks = {}
+        ctx = SimpleNamespace(register_platform=lambda **fields: setattr(ctx, "fields", fields),
+                              register_hook=lambda name, callback: hooks.update({name: callback}))
         self.plugin.register(ctx)
         fields = ctx.fields
+        self.assertEqual(set(hooks), {"post_api_request", "post_llm_call", "on_session_end"})
         self.assertEqual((fields["name"], fields["cron_deliver_env_var"], fields["required_env"]),
                          ("roost", "ROOST_HOME_CHANNEL", ["ROOST_URL", "ROOST_DELIVERY_TOKEN"]))
         self.assertEqual(fields["env_enablement_fn"](), {"url": self.plugin._settings(None)[0],
@@ -206,3 +243,54 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await adapter.disconnect()
         with patch.dict(os.environ, {"ROOST_DELIVERY_TOKEN": ""}):
             self.assertIn("error", await self.plugin._standalone_send(SimpleNamespace(extra={}), "roost", "hi"))
+
+
+    async def test_whole_reply_measurements_include_all_tool_rounds_and_use_durable_identity(self):
+        for call, (usage, duration) in enumerate([({"prompt_tokens": 100, "output_tokens": 30}, 3), ({"prompt_tokens": 200, "output_tokens": 50}, 5)], 1):
+            self.plugin._record_usage(turn_id="turn-one", usage=usage, api_duration=duration, started_at=1700000000, api_call_count=call)
+        self.plugin._record_usage(turn_id="other-turn", usage={"prompt_tokens": 999, "output_tokens": 999}, api_duration=1, started_at=1700000000, api_call_count=1)
+        history = [{"role": "user", "content": "Private question", "_row_id": 10, "timestamp": 1700000000},
+                   {"role": "assistant", "content": "Private reply", "_row_id": 12, "timestamp": 1700000020}]
+        self.plugin._finish_usage(session_id="one", turn_id="turn-one", conversation_history=history)
+        await asyncio.wait_for(self.received_event.wait(), 5)
+        self.assertEqual(self.received, [("Bearer tok", {"session_id": "one", "message_id": 12,
+                              "input_tokens": 300, "output_tokens": 80, "model_seconds": 8})])
+        self.plugin._finish_usage(session_id="one", turn_id="turn-one", conversation_history=history)
+        self.assertEqual(len(self.received), 1, "a completion hook cannot publish the same turn twice")
+        self.plugin._discard_usage(turn_id="other-turn")
+        self.assertEqual(len(self.plugin._turn_usage), 0)
+
+    async def test_incomplete_usage_is_unavailable_and_never_uses_a_session_total(self):
+        self.plugin._record_usage(turn_id="one", usage={"prompt_tokens": 10, "output_tokens": 5}, api_duration=2, started_at=1700000000, api_call_count=1)
+        self.plugin._record_usage(turn_id="one", usage=None, api_duration=None, started_at=1700000000, api_call_count=2)
+        self.plugin._finish_usage(session_id="one", turn_id="one", conversation_history=[
+            {"role": "assistant", "_row_id": 5, "timestamp": 1700000010}])
+        await asyncio.wait_for(self.received_event.wait(), 5)
+        self.assertEqual(self.received[0][1], {"session_id": "one", "message_id": 5, "input_tokens": None,
+                                              "output_tokens": None, "model_seconds": None})
+
+    def test_a_missing_or_old_final_row_never_receives_new_turn_measurements(self):
+        for last in ({"role": "user", "_row_id": 3, "timestamp": 1700000020},
+                     {"role": "assistant", "_row_id": 3, "timestamp": 1699999999},
+                     {"role": "assistant", "timestamp": 1700000020},
+                     {"role": "assistant", "_row_id": 3, "timestamp": 1700000020, "tool_calls": [{}]}):
+            self.plugin._record_usage(turn_id="one", usage={"prompt_tokens": 10, "output_tokens": 5}, api_duration=2, started_at=1700000000, api_call_count=1)
+            self.plugin._finish_usage(session_id="one", turn_id="one", conversation_history=[last])
+        self.assertEqual(self.received, [])
+        self.assertEqual(len(self.plugin._turn_usage), 0)
+
+    def test_abandoned_turn_measurements_are_bounded_and_discarded(self):
+        for number in range(140):
+            self.plugin._record_usage(turn_id=str(number), usage=None)
+        self.assertEqual(len(self.plugin._turn_usage), 128)
+        self.plugin._discard_usage(turn_id="139")
+        self.assertNotIn("139", self.plugin._turn_usage)
+
+
+    async def test_missing_earlier_calls_cannot_be_reported_as_a_whole_reply(self):
+        self.plugin._record_usage(turn_id="one", api_call_count=3, usage={"prompt_tokens": 10, "output_tokens": 5},
+                                  api_duration=2, started_at=1700000000)
+        self.plugin._finish_usage(session_id="one", turn_id="one", conversation_history=[
+            {"role": "assistant", "_row_id": 5, "timestamp": 1700000010}])
+        await asyncio.wait_for(self.received_event.wait(), 5)
+        self.assertTrue(all(self.received[0][1][key] is None for key in ("input_tokens", "output_tokens", "model_seconds")))

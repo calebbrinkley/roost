@@ -27,6 +27,7 @@ from .deliveries import TEXT_LIMIT as DELIVERY_LIMIT, Deliveries
 from .hermes import Hermes, HermesError
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
+from . import reply_usage
 
 STATIC = Path(__file__).with_name("static")
 # The Hermes plugin Roost offers as a download; it runs inside Hermes, never in Roost.
@@ -37,6 +38,8 @@ HERMES_PLUGIN = Path(__file__).with_name("hermes_plugin")
 RECORDING_LIMIT, SPEECH_CHARACTERS, SPEECH_CACHE = 25 * 1024 * 1024, 4000, 8
 # Hermes's plugin authenticates with Roost's delivery token instead of a signed-in browser's cookie.
 DELIVERY_PATH = "/api/hermes/deliveries"
+USAGE_PATH = "/api/hermes/reply-usage"
+PLUGIN_PATHS = {DELIVERY_PATH, USAGE_PATH}
 COOKIE = "roost_session"
 ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
@@ -105,10 +108,10 @@ def secured_cookie(response: web.StreamResponse, request: web.Request, token: st
 async def guard(request: web.Request, handler):
     try:
         if request.path.startswith("/api/"):
-            if request.method not in {"GET", "HEAD", "OPTIONS"} and request.path != DELIVERY_PATH:
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and request.path not in PLUGIN_PATHS:
                 if request.headers.get("Origin") != request.app["origin"] or request.headers.get("X-Roost-Request") != "1":
                     raise bad("Request origin was not accepted.", 403)
-            if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login", DELIVERY_PATH}:
+            if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login", *PLUGIN_PATHS}:
                 if not request.app["sessions"].valid(request.cookies.get(COOKIE, "")):
                     raise web.HTTPUnauthorized(text="Sign in to Roost.")
         response = await handler(request)
@@ -400,6 +403,7 @@ async def delete_all_conversations(request: web.Request):
             except HermesError as exc:
                 raise HermesError(exc.status, f"Deleted {deleted} conversations, then Hermes refused the next one.") from None
             request.app["chats"].forget(sid)
+            request.app["reply_usage"].forget(sid)
             deleted += 1
     return web.json_response({"deleted": deleted})
 
@@ -578,6 +582,24 @@ async def watch_replies(app: web.Application) -> None:
             await check_replies(app)
         except Exception:  # one bad pass must not end reply notifications until a restart
             pass
+
+
+async def receive_reply_usage(request: web.Request):
+    if not request.app["deliveries"].authorized(request.headers.get("Authorization", "")):
+        raise web.HTTPUnauthorized(text="Roost did not accept that delivery token.")
+    data = await json_body(request, 4096)
+    if set(data) != reply_usage.FIELDS:
+        raise bad("Unsupported reply measurement fields.")
+    sid = data["session_id"]
+    if not isinstance(sid, str) or not ID.fullmatch(sid) or sid in {".", ".."}:
+        raise bad("Invalid conversation identifier.")
+    if reply_usage.count(data["message_id"]) is None or data["message_id"] == 0:
+        raise bad("Invalid message identifier.")
+    for key, validate in (("input_tokens", reply_usage.count), ("output_tokens", reply_usage.count), ("model_seconds", reply_usage.seconds)):
+        if data[key] is not None and validate(data[key]) is None:
+            raise bad("Invalid reply measurement.")
+    request.app["reply_usage"].add(data)
+    return web.json_response({"ok": True})
 
 
 async def receive_delivery(request: web.Request):
@@ -792,7 +814,11 @@ async def conversation(request: web.Request):
     result = await request.app["hermes"].request("GET", f"/api/sessions/{sid}/messages?inline_images=false")
     if isinstance(result, dict):
         # Says a reply is being written that /stream can show before Hermes saves it.
-        result["live"] = item_id(request, "sid", encode=False) in request.app["live"]
+        raw = item_id(request, "sid", encode=False)
+        result["live"] = raw in request.app["live"]
+        rows = result.get("messages")
+        if isinstance(rows, list):
+            request.app["reply_usage"].attach(result.get("session_id") or raw, rows)
     return web.json_response(result)
 
 
@@ -882,6 +908,7 @@ async def delete_conversation(request: web.Request):
         raise bad("Confirm conversation deletion.")
     result = await request.app["hermes"].request("DELETE", f"/api/sessions/{sid}")
     request.app["chats"].forget(item_id(request, "sid", encode=False))
+    request.app["reply_usage"].forget(item_id(request, "sid", encode=False))
     return web.json_response(result)
 
 
@@ -1048,6 +1075,7 @@ def create_app() -> web.Application:
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
     app["chats"] = Chats(app["sessions"].db)
+    app["reply_usage"] = reply_usage.ReplyUsage(app["sessions"].db)
     app["deliveries"] = Deliveries(app["sessions"].db, state / "delivery-token")
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
     app["watches"], app["presence"], app["live"], app["speech"], app["speech_pending"] = {}, {}, {}, OrderedDict(), {}
@@ -1093,6 +1121,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/push/test", test_push)
     app.router.add_post("/api/presence", presence)
     app.router.add_post(DELIVERY_PATH, receive_delivery)
+    app.router.add_post(USAGE_PATH, receive_reply_usage)
     app.router.add_get("/api/deliveries/{did}", get_delivery)
     app.router.add_get("/api/hermes", hermes_link)
     app.router.add_post("/api/hermes/token", rotate_delivery_token)
