@@ -1234,3 +1234,78 @@ test('polling and live updates preserve a transcript selection until it is clear
   f.run(`selected = false; document.events.selectionchange()`);
   assert.match(text(f.get('transcript')), /Streaming continues/);
 });
+
+test('a second submitted message stays visible while the first reply is streaming', async () => {
+  const f = fixture(); await tick();
+  const now = Date.now() / 1000;
+  f.context.rows = [{id:1,role:'user',content:'First question',timestamp:now},
+    {id:2,role:'assistant',content:'Working on it',tool_calls:[{id:'tool-one'}],timestamp:now},
+    {id:3,role:'user',content:'Second question',timestamp:now}];
+  f.run(`state.current='one'; state.live={id:'one',user:'First question',started:1,thoughts:'Checking',text:'Working on it',done:false};
+    state.pending={id:'one',text:'Second question',since:Date.now()}; renderMessages(rows);`);
+  assert.match(text(f.get('transcript')), /First question/);
+  assert.match(text(f.get('transcript')), /Second question/, 'the accepted follow-up must be visible during the first turn');
+});
+
+
+test('accepted follow-ups appear before Hermes persists them, including repeated text', async () => {
+  const f = fixture(); await tick();
+  f.context.rows = [{id:1,role:'user',content:'First question',timestamp:Date.now()/1000}];
+  f.run(`state.current='one'; renderMessages(rows); api=async()=>({session_id:'one'});
+    loadConversations=async()=>{}; loadMessages=async()=>renderMessages(rows);`);
+  for (let i=0;i<2;i++) {
+    f.get('message').value='Follow up';
+    await f.run('submitMessage({preventDefault(){}})');
+  }
+  const own = () => f.get('transcript').children.filter(n=>n.className==='message from-you').map(text);
+  assert.deepEqual(own(), ['First question','Follow up','Follow up']);
+  f.context.rows.push({id:2,role:'user',content:'Follow up',timestamp:Date.now()/1000});
+  f.run('renderMessages(rows)');
+  assert.deepEqual(own(), ['First question','Follow up','Follow up'], 'one persisted copy must consume only one local echo');
+  f.run('renderMessages(rows)');
+  assert.deepEqual(own(), ['First question','Follow up','Follow up'], 'a later poll must not consume the second echo with the same row');
+  f.context.rows.push({id:3,role:'user',content:'Follow up',timestamp:Date.now()/1000});
+  f.run('renderMessages(rows)');
+  assert.deepEqual(own(), ['First question','Follow up','Follow up']);
+  f.run('signedOut()');
+  assert.doesNotMatch(text(f.get('transcript')), /Follow up/);
+});
+
+
+test('a follow-up send retires the old stream instead of assigning it to the new question', async () => {
+  const {opened,globals}=eventSources();
+  const f=fixture(undefined,globals);await tick();
+  f.run(`state.current='one'; state.lastRows=[{id:1,role:'user',content:'First',timestamp:Date.now()/1000}];
+    api=async()=>({session_id:'one'}); loadConversations=async()=>{}; loadMessages=async()=>renderMessages(state.lastRows); openStream('one');`);
+  opened[0].send({reset:true,user:'First',started:1,text:'First response'});
+  f.get('message').value='Second';
+  await f.run('submitMessage({preventDefault(){}})');
+  assert.equal(opened[0].closed,true);
+  assert.equal(f.run('state.live'),null);
+  assert.match(text(f.get('transcript')),/Second/);
+});
+
+test('a completed first stream does not hide later replies or wait for their turn to finish', async () => {
+  const f=fixture();await tick();
+  f.context.rows=[{id:1,role:'user',content:'First',timestamp:Date.now()/1000},
+    {id:2,role:'assistant',content:'First final',timestamp:Date.now()/1000},
+    {id:3,role:'user',content:'Second',timestamp:Date.now()/1000}];
+  f.run(`state.current='one';state.live={id:'one',user:'First',started:1,thoughts:'',text:'First stream',done:true,ended:Date.now()};renderMessages(rows);`);
+  assert.equal(f.run('state.live'),null);
+  assert.match(text(f.get('transcript')),/First final/);
+  assert.match(text(f.get('transcript')),/Second/);
+});
+
+test('Hermes may persist a queued burst as one combined user row without leaving duplicate local echoes', async () => {
+  const f=fixture();await tick();
+  f.context.rows=[{id:1,role:'user',content:'First',timestamp:Date.now()/1000}];
+  f.run(`state.current='one';renderMessages(rows);api=async()=>({session_id:'one'});loadConversations=async()=>{};loadMessages=async()=>renderMessages(rows);`);
+  for(const line of ['Same follow up','Same follow up']) {
+    f.get('message').value=line;await f.run('submitMessage({preventDefault(){}})');
+  }
+  f.context.rows.push({id:2,role:'assistant',content:'First reply',timestamp:Date.now()/1000},
+    {id:3,role:'user',content:'Same follow up\n\nSame follow up',timestamp:Date.now()/1000});
+  f.run('renderMessages(rows)');
+  assert.equal(f.run('state.sentMessages.length'),0,'the combined durable row covers both accepted sends');
+  assert.equal(f.get('transcript').children.filter(n=>n.className==='message from-you').length,2);
+});

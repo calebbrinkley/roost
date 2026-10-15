@@ -122,6 +122,30 @@ async def checks():
                 break
         assert len(transcript["messages"]) >= 2
         assert "local demo reply" in transcript["messages"][-1]["content"]
+        # Hold a harmless demo turn at approval so follow-up admission cannot race its completion.
+        overlapping = await request(client, "POST", "/api/conversations", 201, {"text": "/approval-demo"})
+        overlap_sid = overlapping["session_id"]
+        path = f"/api/conversations/{overlap_sid}"
+        for _ in range(20):
+            waiting = (await request(client, "GET", path + "/approvals"))["approvals"]
+            if waiting:
+                break
+            await asyncio.sleep(0.05)
+        assert waiting
+        await request(client, "POST", path + "/messages", body={"text": "Queued follow up"})
+        snapshot = await request(client, "GET", path)
+        assert snapshot["live"] is False, "A queued acknowledgement must not own the first turn's stream."
+        assert not any(row["content"] == "Queued follow up" for row in snapshot["messages"])
+        await request(client, "POST", path + "/approvals", body={"request_id": waiting[0]["request_id"], "choice": "once"})
+        for _ in range(80):
+            snapshot = await request(client, "GET", path)
+            if len(snapshot["messages"]) == 4:
+                break
+            await asyncio.sleep(0.05)
+        assert [row["role"] for row in snapshot["messages"]] == ["user", "assistant", "user", "assistant"]
+        assert [row["content"] for row in snapshot["messages"] if row["role"] == "user"] == ["/approval-demo", "Queued follow up"]
+        await request(client, "DELETE", path, body={"confirm": True})
+
         # A native approval request must survive browser reconnect and resolve once only.
         for choice in ("once", "deny"):
             demo = await request(client, "POST", "/api/conversations", 201, {"text": "/approval-demo"})
@@ -218,7 +242,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, authenticated reply measurements, voice, chat turns, streamed replies, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, authenticated reply measurements, voice, chat turns, streamed replies, busy-session follow-ups, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():
