@@ -21,7 +21,7 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
   const get = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   get('app').classList.add('hidden');
   const document = { getElementById: get, createElement: tag => Object.assign(node(), {tagName: String(tag).toUpperCase()}), createElementNS: node, createTextNode: text => ({textContent: text}),
-    querySelectorAll: () => [], querySelector: () => get('main'), addEventListener() {} };
+    querySelectorAll: () => [], querySelector: () => get('main'), events: {}, addEventListener(name, fn) { this.events[name] = fn; } };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
     fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, ...globals });
@@ -1046,4 +1046,22 @@ test('failed notification decisions open Roost without replaying or implying app
   assert.equal(f.requests.length, 1);
   assert.match(f.notifications[0].options.body, /not confirmed/);
   assert.equal(f.opened.length, 1);
+});
+
+test('polling and live updates preserve a transcript selection until it is cleared', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.rows = [{role:'assistant', content:'Copy this reply.'}]; renderMessages(rows);
+    globalThis.selected = true;
+    window.getSelection = () => ({isCollapsed: !selected, rangeCount:1, getRangeAt:() => ({intersectsNode:node => node === $('transcript')})});`);
+  const nodes = f.get('transcript').children;
+  f.run(`renderMessages([{role:'assistant', content:'Copy this reply. More text.'}])`);
+  assert.equal(f.get('transcript').children, nodes, 'polling must not replace selected nodes');
+  f.run(`selected = false; document.events.selectionchange()`);
+  assert.match(text(f.get('transcript')), /More text/);
+  f.run(`state.live = {id:'one', user:'Question', started:1, thoughts:'', text:'Streaming', done:false}; renderMessages(rows); selected = true;`);
+  const liveBody = f.run('state.liveNodes.body');
+  f.run(`state.live.text += ' continues'; renderLive()`);
+  assert.equal(text(liveBody), 'Streaming');
+  f.run(`selected = false; document.events.selectionchange()`);
+  assert.match(text(f.get('transcript')), /Streaming continues/);
 });
