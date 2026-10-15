@@ -6,6 +6,8 @@ import asyncio
 import json
 import time
 
+from . import approvals
+
 # A turn followed longer than this is left to the transcript; Hermes finishes it either way.
 TURN_SECONDS = 1800
 # Characters kept per turn for thoughts and for text; the transcript has the rest.
@@ -19,6 +21,7 @@ class Turn:
         self.user = user
         self.thoughts = ""
         self.text = ""
+        self.approvals = {}
         self.done = False
         self.started = time.time()
         self.changed = asyncio.Event()
@@ -56,7 +59,15 @@ async def record(live: dict, sid: str, turn: Turn, events) -> None:
     try:
         async with asyncio.timeout(TURN_SECONDS):
             async for kind, payload in events:
-                if kind == "reasoning.delta":
+                if kind == "approval.request":
+                    if item := approvals.view(payload, payload.get("server_id")):
+                        turn.approvals[item["request_id"]] = item
+                        turn.notify()
+                elif kind == "request.cancel" and payload.get("id"):
+                    turn.approvals = {key: item for key, item in turn.approvals.items()
+                                      if item["server_id"] != payload.get("id")}
+                    turn.notify()
+                elif kind == "reasoning.delta":
                     turn.add("thoughts", payload.get("text"))
                 elif kind == "message.delta":
                     turn.add("text", payload.get("text"))
@@ -68,6 +79,7 @@ async def record(live: dict, sid: str, turn: Turn, events) -> None:
         pass
     finally:
         await events.aclose()
+        turn.approvals.clear()
         turn.done = True
         turn.notify()
         if live.get(sid) is turn:
@@ -90,6 +102,7 @@ async def send(response, turn: Turn) -> None:
         if len(turn.text) > sent_text:
             data["text"] = turn.text[sent_text:]
             sent_text = len(turn.text)
+        data["approvals"] = list(turn.approvals.values())
         if turn.done:
             data["done"] = True
         if data:

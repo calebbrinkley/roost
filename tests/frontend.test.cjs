@@ -76,7 +76,7 @@ test('sign-out clears private state, drafts and open dialogs', async () => {
 test('older transcript response cannot overwrite a newer poll', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = '';
-    api = () => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered = rows[0].content; };`);
+    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered = rows[0].content; };`);
   const old = f.run('loadMessages()'); const latest = f.run('loadMessages()');
   f.run(`requests[1]({messages: [{content:'new'}]});`); await latest;
   f.run(`requests[0]({messages: [{content:'old'}]});`); await old;
@@ -210,7 +210,7 @@ test('malformed transcript and Job rows do not crash the remaining valid content
 test('transcript keeps updating when every poll overlaps the next one', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
-    api = () => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
   const loads = [f.run('loadMessages()')];
   for (let i = 0; i < 5; i++) {
     loads.push(f.run('loadMessages()'));
@@ -224,7 +224,7 @@ test('transcript keeps updating when every poll overlaps the next one', async ()
 test('a transcript response from an earlier view or sign-in is discarded', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
-    api = () => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
   const beforeSwitch = f.run('loadMessages()');
   f.run(`state.viewEpoch++; state.current = 'two'; state.viewEpoch++; state.current = 'one';`);
   f.run(`requests[0]({messages: [{content:'old view'}]});`); await beforeSwitch;
@@ -962,4 +962,88 @@ test('hold the mic to record, let go to send the transcript, and its reply is re
   mic.events.pointerup();
   assert.equal(recorders.length, 2);
   assert.equal(JSON.parse(JSON.stringify(f.run('calls'))).length, 2, 'a quick tap sends nothing');
+});
+
+test('approval card shows literal commands and resolves only one request', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'chat:one'; setApprovals([{request_id:'request-one', command:'<script>unsafe()</script>', description:'Write a note', choices:['once','deny']}]);`);
+  assert.equal(f.get('approvals').classList.contains('hidden'), false);
+  const card = f.get('approvals').children[0];
+  assert.equal(card.children[2].tagName, 'PRE');
+  assert.equal(card.children[2].textContent, '<script>unsafe()</script>');
+  assert.equal(card.children[3].children[0].textContent, 'Allow once');
+  f.run(`globalThis.decisions = []; api = async (url, options) => { decisions.push({url, options}); return {resolved:true}; }; loadApprovals = () => {};`);
+  await f.run(`decideApproval('request-one', 'once')`);
+  assert.equal(f.run('decisions[0].url'), '/conversations/chat%3Aone/approvals');
+  assert.equal(f.run('decisions[0].options.body'), '{"request_id":"request-one","choice":"once"}');
+  assert.match(f.get('approvals').children[0].textContent, /Allowed once/);
+  f.run('signedOut()');
+  assert.equal(f.get('approvals').classList.contains('hidden'), true);
+});
+
+test('expired, offline and duplicate approval clicks never masquerade as success', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; setApprovals([{request_id:'r', command:'example', choices:['once','deny']}]);
+    globalThis.calls = 0; api = () => { calls++; return new Promise((_, reject) => { globalThis.rejectDecision = reject; }); }; loadApprovals = () => {};`);
+  const pending = f.run(`decideApproval('r', 'once')`);
+  await f.run(`decideApproval('r', 'deny')`);
+  assert.equal(f.run('calls'), 1);
+  f.run(`rejectDecision(new Error('This request expired.'))`); await pending;
+  assert.equal(f.run('state.approvalReady'), false);
+  assert.match(f.run('state.approvalNotice'), /expired/);
+  assert.equal(f.get('approvals').children[0].children[2].children[0].disabled, true);
+});
+
+test('pending approvals recover after reopening and stale polls cannot overwrite stream updates', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.completePoll = null; api = () => new Promise(resolve => { completePoll = resolve; });`);
+  const pending = f.run('loadApprovals()');
+  f.run(`setApprovals([{request_id:'new', choices:['deny']}]); completePoll({approvals:[]});`); await pending;
+  assert.equal(f.run('state.approvals[0].request_id'), 'new');
+  f.run(`api = async () => ({approvals:[{request_id:'pending', description:'Recovered request', choices:['once','deny']}]});`);
+  await f.run('loadApprovals()');
+  assert.equal(f.run('state.approvals[0].request_id'), 'pending');
+  f.run(`leaveLive(); state.current = 'two'; state.approvalFocus='old'; state.approvalFocusConversation='two'; setApprovals([]);`);
+  assert.match(f.get('approvals').children[0].textContent, /no longer waiting/);
+});
+
+function workerFixture(maxActions = 2, fetch = async () => ({ok:true})) {
+  const events = {}, notifications = [], opened = [], requests = [];
+  const self = {location:{origin:'https://roost.example.invalid'}, Notification:{maxActions},
+    addEventListener:(name, callback) => {events[name] = callback;},
+    registration:{showNotification:async (title, options) => {notifications.push({title, options});}},
+    clients:{matchAll:async () => [], openWindow:async url => {opened.push(url);}}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../roost/static/sw.js'), 'utf8'),
+    {self, URL, fetch:async (...args) => {requests.push(args); return fetch(...args);}});
+  async function dispatch(name, event) { let done; events[name]({...event, waitUntil(value) {done=value;}}); await done; }
+  return {notifications, requests, opened, dispatch};
+}
+
+test('notification actions use the owner session and exact request; Safari opens the card', async () => {
+  for (const maxActions of [0,2]) {
+    const f = workerFixture(maxActions);
+    const payload = {title:'Kestrel needs approval', body:'Write a note', url:'/?c=one&a=request-one',
+      approval:{conversation:'one', request_id:'request-one', choices:['once','deny']}};
+    await f.dispatch('push', {data:{json:() => payload}});
+    const notice = f.notifications[0];
+    assert.equal(notice.options.actions.length, maxActions);
+    await f.dispatch('notificationclick', {action:maxActions ? 'once' : '', notification:{...notice.options, close() {}}});
+    if (maxActions) {
+      assert.equal(f.requests[0][0], '/api/conversations/one/approvals');
+      assert.equal(f.requests[0][1].credentials, 'same-origin');
+      assert.equal(f.requests[0][1].headers['X-Roost-Request'], '1');
+      assert.equal(f.requests[0][1].body, '{"request_id":"request-one","choice":"once"}');
+    } else {
+      assert.equal(f.requests.length, 0);
+      assert.equal(f.opened[0], 'https://roost.example.invalid/?c=one&a=request-one');
+    }
+  }
+});
+
+test('failed notification decisions open Roost without replaying or implying approval', async () => {
+  const f = workerFixture(2, async () => ({ok:false, status:401}));
+  await f.dispatch('notificationclick', {action:'deny', notification:{tag:'r', close() {}, data:{url:'/?c=one&a=r', approval:{conversation:'one', request_id:'r'}}}});
+  assert.equal(f.requests.length, 1);
+  assert.match(f.notifications[0].options.body, /not confirmed/);
+  assert.equal(f.opened.length, 1);
 });

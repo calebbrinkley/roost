@@ -7,6 +7,8 @@ from urllib.parse import quote
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, CookieJar, WSMsgType
 
+from . import approvals
+
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 RPC_TIMEOUT = 40
@@ -81,10 +83,7 @@ class Hermes:
                 raise HermesError(503, "Hermes is unavailable.") from exc
         raise HermesError(502, "Hermes dashboard sign-in expired.")
 
-    async def send_message(self, text: str, stored_id: str | None = None, follow=None) -> str:
-        """Submit a turn; Hermes persists and finishes the turn itself even if Roost hangs up.
-        With `follow`, the socket stays open and `follow(session_id, events)` is called, where `events`
-        yields this turn's event frames (type and payload) until the socket closes."""
+    async def _socket(self):
         await self._login()
         ticket_data = await self.request("POST", "/api/auth/ws-ticket")
         ticket = ticket_data.get("ticket") if isinstance(ticket_data, dict) else None
@@ -96,6 +95,46 @@ class Hermes:
             ws = await self.http.ws_connect(ws_url, timeout=20, max_msg_size=8 * 1024 * 1024)
         except (ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise HermesError(503, "Hermes chat is unavailable.") from exc
+        try:
+            await self._rpc_on_socket(ws, 0, "client.capabilities", {"server_requests": True})
+        except (ClientError, asyncio.TimeoutError, ValueError) as exc:
+            await ws.close()
+            raise HermesError(503, "Hermes approval support is unavailable.") from exc
+        except BaseException:
+            await ws.close()
+            raise
+        return ws
+
+    async def approvals(self, stored_id: str, request_id=None, choice=None):
+        """Read a redacted resume snapshot; resolve only an exact, still-offered request."""
+        ws = await self._socket()
+        try:
+            result = await self._rpc_on_socket(ws, 1, "session.resume", {
+                "session_id": stored_id, "omit_messages": True, "close_on_disconnect": False})
+            pending = approvals.snapshot(result)
+            if request_id is None:
+                return pending
+            item = next((item for item in pending if item["request_id"] == request_id), None)
+            if item is None or choice not in {"once", "deny"} or choice not in item["choices"]:
+                raise HermesError(409, "This request is no longer waiting for that decision. Refresh the conversation.")
+            runtime_id = result.get("session_id")
+            if not isinstance(runtime_id, str) or not runtime_id:
+                raise HermesError(502, "Hermes did not identify the approval session.")
+            resolved = await self._rpc_on_socket(ws, 2, "approval.respond", {
+                "session_id": runtime_id, "request_id": request_id, "choice": choice})
+            if resolved.get("resolved") != 1:
+                raise HermesError(409, "This request expired or was already answered. Refresh the conversation.")
+            return {"resolved": True}
+        except (ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise HermesError(503, "Hermes approvals are unavailable. No decision was confirmed.") from exc
+        finally:
+            await ws.close()
+
+    async def send_message(self, text: str, stored_id: str | None = None, follow=None) -> str:
+        """Submit a turn; Hermes persists and finishes the turn itself even if Roost hangs up.
+        With `follow`, the socket stays open and `follow(session_id, events)` is called, where `events`
+        yields this turn's event frames (type and payload) until the socket closes."""
+        ws = await self._socket()
         try:
             first_method = "session.resume" if stored_id else "session.create"
             first_params = ({"session_id": stored_id, "omit_messages": True,
@@ -141,16 +180,27 @@ class Hermes:
                     return
                 if (event := Hermes._event(frame, runtime_id)) is not None:
                     yield event
+                elif isinstance(frame, dict) and frame.get("method") not in {None, "approval"} and "id" in frame:
+                    await Hermes._unsupported(ws, frame)
         finally:
             await ws.close()
 
     @staticmethod
     def _event(frame, runtime_id: str) -> tuple[str, dict] | None:
+        if isinstance(frame, dict) and frame.get("method") == "approval":
+            params = frame.get("params")
+            if isinstance(params, dict) and params.get("session_id") == runtime_id:
+                return "approval.request", {**params, "server_id": frame.get("id")}
         params = frame.get("params") if isinstance(frame, dict) and frame.get("method") == "event" else None
         if not isinstance(params, dict) or params.get("session_id") != runtime_id or not isinstance(params.get("type"), str):
             return None
         payload = params.get("payload")
         return params["type"], payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    async def _unsupported(ws, frame):
+        await ws.send_json({"jsonrpc": "2.0", "id": frame["id"],
+                            "error": {"code": -32601, "message": "Roost does not support this request."}})
 
     @staticmethod
     async def _rpc_on_socket(ws, request_id: int, method: str, params: dict, events: list | None = None) -> dict:
@@ -168,8 +218,11 @@ class Hermes:
                 if not isinstance(frame, dict):
                     raise HermesError(502, "Hermes returned invalid chat data.")
                 if frame.get("id") != request_id:
-                    if events is not None and frame.get("method") == "event":
-                        events.append(frame)
+                    if frame.get("method") in {"event", "approval"}:
+                        if events is not None:
+                            events.append(frame)
+                    elif frame.get("method") and "id" in frame:
+                        await Hermes._unsupported(ws, frame)
                     continue
                 if "error" in frame:
                     raise HermesError(502, "Hermes rejected the chat request.")

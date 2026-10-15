@@ -37,7 +37,7 @@ function nextWorkingVerb() {
 
 function workingLabel(ellipsis = false) {
   const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
-  label.textContent = `${agent()} is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
+  label.textContent = (state.approvals?.length ? `${agent()} is waiting for your approval` : `${agent()} is ${state.workingVerb || "thinking"}`) + (ellipsis ? "…" : "");
   return label;
 }
 
@@ -54,7 +54,7 @@ function turnInProgress(rows) {
 
 function refreshWorkingLabels() {
   for (const label of document.querySelectorAll(".working-label")) {
-    label.textContent = `${agent()} is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
+    label.textContent = (state.approvals?.length ? `${agent()} is waiting for your approval` : `${agent()} is ${state.workingVerb}`) + (label.classList.contains("ellipsis") ? "…" : "");
   }
 }
 // Line icons in one style (24 px grid, 2 px round strokes, current text colour).
@@ -112,7 +112,8 @@ function signedOut() {
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
-    live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
+    approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
+  renderApprovals();
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
                          timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
@@ -191,7 +192,9 @@ async function signedIn() {
 }
 
 function openLink(search) {
-  const link = new URLSearchParams(search), conversation = link.get("c"), job = link.get("j"), delivery = link.get("d");
+  const link = new URLSearchParams(search); state.approvalFocus = link.get("a");
+  const conversation = link.get("c"), job = link.get("j"), delivery = link.get("d");
+  state.approvalFocusConversation = conversation;
   if (conversation) { setSection("messages"); selectConversation(conversation); }
   else if (job) showJob(job);
   else if (delivery) openDelivery(delivery);
@@ -789,6 +792,82 @@ async function loadMessages(id = state.current) {
     state.messageApplied = serial;
     if (data.live === true) openStream(id);
     renderMessages(Array.isArray(data.messages) ? data.messages : []);
+    loadApprovals(id);
+  }
+}
+
+// Approvals belong to the exact Hermes request. A notification link only opens the card.
+function setApprovals(items) {
+  state.approvalRevision = (state.approvalRevision || 0) + 1;
+  const previous = new Set((state.approvals || []).map(item => item.request_id));
+  state.approvals = items.filter(item => item && typeof item.request_id === "string");
+  if (state.approvals.some(item => !previous.has(item.request_id))) state.approvalNotice = "";
+  state.approvalReady = true;
+  refreshWorkingLabels(); renderApprovals();
+}
+
+async function loadApprovals(id = state.current) {
+  if (!id || state.approvalLoading?.id === id) return;
+  const epoch = state.authEpoch, view = state.viewEpoch, revision = state.approvalRevision;
+  const loading = {id}; state.approvalLoading = loading;
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}/approvals`);
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && revision === state.approvalRevision) {
+      setApprovals(Array.isArray(data.approvals) ? data.approvals : []);
+    }
+  } catch {
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) { state.approvalReady = false; renderApprovals(); }
+  } finally { if (state.approvalLoading === loading) state.approvalLoading = null; }
+}
+
+function renderApprovals() {
+  const panel = $("approvals"), items = state.approvals || [];
+  const signature = JSON.stringify([items, state.approvalBusy, state.approvalReady, state.approvalNotice, state.approvalFocus]);
+  if (panel.dataset.content === signature) return;
+  panel.dataset.content = signature; panel.replaceChildren();
+  for (const item of items) {
+    const card = el("article", "approval-card");
+    card.append(el("strong", "", `${agent()} needs your approval`));
+    if (item.description) card.append(el("p", "approval-summary", item.description));
+    if (item.command) card.append(el("pre", "approval-command", item.command));
+    const buttons = el("div", "approval-actions");
+    for (const [choice, label] of [["once", "Allow once"], ["deny", "Deny"]]) {
+      if (!Array.isArray(item.choices) || !item.choices.includes(choice)) continue;
+      const button = el("button", choice === "once" ? "primary" : "secondary", label);
+      button.type = "button"; button.disabled = Boolean(state.approvalBusy) || !state.approvalReady;
+      button.addEventListener("click", () => decideApproval(item.request_id, choice));
+      buttons.append(button);
+    }
+    card.append(buttons); panel.append(card);
+  }
+  if (items.length && !state.approvalReady) panel.append(el("p", "approval-status", "Reconnecting. Decisions are unavailable until Roost can check this request."));
+  if (state.approvalNotice) panel.append(el("p", "approval-status", state.approvalNotice));
+  else if (state.approvalFocus && state.approvalFocusConversation === state.current && state.approvalReady && !items.some(item => item.request_id === state.approvalFocus)) {
+    panel.append(el("p", "approval-status", "That request is no longer waiting for approval."));
+  }
+  show("approvals", panel.children.length > 0);
+}
+
+async function decideApproval(requestId, choice) {
+  if (state.approvalBusy || !state.approvalReady || !["once", "deny"].includes(choice)) return;
+  const id = state.current, epoch = state.authEpoch, view = state.viewEpoch;
+  state.approvalBusy = requestId; state.approvalNotice = ""; renderApprovals();
+  try {
+    await api(`/conversations/${encodeURIComponent(id)}/approvals`, {
+      method: "POST", body: JSON.stringify({request_id: requestId, choice})});
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
+      state.approvalRevision = (state.approvalRevision || 0) + 1;
+      state.approvals = state.approvals.filter(item => item.request_id !== requestId);
+      state.approvalNotice = choice === "once" ? "Allowed once." : "Denied.";
+    }
+  } catch (error) {
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
+      state.approvalNotice = error.message; state.approvalReady = false;
+    }
+  } finally {
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
+      state.approvalBusy = null; renderApprovals(); loadApprovals(id);
+    }
   }
 }
 
@@ -812,6 +891,7 @@ function openStream(id) {
     if (state.live?.id !== id) return;
     if (typeof data.thoughts === "string") state.live.thoughts += data.thoughts;
     if (typeof data.text === "string") state.live.text += data.text;
+    if (Array.isArray(data.approvals)) setApprovals(data.approvals);
     if (data.done) endStream(id);
     else scheduleLive();
   };
@@ -833,7 +913,8 @@ function closeStream() {
 // Another conversation is opening: nothing live or rendered here belongs to it.
 function leaveLive() {
   closeStream();
-  Object.assign(state, { live: null, liveNodes: null, lastRows: null });
+  Object.assign(state, { approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalLoading: null, live: null, liveNodes: null, lastRows: null });
+  renderApprovals();
 }
 
 function scheduleLive() {

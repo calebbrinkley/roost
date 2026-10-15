@@ -110,6 +110,23 @@ async def checks():
                 break
         assert len(transcript["messages"]) >= 2
         assert "local demo reply" in transcript["messages"][-1]["content"]
+        # A native approval request must survive browser reconnect and resolve once only.
+        for choice in ("once", "deny"):
+            demo = await request(client, "POST", "/api/conversations", 201, {"text": "/approval-demo"})
+            approval_sid = demo["session_id"]
+            approval_path = f"/api/conversations/{approval_sid}/approvals"
+            for _ in range(20):
+                pending = (await request(client, "GET", approval_path))["approvals"]
+                if pending:
+                    break
+                await asyncio.sleep(0.05)
+            assert pending, "The approval must be visible after resuming the conversation."
+            decision = {"request_id": pending[0]["request_id"], "choice": choice}
+            assert (await request(client, "POST", approval_path, body=decision))["resolved"] is True
+            await asyncio.sleep(0.05)
+            await request(client, "POST", approval_path, 409, decision)
+            await request(client, "DELETE", f"/api/conversations/{approval_sid}", body={"confirm": True})
+
         # Instructions ride once with the next message; the export has the whole conversation.
         await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"instructions": "Be brief."})
         await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "And one more"})
@@ -189,7 +206,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, voice, chat turns, streamed replies, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, voice, chat turns, streamed replies, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():
