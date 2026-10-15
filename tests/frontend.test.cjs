@@ -932,7 +932,7 @@ test('every reply has a play button that reads it aloud, and a second tap stops 
   assert.equal(play().className, 'play-reply');
 });
 
-test('hold the mic to record, let go to send the transcript, and its reply is read aloud', async () => {
+test('tap to record, tap to review the transcript, and send for a spoken reply', async () => {
   const {players, recorders, stream, globals} = voiceBrowser();
   const timers = [];
   const f = fixture(undefined, {...globals, setTimeout: fn => { timers.push(fn); return 1; }}); await tick();
@@ -941,28 +941,161 @@ test('hold the mic to record, let go to send the transcript, and its reply is re
       return path === '/audio/transcribe' ? {transcript: 'what is on today'} : {session_id: 'one'}; };
     loadConversations = async () => {}; loadMessages = async () => {};`);
   const mic = f.get('voice-button');
-  await mic.events.pointerdown({preventDefault() {}});
+  await mic.events.click();
   assert.equal(f.get('composer').classList.contains('recording'), true);
   assert.equal(players[0].src, '/api/audio/silence', 'the tap unlocks the player for the reply');
-  f.run('voice.started -= 2000');
-  mic.events.pointerup();
+  assert.equal(recorders[0].state, 'recording', 'releasing the button does not stop recording');
+  mic.events.click();
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(stream.stopped, true);
   assert.equal(f.get('composer').classList.contains('recording'), false);
   const calls = JSON.parse(JSON.stringify(f.run('calls')));
   assert.deepEqual(calls[0], ['/audio/transcribe', '{"data_url":"data:audio/mp4;base64,AAAA","mime_type":"audio/mp4"}']);
-  assert.deepEqual(calls[1], ['/conversations/one/messages', '{"text":"what is on today"}']);
+  assert.equal(calls.length, 1, 'dictation must not send a message');
+  assert.equal(f.get('message').value, 'what is on today');
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(f.run('calls[1][0]'), '/conversations/one/messages');
+  assert.equal(f.run('state.voiceReply.text'), 'what is on today');
   f.context.rows = [{id: 1, role: 'user', content: 'what is on today', timestamp: Date.now() / 1000},
                     {id: 2, role: 'assistant', content: 'Two meetings.', timestamp: Date.now() / 1000}];
   f.run('renderMessages(rows)');
   timers.forEach(fn => fn());
   assert.equal(players[0].src, '/api/conversations/one/speech/2');
   assert.equal(f.run('state.voiceReply'), null);
-  await mic.events.pointerdown({preventDefault() {}});
-  mic.events.pointerup();
-  assert.equal(recorders.length, 2);
-  assert.equal(JSON.parse(JSON.stringify(f.run('calls'))).length, 2, 'a quick tap sends nothing');
 });
+
+
+test('cancelling pending microphone permission releases a late stream without recording', async () => {
+  const {recorders, stream, globals} = voiceBrowser();
+  let allow;
+  globals.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { allow = resolve; });
+  const f = fixture(undefined, globals); await tick();
+  const starting = f.get('voice-button').events.click();
+  assert.equal(f.get('voice-status').classList.contains('hidden'), false);
+  f.get('voice-cancel').events.click();
+  allow(stream); await starting;
+  assert.equal(stream.stopped, true);
+  assert.equal(recorders.length, 0);
+  assert.equal(f.get('voice-status').classList.contains('hidden'), true);
+});
+
+test('recorder construction and startup failures always release the microphone', async () => {
+  for (const stage of ['constructor', 'start']) {
+    const {stream, globals} = voiceBrowser();
+    globals.MediaRecorder = class {
+      constructor() { if (stage === 'constructor') throw new Error('unsupported'); }
+      start() { throw new Error('unavailable'); }
+      addEventListener() {}
+    };
+    const f = fixture(undefined, globals); await tick();
+    await f.get('voice-button').events.click();
+    assert.equal(stream.stopped, true, stage);
+    assert.equal(f.get('composer').classList.contains('recording'), false);
+    assert.equal(f.get('send').disabled, false);
+    assert.match(f.get('notice').textContent, /couldn’t start recording/);
+  }
+});
+
+test('transcription appends to edits made while waiting and does not submit on Enter', async () => {
+  const {globals} = voiceBrowser();
+  const f = fixture(undefined, globals); await tick();
+  f.run(`state.current = 'one'; api = () => new Promise(resolve => { globalThis.transcribed = resolve; });`);
+  await f.get('voice-button').events.click();
+  f.get('voice-button').events.click(); await tick();
+  f.get('message').value = 'A draft typed while waiting';
+  f.get('message').maxLength = 16000;
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(f.get('message').value, 'A draft typed while waiting');
+  f.run(`transcribed({transcript:'The dictated part'});`); await tick();
+  assert.equal(f.get('message').value, 'A draft typed while waiting\nThe dictated part');
+  assert.equal(f.run('state.voiceDraft'), true);
+  f.get('message').value = ''; f.get('message').events.input();
+  assert.equal(f.run('state.voiceDraft'), false, 'clearing the voice draft restores typed reply behavior');
+});
+
+test('cancelled, navigated and signed-out transcriptions cannot change another draft', async () => {
+  for (const action of ['stopRecording(true)', 'newConversation()', 'signedOut()']) {
+    const {globals} = voiceBrowser();
+    const f = fixture(undefined, globals); await tick();
+    f.run(`state.current = 'one'; api = () => new Promise(resolve => { globalThis.transcribed = resolve; });`);
+    await f.get('voice-button').events.click(); f.get('voice-button').events.click(); await tick();
+    f.run(action); f.get('message').value = 'Keep this draft';
+    f.run(`transcribed({transcript:'Old conversation speech'});`); await tick();
+    assert.equal(f.get('message').value, 'Keep this draft', action);
+    assert.equal(f.get('voice-status').classList.contains('hidden'), true, action);
+  }
+});
+
+test('leaving the conversation stops an active microphone immediately', async () => {
+  for (const action of ['newConversation()', 'signedOut()', 'setSection("jobs")', '$("back-to-list").events.click()']) {
+    const {stream, globals} = voiceBrowser();
+    const f = fixture(undefined, globals); await tick();
+    f.run(`state.current = 'one'; globalThis.calls = []; api = async path => { calls.push(path); return []; };`);
+    await f.get('voice-button').events.click();
+    f.run(action); await tick();
+    assert.equal(stream.stopped, true, action);
+    assert.equal(f.run('calls.includes("/audio/transcribe")'), false, action);
+    assert.equal(f.get('composer').classList.contains('recording'), false, action);
+  }
+});
+
+test('empty, failed and oversized transcriptions preserve the draft and restore controls', async () => {
+  for (const response of ['({transcript:""})', 'Promise.reject(new Error("Speech service unavailable"))', '({transcript:"too long"})']) {
+    const {globals} = voiceBrowser();
+    const f = fixture(undefined, globals); await tick();
+    f.run(`api = async () => ${response};`);
+    f.get('message').value = 'Existing draft'; f.get('message').maxLength = 14;
+    await f.get('voice-button').events.click(); f.get('voice-button').events.click();
+    await tick(); await tick();
+    assert.equal(f.get('message').value, 'Existing draft', response);
+    assert.equal(f.get('send').disabled, false, response);
+    assert.equal(f.get('voice-status').classList.contains('hidden'), true, response);
+    assert.notEqual(f.get('notice').textContent, '', response);
+  }
+});
+
+test('a rejected voice-draft send retains spoken reply behavior when retried', async () => {
+  const f = fixture(); await tick();
+  f.get('message').value = 'Dictated draft';
+  f.run(`state.current = 'one'; state.voiceDraft = true; api = async () => { throw new Error('offline'); }; loadMessages = async () => {};`);
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(f.get('message').value, 'Dictated draft');
+  assert.equal(f.run('state.voiceDraft'), true);
+});
+
+
+test('backgrounding the page releases the microphone without sending audio', async () => {
+  const {stream, globals} = voiceBrowser();
+  const f = fixture(undefined, globals); await tick();
+  await f.get('voice-button').events.click();
+  f.run('document.hidden = true; document.events.visibilitychange()');
+  assert.equal(stream.stopped, true);
+  assert.equal(f.get('composer').classList.contains('recording'), false);
+  assert.equal(f.get('voice-status').classList.contains('hidden'), true);
+});
+
+test('late final chunks from a cancelled recording cannot disrupt the next recording', async () => {
+  const {recorders, globals} = voiceBrowser();
+  const streams = [];
+  globals.navigator.mediaDevices.getUserMedia = async () => {
+    const stream = {getTracks: () => [{stop() { stream.stopped = true; }}]};
+    streams.push(stream); return stream;
+  };
+  const f = fixture(undefined, globals); await tick();
+  await f.get('voice-button').events.click();
+  recorders[0].stop = () => { recorders[0].state = 'inactive'; };
+  f.get('voice-button').events.click();
+  assert.equal(streams[0].stopped, true, 'stop releases the mic before the asynchronous final chunk');
+  f.get('voice-cancel').events.click();
+  await f.get('voice-button').events.click();
+  recorders[0].events.dataavailable({data:{size:3,type:'audio/mp4'}});
+  recorders[0].events.stop();
+  assert.equal(recorders[1].state, 'recording');
+  assert.equal(streams[1].stopped, undefined);
+  assert.equal(f.get('composer').classList.contains('recording'), true);
+  f.get('voice-cancel').events.click();
+});
+
 
 test('approval card shows literal commands and resolves only one request', async () => {
   const f = fixture(); await tick();
