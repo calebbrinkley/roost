@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
-                busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
+                sentMessages: [], busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -111,7 +111,7 @@ function signedOut() {
   stopRecording(true); state.voiceDraft = false; state.player?.pause();
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
+    draft: false, pending: null, sentMessages: [], search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
     approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
   renderApprovals();
   show("app", false); show("login", true);
@@ -462,6 +462,7 @@ async function deleteConversation() {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     if (epoch !== state.authEpoch) return;
     if (state.pending?.id === id) state.pending = null;
+    state.sentMessages = state.sentMessages.filter((sent) => sent.id !== id);
     // The server's rows shift down by one, so the next page starts one row earlier. A load
     // started before the deletion could bring the row back or reuse the old offset: drop it.
     if (state.conversations.some((row) => conversationId(row) === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
@@ -710,6 +711,32 @@ document.addEventListener("selectionchange", () => {
   }
 });
 
+// Hermes can acknowledge a busy-session prompt before it becomes a durable transcript row.
+function withSentMessages(rows) {
+  let pending = state.sentMessages;
+  for (const row of rows) {
+    if (row.role !== "user" || typeof row.id !== "number") continue;
+    const candidates = pending.filter((sent) => sent.id === state.current && row.id > sent.after);
+    const saved = messageText(row);
+    let combined = "";
+    for (let index = 0; index < candidates.length; index++) {
+      combined += (index ? "\n\n" : "") + candidates[index].text;
+      if (combined === saved) {
+        // Hermes can merge a queued burst into one user row. Consume exactly that prefix once.
+        const matched = new Set(candidates.slice(0, index + 1));
+        pending = pending.filter((sent) => !matched.has(sent));
+        for (const next of pending) if (next.id === state.current) next.after = Math.max(next.after, row.id);
+        break;
+      }
+      if (!saved.startsWith(combined)) break;
+    }
+  }
+  state.sentMessages = pending;
+  return [...rows, ...pending.filter((sent) => sent.id === state.current).map((sent) => ({
+    role: "user", content: sent.text, timestamp: sent.since / 1000, id: sent.key, local_sent: true,
+  }))];
+}
+
 function renderMessages(rows) {
   const transcript = $("transcript");
   state.lastRows = rows;
@@ -727,15 +754,22 @@ function renderMessages(rows) {
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   state.liveNodes = null;
-  let all = records(rows), live = state.live?.id === state.current ? state.live : null;
+  let all = withSentMessages(records(rows)), live = state.live?.id === state.current ? state.live : null;
+  let liveAfter = null;
   if (live) {
     // The turn being written shows live: the message it answers, then its thoughts and text so far,
     // in place of whatever steps Hermes has saved, until Hermes has saved the finished turn.
     let own = -1;
     for (let i = all.length - 1; i >= 0; i--) if (all[i].role === "user" && messageText(all[i]) === live.user) { own = i; break; }
-    const saved = own >= 0 && !turnInProgress(all) && all.slice(own + 1).some((row) => row.role === "assistant" && messageText(row));
+    const nextUser = all.findIndex((row, index) => index > own && row.role === "user");
+    const turnRows = all.slice(own + 1, nextUser >= 0 ? nextUser : undefined);
+    const saved = own >= 0 && !turnInProgress(turnRows) && turnRows.some((row) => row.role === "assistant" && messageText(row));
     if (live.done && (saved || Date.now() - live.ended > 15000)) { state.live = live = null; }
-    else all = own >= 0 ? all.slice(0, own + 1) : [...all, { role: "user", content: live.user }];
+    else {
+      liveAfter = own >= 0 ? all[own] : { role: "user", content: live.user };
+      // Replace only this turn's saved steps. Later questions and replies stay in order.
+      all = own >= 0 ? [...all.slice(0, own + 1), ...(nextUser >= 0 ? all.slice(nextUser) : [])] : [...all, liveAfter];
+    }
   }
   const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
@@ -757,7 +791,7 @@ function renderMessages(rows) {
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
-      const status = visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
+      const status = row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
       transcript.append(el("div", "under right", shown ? `${status} · ${time}` : status));
     } else {
       const under = el("div", "under reply-under");
@@ -778,9 +812,9 @@ function renderMessages(rows) {
         renderMessages(rows);
       });
     }
+    if (row === liveAfter) transcript.append(...liveNodes(live));
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
-  if (live) transcript.append(...liveNodes(live));
   const working = turnInProgress(records(rows));
   if (state.pending?.id === state.current) {
     // Until Hermes saves the message just sent, the transcript cannot say whether its turn is over.
@@ -788,7 +822,8 @@ function renderMessages(rows) {
     for (let i = visible.length - 1; i >= 0; i--) {
       if (visible[i].role === "user" && messageText(visible[i]) === state.pending.text) { ownMessage = i; break; }
     }
-    if ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000) state.pending = null;
+    if (!state.sentMessages.some((sent) => sent.id === state.current) &&
+        ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000)) state.pending = null;
   }
   readVoiceReply(visible, working, live);
   if (live ? !live.done : working || state.pending?.id === state.current) {
@@ -1014,6 +1049,7 @@ async function submitMessage(event) {
 async function sendText(text, { voice = false } = {}) {
   if (state.busy) return;
   const epoch = state.authEpoch, view = state.viewEpoch, oldId = state.current;
+  const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const sameView = () => epoch === state.authEpoch && view === state.viewEpoch && state.current === oldId;
   let accepted = false;
   state.voiceDraft = false;
@@ -1030,9 +1066,14 @@ async function sendText(text, { voice = false } = {}) {
     accepted = true;
     if (sameView()) { state.current = result.session_id; state.draft = false; }
     state.pending = { id: result.session_id, text, since: Date.now() };
+    state.sentMessages.push({ ...state.pending, after, key: `sent-${state.sentKey = (state.sentKey || 0) + 1}` });
     if (voice) state.voiceReply = { id: result.session_id, text, since: Date.now() };
-    if (state.current === result.session_id) openStream(result.session_id);
+    if (state.current === result.session_id) {
+      closeStream(); state.live = null; state.liveNodes = null;
+      openStream(result.session_id);
+    }
     nextWorkingVerb();
+    if (state.current === result.session_id) renderMessages(state.lastRows || []);
     // A failed refresh must never turn an accepted message back into an unsent draft.
     const updates = await Promise.allSettled([loadConversations(), loadMessages()]);
     if (epoch === state.authEpoch && updates.some((update) => update.status === "rejected")) {
@@ -1942,7 +1983,7 @@ function deleteEverything(kind, input) {
     const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
     if (epoch !== state.authEpoch) return;
     if (kind === "conversations") {
-      Object.assign(state, { conversations: [], current: null, pending: null, conversationOffset: 0, conversationsMore: false });
+      Object.assign(state, { conversations: [], current: null, pending: null, sentMessages: [], conversationOffset: 0, conversationsMore: false });
       state.viewEpoch++; renderConversations(); renderWelcome();
     } else {
       Object.assign(state, { jobs: [], selectedJob: null, jobPatches: Object.create(null), jobRuns: Object.create(null), jobRunsError: Object.create(null) });

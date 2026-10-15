@@ -856,7 +856,14 @@ async def stream(request: web.Request):
 
 
 def following(app: web.Application, text: str):
-    return lambda sid, events: live.follow(app["live"], sid, text, events)
+    def follow(sid, events):
+        if events is None:
+            # Hermes keeps processing; only the ambiguous Roost view/socket is retired.
+            if turn := app["live"].pop(sid, None):
+                turn.task.cancel()
+        else:
+            live.follow(app["live"], sid, text, events)
+    return follow
 
 
 async def create_conversation(request: web.Request):

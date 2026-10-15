@@ -132,6 +132,7 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         self.chunked = False
         self.status = 200
         self.content_type = "application/json"
+        self.submit_status = "accepted"
         async def login(request):
             return web.json_response({"ok": True})
         async def response(request):
@@ -155,11 +156,11 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
                 return {"jsonrpc": "2.0", "method": "event", "params": {"type": kind, "session_id": sid, "payload": payload}}
             async for message in ws:
                 frame = message.json()
-                if frame["method"] == "session.create":
+                if frame["method"] in {"session.create", "session.resume"}:
                     await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {"session_id": "runtime", "stored_session_id": "chat:one"}})
                 else:
                     await ws.send_json(event("reasoning.delta", text="Early "))
-                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {}})
+                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {"status": self.submit_status} if frame["method"] == "prompt.submit" else {}})
                     for item in (event("message.delta", "elsewhere", text="not ours"), event("reasoning.delta", text="thought"),
                                  event("message.delta", text="Hi"), event("message.complete", text="Hi")):
                         await ws.send_json(item)
@@ -233,6 +234,15 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         socket = SimpleNamespace(send_json=AsyncMock(), receive=receive)
         with patch("roost.hermes.RPC_TIMEOUT", 0.02), self.assertRaises(asyncio.TimeoutError):
             await Hermes._rpc_on_socket(socket, 1, "session.create", {})
+
+
+    async def test_busy_acknowledgements_do_not_claim_a_new_turn_stream(self):
+        for status in ("queued", "steered", "redirected"):
+            self.submit_status = status
+            followed = []
+            sid = await self.hermes.send_message("follow up", "chat:one", follow=lambda sid, events: followed.append((sid, events)))
+            self.assertEqual(sid, "chat:one")
+            self.assertEqual(followed, [("chat:one", None)], status)
 
 
 class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -328,6 +338,19 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn.text, "12345")
         await second
         self.assertEqual(registry, {})
+
+    async def test_busy_followup_retires_the_ambiguous_live_view_without_cancelling_hermes(self):
+        async def waiting():
+            yield ("message.delta", {"text": "Still working"})
+            await asyncio.Event().wait()
+        registry = {}
+        task = live.follow(registry, "chat:one", "first", waiting())
+        turn = registry["chat:one"]
+        await asyncio.sleep(0)
+        server.following({"live": registry}, "second")("chat:one", None)
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 0.5)
+        self.assertNotIn("chat:one", registry)
+        self.assertTrue(turn.done)
 
     async def test_a_broken_stream_ends_the_turn(self):
         async def broken():

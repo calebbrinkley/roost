@@ -209,6 +209,28 @@ def mock_hermes():
         jobs.remove(job)
         return web.json_response({"deleted": True})
 
+    # The real gateway can acknowledge a busy prompt as queued before persisting its user row.
+    reply_counts, reply_locks, queued_inputs = {}, {}, {}
+
+    async def queued_reply(write, runtime_id, sid, envelope):
+        try:
+            async with reply_locks.setdefault(sid, asyncio.Lock()):
+                if sid not in messages:
+                    return
+                if queued_inputs.get(sid) is envelope:
+                    del queued_inputs[sid]
+                prompt = envelope["text"]
+                messages[sid].append({"role": "user", "content": prompt, "timestamp": time.time()})
+                session = next(s for s in sessions if s["id"] == sid)
+                session.update(title=prompt[:42], preview=prompt[:80], last_active_at=time.time())
+                await write(runtime_id, sid, prompt)
+        finally:
+            reply_counts[sid] -= 1
+            if not reply_counts[sid]:
+                del reply_counts[sid]
+                reply_locks.pop(sid, None)
+                queued_inputs.pop(sid, None)
+
     async def ws(request):
         ticket_value = request.query.get("ticket")
         if ticket_value not in tickets:
@@ -258,11 +280,7 @@ def mock_hermes():
                     await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                     continue
                 text = params.get("text", "")
-                messages[stored_id].append({"role": "user", "content": text, "timestamp": time.time()})
-                session = next(s for s in sessions if s["id"] == stored_id)
-                session["title"] = text[:42]
-                session["preview"] = text[:80]
-                session["last_active_at"] = time.time()
+                busy = reply_counts.get(stored_id, 0) > 0
 
                 async def reply(runtime_id, sid, prompt):
                     # Streams like Hermes: thoughts, then the reply, a few words at a time, then the saved row.
@@ -302,8 +320,15 @@ def mock_hermes():
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
                     await emit("message.complete", {"text": answer, "status": "complete"})
 
-                asyncio.create_task(reply(params.get("session_id"), stored_id, text))
-                result = {"status": "accepted"}
+                if busy and stored_id in queued_inputs:
+                    queued_inputs[stored_id]["text"] += "\n\n" + text
+                else:
+                    envelope = {"text": text}
+                    if busy:
+                        queued_inputs[stored_id] = envelope
+                    reply_counts[stored_id] = reply_counts.get(stored_id, 0) + 1
+                    asyncio.create_task(queued_reply(reply, params.get("session_id"), stored_id, envelope))
+                result = {"status": "queued" if busy else "accepted"}
             else:
                 await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                 continue

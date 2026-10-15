@@ -133,7 +133,8 @@ class Hermes:
     async def send_message(self, text: str, stored_id: str | None = None, follow=None) -> str:
         """Submit a turn; Hermes persists and finishes the turn itself even if Roost hangs up.
         With `follow`, the socket stays open and `follow(session_id, events)` is called, where `events`
-        yields this turn's event frames (type and payload) until the socket closes."""
+        yields this turn's event frames (type and payload) until the socket closes.
+        Busy-session acknowledgements call follow(session_id, None): polling owns the overlapping turns."""
         ws = await self._socket()
         try:
             first_method = "session.resume" if stored_id else "session.create"
@@ -147,7 +148,7 @@ class Hermes:
                 raise HermesError(502, "Hermes did not open the conversation.")
             # The turn may start streaming before prompt.submit answers; keep those frames.
             early = []
-            await self._rpc_on_socket(ws, 2, "prompt.submit", {"session_id": runtime_id, "text": text}, early)
+            submitted = await self._rpc_on_socket(ws, 2, "prompt.submit", {"session_id": runtime_id, "text": text}, early)
             session_id = first.get("stored_session_id") or stored_id or runtime_id
             if not isinstance(session_id, str) or not session_id:
                 raise HermesError(502, "Hermes returned an invalid conversation identifier.")
@@ -157,7 +158,12 @@ class Hermes:
         except BaseException:
             await ws.close()
             raise
-        if follow is None:
+        if submitted.get("status") in {"queued", "steered", "redirected"}:
+            # This socket can still receive the OLD turn's completion. Do not label it as the follow-up.
+            await ws.close()
+            if follow is not None:
+                follow(session_id, None)
+        elif follow is None:
             await ws.close()
         else:
             follow(session_id, self._turn_events(ws, runtime_id, early))
