@@ -1180,3 +1180,21 @@ test('failed notification decisions open Roost without replaying or implying app
   assert.match(f.notifications[0].options.body, /not confirmed/);
   assert.equal(f.opened.length, 1);
 });
+
+test('polling and live updates preserve a transcript selection until it is cleared', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.rows = [{role:'assistant', content:'Copy this reply.'}]; renderMessages(rows);
+    globalThis.selected = true;
+    window.getSelection = () => ({isCollapsed: !selected, rangeCount:1, getRangeAt:() => ({intersectsNode:node => node === $('transcript')})});`);
+  const nodes = f.get('transcript').children;
+  f.run(`renderMessages([{role:'assistant', content:'Copy this reply. More text.'}])`);
+  assert.equal(f.get('transcript').children, nodes, 'polling must not replace selected nodes');
+  f.run(`selected = false; document.events.selectionchange()`);
+  assert.match(text(f.get('transcript')), /More text/);
+  f.run(`state.live = {id:'one', user:'Question', started:1, thoughts:'', text:'Streaming', done:false}; renderMessages(rows); selected = true;`);
+  const liveBody = f.run('state.liveNodes.body');
+  f.run(`state.live.text += ' continues'; renderLive()`);
+  assert.equal(text(liveBody), 'Streaming');
+  f.run(`selected = false; document.events.selectionchange()`);
+  assert.match(text(f.get('transcript')), /Streaming continues/);
+});

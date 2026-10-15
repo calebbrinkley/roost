@@ -112,7 +112,7 @@ function signedOut() {
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
     draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
-    approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
+    approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
   renderApprovals();
   show("app", false); show("login", true);
   Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
@@ -686,8 +686,27 @@ function thoughtsBlock(texts, key) {
   return details;
 }
 
+function selectingTranscript() {
+  const selection = window.getSelection?.();
+  return Boolean(selection && !selection.isCollapsed && selection.rangeCount &&
+    selection.getRangeAt(0).intersectsNode($("transcript")));
+}
+
+// Polling and streaming keep collecting content while the browser owns a text selection.
+document.addEventListener("selectionchange", () => {
+  if (state.selectionDeferred && !selectingTranscript() && state.current && state.lastRows) {
+    renderMessages(state.lastRows);
+  }
+});
+
 function renderMessages(rows) {
   const transcript = $("transcript");
+  state.lastRows = rows;
+  if (state.renderedConversation === state.current && selectingTranscript()) {
+    state.selectionDeferred = true;
+    return;
+  }
+  state.selectionDeferred = false;
   // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
   const fresh = state.renderedConversation !== state.current;
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
@@ -696,7 +715,7 @@ function renderMessages(rows) {
   show("chat-settings", Boolean(state.current));
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
-  state.lastRows = rows; state.liveNodes = null;
+  state.liveNodes = null;
   let all = records(rows), live = state.live?.id === state.current ? state.live : null;
   if (live) {
     // The turn being written shows live: the message it answers, then its thoughts and text so far,
@@ -916,7 +935,7 @@ function closeStream() {
 function leaveLive() {
   stopRecording(true); state.voiceDraft = false;
   closeStream();
-  Object.assign(state, { approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalLoading: null, live: null, liveNodes: null, lastRows: null });
+  Object.assign(state, { approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null });
   renderApprovals();
 }
 
@@ -951,6 +970,7 @@ function fillLive(live) {
 function renderLive() {
   const live = state.live;
   if (!live || live.id !== state.current || !state.lastRows) return;
+  if (selectingTranscript()) { state.selectionDeferred = true; return; }
   if (!state.liveNodes) return renderMessages(state.lastRows);
   const transcript = $("transcript");
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
