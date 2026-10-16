@@ -13,13 +13,14 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from roost import deliveries, server
 from roost.auth import make_password_hash
+from hermes_fake import fake_hermes
 
 REPORT = ("Cronjob Response: Morning brief\n(job_id: job_7)\n-------------\n\nThree things today.\n\n"
           "To stop or manage this job, send me a new message (e.g. \"stop reminder Morning brief\").")
@@ -67,7 +68,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             "ROOST_HERMES_PASSWORD_FILE": str(self.state / "upstream-password"),
         }):
             self.app = server.create_app()
-        self.app["hermes"] = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), request=AsyncMock(return_value={}))
+        self.app["hermes"] = fake_hermes()
         self.app["hermes_agent_name"] = ("Kestrel", 10 ** 12)
         self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
         await self.client.start_server()
@@ -130,12 +131,12 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post(server.USAGE_PATH, headers=auth, json=body)).status, 200)
         # A retried delivery replaces the same durable identity rather than double-counting it.
         self.assertEqual((await self.client.post(server.USAGE_PATH, headers=auth, json=body)).status, 200)
-        self.app["hermes"].request.return_value = {"session_id": "one", "messages": [
+        self.app["hermes"].messages.return_value = {"session_id": "one", "messages": [
             {"id": 12, "role": "assistant", "content": "Reply"}, {"id": 13, "role": "user", "content": "Question"}]}
         result = await (await self.client.get("/api/conversations/one", cookies=cookies)).json()
         self.assertEqual(result["messages"][0]["roost_usage"], {key: body[key] for key in ("input_tokens", "output_tokens", "model_seconds")})
         self.assertNotIn("roost_usage", result["messages"][1])
-        self.app["hermes"].request.return_value = {"session_id": "two", "messages": [{"id": 12, "role": "assistant", "content": "Other"}]}
+        self.app["hermes"].messages.return_value = {"session_id": "two", "messages": [{"id": 12, "role": "assistant", "content": "Other"}]}
         result = await (await self.client.get("/api/conversations/two", cookies=cookies)).json()
         self.assertNotIn("roost_usage", result["messages"][0])
         self.assertEqual(self.sent, [], "measurement uploads do not create notifications")

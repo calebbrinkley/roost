@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from roost import approvals, live, server
 from roost.auth import make_password_hash
 from roost.hermes import Hermes, HermesError
+from hermes_fake import fake_hermes
 
 
 PAYLOAD = {"request_id": "request-one", "command": "printf 'example note' > /workspace/note.md",
@@ -65,7 +66,7 @@ class ApprovalProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.hermes = Hermes(str(self.upstream.make_url("/")), "demo", Path("unused"))
         await self.hermes.start()
         self.hermes._login = AsyncMock()
-        self.hermes.request = AsyncMock(return_value={"ticket": "example-ticket"})
+        self.hermes._request = AsyncMock(return_value={"ticket": "example-ticket"})
 
     async def asyncTearDown(self):
         await self.hermes.close()
@@ -141,8 +142,7 @@ class ApprovalHTTPTests(unittest.IsolatedAsyncioTestCase):
                                     "ROOST_HERMES_URL": "http://127.0.0.1:1", "ROOST_HERMES_USERNAME": "demo",
                                     "ROOST_HERMES_PASSWORD_FILE": str(state / "unused")}):
             self.app = server.create_app()
-        self.hermes = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), request=AsyncMock(return_value=[]),
-                                     approvals=AsyncMock(return_value=[]))
+        self.hermes = fake_hermes()
         self.app["hermes"] = self.hermes
         self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
         await self.client.start_server()
