@@ -158,7 +158,7 @@ test('ambiguous or invalid cron expressions are not described as a different sch
   for (const schedule of ['99 25 * * *','0 8 0 * *','0 8 1 * 0']) {
     f.context.schedule = schedule; assert.equal(f.run('scheduleLabel(schedule)'),schedule);
   }
-  assert.equal(f.run(`scheduleLabel('0 8 * * 1-5')`),'Weekdays at 08:00');
+  assert.equal(f.run(`scheduleLabel('0 8 * * 1-5')`),'Weekdays at 8:00 AM');
 });
 
 test('refreshing loaded pages after insertion leaves no gap and loading more advances correctly', async () => {
@@ -451,7 +451,7 @@ test('reply metrics distinguish unavailable and zero values without guessing fro
   assert.equal(f.run('replyUsage({roost_usage:badUsage})'), '— in / — out · — TPS');
 });
 
-test('the gear opens Settings and the section tabs stay for Messages and Jobs', async () => {
+test('the Settings tab opens Settings beside Messages and Jobs', async () => {
   const f = settingsFixture(); await tick();
   f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
   f.get('nav-settings').events.click(); await tick();
