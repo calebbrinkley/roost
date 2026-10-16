@@ -93,7 +93,7 @@ test('an IME confirmation Enter does not submit a message', async () => {
 test('job history refreshes even when cached', async () => {
   const f = fixture(); await tick();
   f.run(`state.selectedJob = 'one'; state.jobRuns.one = []; globalThis.historyLoads = 0;
-    api = async () => [{id:'one'}]; renderJobs = () => {}; loadJobRuns = async () => { historyLoads++; };`);
+    api = async () => ({jobs: [{id:'one'}]}); renderJobs = () => {}; loadJobRuns = async () => { historyLoads++; };`);
   await f.run('loadJobs()');
   assert.equal(f.run('historyLoads'), 1);
 });
@@ -170,14 +170,14 @@ test('refreshing loaded pages after insertion leaves no gap and loading more adv
       return {sessions:['new','a','b','c','d'].slice(offset,offset+2).map(id => ({id})), total:5}; };
     renderConversations = () => {};`);
   await f.run('loadConversations()');
-  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')),['new','a','b','c']);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(row => row.id)')),['new','a','b','c']);
   await f.run('loadConversations(true)');
-  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')),['new','a','b','c','d']);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(row => row.id)')),['new','a','b','c','d']);
 });
 
 test('saving a Job re-enables its Run now and Edit controls immediately', async () => {
   const f = fixture(); await tick();
-  f.run(`api = async path => path === '/jobs' ? [{id:'one'}] : {id:'one',runs:[]};`);
+  f.run(`api = async path => path === '/jobs' ? {jobs:[{id:'one'}]} : {id:'one',runs:[]};`);
   await f.run('saveJob({preventDefault() {}})');
   assert.equal(f.get('run-selected-job').disabled,false);
   assert.equal(f.get('edit-selected-job').disabled,false);
@@ -201,7 +201,7 @@ test('malformed transcript and Job rows do not crash the remaining valid content
   f.run(`state.current = 'one'; renderMessages([null,{role:'user',content:'valid message'},{role:'assistant',content:{text:7}}]);`);
   const text = n => (n.textContent || '') + (n.children?.map(text).join('') || '');
   assert.match(text(f.get('transcript')),/valid message/);
-  f.run(`api = async path => path === '/jobs' ? [null,{id:'one',name:'valid job'}] : {runs:[null,{preview:'valid run'}]};`);
+  f.run(`api = async path => path === '/jobs' ? {jobs:[null,{id:'one',name:'valid job'}]} : {runs:[null,{preview:'valid run'}]};`);
   await f.run('loadJobs()');
   assert.match(text(f.get('sidebar-jobs-list')),/valid job/);
   assert.match(text(f.get('job-detail')),/valid run/);
@@ -274,7 +274,7 @@ test('Load more after deleting a loaded conversation skips nothing', async () =>
   f.run(`state.sheetItem = state.conversations[0];`);
   await f.run('deleteConversation()');
   await f.run('loadConversations(true)');
-  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['b','c','d']);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(row => row.id)')), ['b','c','d']);
   assert.equal(f.run('state.conversationsMore'), false);
 });
 
@@ -286,7 +286,7 @@ test('a conversation refresh started before a deletion cannot bring the row back
   const refresh = f.run('loadConversations()');
   f.run(`state.sheetItem = {id:'a'};`); await f.run('deleteConversation()');
   f.run(`pending[0]({sessions:[{id:'a'},{id:'b'}], total:4});`); await refresh;
-  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['b']);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(row => row.id)')), ['b']);
   assert.equal(f.run('state.conversationOffset'), 1);
 });
 
@@ -294,7 +294,7 @@ test('a created Job appears and stays even when the next list read does not have
   const f = fixture(); await tick();
   f.run(`api = async (path, options = {}) => {
       if (options.method === 'POST') return {id:'new', name:'Fresh', enabled:true};
-      if (path === '/jobs') return [];
+      if (path === '/jobs') return {jobs: []};
       return {runs:[]};
     };`);
   await f.run('saveJob({preventDefault() {}})');
@@ -309,7 +309,7 @@ test('pausing a Job flips its switch from the saved job, not a stale list', asyn
   f.run(`state.jobs = [{id:'one', enabled:true}]; state.selectedJob = 'one';
     api = async (path, options = {}) => {
       if (path.endsWith('/pause')) return {id:'one', enabled:false};
-      if (path === '/jobs') return [{id:'one', enabled:true}];
+      if (path === '/jobs') return {jobs: [{id:'one', enabled:true}]};
       return {runs:[]};
     };`);
   await f.run(`jobAction('one','pause')`);
@@ -516,7 +516,7 @@ test('older conversations load near the end of the list, with no button', async 
   assert.deepEqual(Array.from(f.run('offsets')), []);
   list.scrollTop = 1900; list.events.scroll(); await tick(); await tick();
   assert.deepEqual(Array.from(f.run('offsets')), [100]);
-  assert.deepEqual(Array.from(f.run('state.conversations.map(conversationId)')), ['a','b']);
+  assert.deepEqual(Array.from(f.run('state.conversations.map(row => row.id)')), ['a','b']);
   assert.equal(f.run('state.conversationsMore'), false);
   assert.equal(f.run('state.loadingMore'), false);
 });
@@ -920,7 +920,7 @@ test('the gear opens this conversation\'s menu: instructions load and save, and 
 test('a tapped notification opens its job, or the message the agent sent', async () => {
   const f = fixture(); await tick();
   f.run(`globalThis.calls = []; api = async path => { calls.push(path);
-    return path === '/jobs' ? [{id: 'job_7', name: 'Morning brief'}] : {id: 'd1', title: '', text: 'Dinner is at **7**.', created: 1760000000}; };
+    return path === '/jobs' ? {jobs: [{id: 'job_7', name: 'Morning brief'}]} : {id: 'd1', title: '', text: 'Dinner is at **7**.', created: 1760000000}; };
     loadJobRuns = async () => {};`);
   await f.run(`openLink('?j=job_7')`); await tick();
   assert.equal(f.run('state.section'), 'jobs');
