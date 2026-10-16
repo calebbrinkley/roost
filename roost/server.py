@@ -19,7 +19,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__, live
+from . import __version__, live, turns
 
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
@@ -475,31 +475,6 @@ async def about(request: web.Request):
     })
 
 
-def message_text(row: dict) -> str:
-    value = row.get("display_content") or row.get("content")
-    if isinstance(value, list):
-        value = " ".join(part if isinstance(part, str) else str((part or {}).get("text") or "") for part in value)
-    return value if isinstance(value, str) else ""
-
-
-def finished_reply(rows: list, since: float) -> str | None:
-    """The reply text once the turn has ended: the transcript ends with an assistant message
-    written after `since` that has text and no tool calls. None while the agent is still working.
-    Hermes returns at most the newest 500 rows, so a row count can't say what is new; Hermes and
-    Roost share the host's clock, so the reply's timestamp can."""
-    if not rows or not isinstance(rows[-1], dict):
-        return None
-    last = rows[-1]
-    text = message_text(last).strip()
-    if last.get("role") != "assistant" or not text or last.get("tool_calls"):
-        return None
-    try:
-        written = float(last.get("timestamp"))
-    except (TypeError, ValueError):
-        return None
-    return text if written >= since else None
-
-
 def preview(text: str, limit: int = 160) -> str:
     flat = " ".join(text.replace("```", " ").split())
     return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
@@ -539,8 +514,11 @@ async def check_replies(app: web.Application) -> None:
             rows = (await app["hermes"].messages(sid))["messages"]
         except HermesError:
             continue
-        reply = finished_reply(rows, watch["since"])
+        reply = turns.finished_reply(rows, watch["since"])
         if reply is None:
+            # A turn that ended without a reply (an error, or quiet too long) has nothing to notify.
+            if not turns.working(rows, turn=turn, since=watch["since"]):
+                app["watches"].pop(sid, None)
             continue
         app["watches"].pop(sid, None)
         if not looking_at(app, sid):
@@ -683,7 +661,7 @@ async def transcribe(request: web.Request):
 async def synthesize(app: web.Application, sid: str, mid: str) -> tuple[str, bytes]:
     rows = (await app["hermes"].messages(sid))["messages"]
     row = next((row for row in rows if isinstance(row, dict) and str(row.get("id")) == mid), None)
-    text = speakable(message_text(row)) if row and row.get("role") == "assistant" else ""
+    text = speakable(turns.message_text(row)) if row and row.get("role") == "assistant" else ""
     if not text:
         raise web.HTTPNotFound(text="There is nothing to read aloud there.")
     header, _, encoded = (await app["hermes"].speak(text)).partition(",")
@@ -779,14 +757,24 @@ async def conversations(request: web.Request):
     page = request.query.get("offset", "0")
     if not re.fullmatch(r"[0-9]{1,6}", page) or int(page) > 100000:
         raise bad("Invalid page offset.")
-    return web.json_response(await request.app["hermes"].sessions(int(page)))
+    page = await request.app["hermes"].sessions(int(page))
+    # Only conversations Roost is following or waiting on: the list never reads transcripts.
+    for item in page["sessions"]:
+        turn = request.app["live"].get(item["id"])
+        item["working"] = item["id"] in request.app["watches"] or (turn is not None and not turn.done)
+    return web.json_response(page)
 
 
 async def conversation(request: web.Request):
     sid = item_id(request, "sid")
     result = await request.app["hermes"].messages(sid)
+    turn, watch = request.app["live"].get(sid), request.app["watches"].get(sid)
     # Says a reply is being written that /stream can show before Hermes saves it.
-    result["live"] = sid in request.app["live"]
+    result["live"] = turn is not None
+    since = watch["since"] if watch else turn.started if turn else None
+    result["working"] = turns.working(result["messages"], turn=turn, since=since)
+    # Where the turn Roost sent begins: its rows are the ones with a higher id.
+    result["after"] = turns.after(result["messages"], since) if since is not None else None
     request.app["reply_usage"].attach(result.get("session_id") or sid, result["messages"])
     return web.json_response(result)
 
