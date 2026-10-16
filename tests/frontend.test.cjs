@@ -158,7 +158,7 @@ test('ambiguous or invalid cron expressions are not described as a different sch
   for (const schedule of ['99 25 * * *','0 8 0 * *','0 8 1 * 0']) {
     f.context.schedule = schedule; assert.equal(f.run('scheduleLabel(schedule)'),schedule);
   }
-  assert.equal(f.run(`scheduleLabel('0 8 * * 1-5')`),'Weekdays at 08:00');
+  assert.equal(f.run(`scheduleLabel('0 8 * * 1-5')`),'Weekdays at 8:00 AM');
 });
 
 test('refreshing loaded pages after insertion leaves no gap and loading more advances correctly', async () => {

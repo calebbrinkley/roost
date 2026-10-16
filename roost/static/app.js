@@ -1244,7 +1244,7 @@ function scheduleLabel(schedule) {
   if (!match || Number(match[1]) > 59 || Number(match[2]) > 23 ||
       (match[3] !== "*" && (Number(match[3]) < 1 || Number(match[3]) > 31)) ||
       (match[3] !== "*" && match[4] !== "*")) return schedule;
-  const at = match[2].padStart(2, "0") + ":" + match[1].padStart(2, "0");
+  const hour = Number(match[2]), at = (hour % 12 || 12) + ":" + match[1].padStart(2, "0") + (hour < 12 ? " AM" : " PM");
   if (match[3] !== "*") {
     const day = Number(match[3]);
     const suffix = day % 100 >= 11 && day % 100 <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[day % 10] || "th");
@@ -1258,7 +1258,7 @@ function scheduleLabel(schedule) {
 function updateSchedulePreview() {
   const schedule = $("job-schedule").value.trim();
   const label = scheduleLabel(schedule);
-  $("job-schedule-preview").textContent = !schedule ? "Example: 0 8 * * * runs daily at 8:00." :
+  $("job-schedule-preview").textContent = !schedule ? "Example: 0 8 * * * runs daily at 8:00 AM." :
     label === schedule ? "This schedule will be sent to Hermes as entered." : "Runs " + label.toLowerCase() + ".";
 }
 
@@ -1326,7 +1326,9 @@ function renderJobDetail() {
   const status = jobStatus(job);
   const summary = el("section", "job-detail-section job-summary");
   const top = el("div", "job-detail-top");
-  top.append(el("span", "pill " + status.kind, status.label));
+  const stateTag = el("span", "job-state");
+  stateTag.append(el("span", "pill " + status.kind, status.label));
+  top.append(stateTag);
   const paused = jobPaused(job);
   const toggle = el("button", "job-toggle" + (paused ? " off" : ""));
   toggle.disabled = state.jobBusy;
@@ -1335,13 +1337,23 @@ function renderJobDetail() {
   toggle.setAttribute("aria-checked", String(!paused));
   toggle.setAttribute("aria-label", (paused ? "Resume " : "Pause ") + (jobValue(job, "name") || "job"));
   toggle.addEventListener("click", () => jobAction(job.id || job.job_id, paused ? "resume" : "pause"));
-  top.append(toggle);
-  summary.append(top, el("h2", "", "Last report"));
+  const enabled = el("label", "job-enabled");
+  enabled.append(el("span", "", paused ? "Paused" : "Enabled"), toggle);
+  top.append(enabled);
+  summary.append(top);
   // Hermes keeps no report on the job itself; its newest run's preview is the last report.
   const latestRun = state.jobRuns[job.id || job.job_id]?.[0];
-  summary.append(el("div", "job-report", job.last_run_preview || job.last_output || job.last_report || latestRun?.preview ||
-                    `No report yet. ${agent()}’s next run will appear here.`));
+  const facts = [["Last run", timeLabel(job.last_run_at || latestRun?.started_at || latestRun?.created_at || latestRun?.timestamp) || "Not yet"],
+                 ["Delivery", jobValue(job, "deliver") === "local" ? "Saved in Hermes" : jobValue(job, "deliver") || "Saved in Hermes"]];
+  const stats = el("dl", "stats");
+  for (const [term, value] of facts) { const item = el("div"); item.append(el("dt", "", term), el("dd", "", value)); stats.append(item); }
+  summary.append(stats);
   detail.append(summary);
+  const report = el("section", "job-detail-section");
+  report.append(el("h2", "", "Last report"),
+                el("div", "job-report", job.last_run_preview || job.last_output || job.last_report || latestRun?.preview ||
+                   `No report yet. ${agent()}’s next run will appear here.`));
+  detail.append(report);
   const instructions = el("section", "job-detail-section");
   instructions.append(el("h2", "", `What ${agent()} will do`), el("p", "job-prompt", jobValue(job, "prompt") || "No instructions provided."));
   detail.append(instructions);
@@ -1360,13 +1372,14 @@ function renderJobDetail() {
   else for (const run of runs) {
     const row = el("article", "run-row");
     const heading = el("div", "run-heading");
-    heading.append(el("strong", "", run.title || run.status || run.state || "Run"),
-                   el("span", "", timeLabel(run.started_at || run.created_at || run.timestamp)));
+    const title = el("span", "run-title");
+    title.append(el("strong", "", run.title || run.status || run.state || "Run"));
+    heading.append(title, el("span", "", timeLabel(run.started_at || run.created_at || run.timestamp)));
     row.append(heading);
     const report = run.output || run.result || run.summary || run.report || run.preview || "";
     if (report) row.append(el("pre", "", typeof report === "string" ? report : JSON.stringify(report, null, 2)));
     if (run.id && run.source !== "cron_output") {
-      const open = el("button", "", "Open conversation");
+      const open = el("button", "text-button", "Open conversation");
       open.addEventListener("click", () => { setSection("messages"); selectConversation(run.id, run.source); });
       row.append(open);
     }
@@ -1605,7 +1618,8 @@ function renderAppearance(detail) {
     const label = name.charAt(0).toUpperCase() + name.slice(1);
     const swatch = el("button", "swatch swatch-" + name);
     swatch.type = "button"; swatch.title = label; swatch.disabled = state.settingsBusy;
-    swatch.setAttribute("role", "radio"); swatch.setAttribute("aria-label", label);
+    swatch.append(el("i"), el("span", "", label));
+    swatch.setAttribute("role", "radio");
     swatch.setAttribute("aria-checked", String(state.settings.accent === name));
     swatch.addEventListener("click", () => saveSettings({ accent: name }, label + " accent saved."));
     swatches.append(swatch);
