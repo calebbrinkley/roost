@@ -260,6 +260,8 @@ button:disabled { cursor: default; }
 .settings-detail .job-detail-section p { margin: 0 0 12px; color: var(--muted); font-size: calc(14px * var(--text-scale)); line-height: 1.45; max-width: 62ch; }
 /* A note under a control or a stats grid (Now: …, the commit link, Updated …) sits clear of it. */
 .settings-detail select + p, .settings-detail .stats + p { margin-top: 12px; }
+/* Time zone: room between the list and the "Now:" example. */
+.settings-detail .job-detail-section select + p { margin-top: 16px; }
 .settings-detail label { display: block; margin: 0 0 7px; font-size: calc(13px * var(--text-scale)); font-weight: 600; }
 .settings-detail input, .settings-detail textarea { width: 100%; max-width: 520px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; outline: none; }
 .settings-detail textarea { max-width: 720px; min-height: 220px; resize: vertical; font: calc(14px * var(--text-scale))/1.5 var(--mono); }
@@ -273,11 +275,16 @@ button:disabled { cursor: default; }
 .swatches { display: flex; flex-wrap: wrap; gap: 12px; }
 .swatch { display: grid; justify-items: center; gap: 6px; padding: 0; border: 0; color: var(--muted); background: none; font-size: calc(12px * var(--text-scale)); }
 .swatch i { display: block; width: 44px; height: 44px; border-radius: 50%; box-shadow: inset 0 0 0 1px #00000014; }
-.swatch[aria-checked="true"] { color: var(--ink); font-weight: 600; }
-.swatch[aria-checked="true"] i { box-shadow: 0 0 0 3px var(--frame), 0 0 0 5px var(--ink); }
+.swatch[aria-checked="true"], .swatch.chosen { color: var(--ink); font-weight: 600; }
+.swatch[aria-checked="true"] i, .swatch.chosen i { box-shadow: 0 0 0 3px var(--frame), 0 0 0 5px var(--ink); }
 .swatch:focus-visible, .choice-row .segment:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .swatch-forest i { background: #2f6f4e; }.swatch-ocean i { background: #1f6aa5; }.swatch-violet i { background: #6a4fc2; }
 .swatch-rose i { background: #b8475f; }.swatch-amber i { background: #f2b544; }.swatch-slate i { background: #4b5563; }
+/* The colour input sits invisibly over the circle, so a tap opens the system picker on every platform. */
+.swatch-custom { position: relative; cursor: pointer; }
+.swatch-custom i { display: grid; place-items: center; color: var(--muted); background: var(--chip); font-size: calc(24px * var(--text-scale)); font-style: normal; line-height: 1; }
+.swatch-custom input { position: absolute; top: 0; left: 0; width: 44px; height: 44px; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.swatch-custom:focus-within { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: 12px; }
 .settings-detail select { width: 100%; max-width: 520px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; font: inherit; }
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin: 0; max-width: 880px; }
 .stats div { padding: 10px 12px; border-radius: 12px; background: var(--sheet); min-width: 0; }
@@ -335,7 +342,9 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 
 @media (max-width: 700px) {
   .desktop-only { display: none !important; }.mobile-only { display: flex; }
-  .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: relative;
+  /* Sticky, not relative: since iOS 26 a Home Screen web app blurs its top edge (status bar and ~40pt below)
+     unless a full-width fixed or sticky box with a plain background covers it. Nothing scrolls the shell, so it stays put. */
+  .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: sticky; top: 0;
            padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
   /* iOS zooms into any field under 16 px and stays zoomed, pushing the page past the right edge. */
   .search-wrap input, .composer textarea, .reasoning-chip select, .login-card input, .job-dialog input, .job-dialog textarea { font-size: max(16px, calc(16px * var(--text-scale))); }

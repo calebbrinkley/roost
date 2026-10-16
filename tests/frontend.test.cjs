@@ -368,6 +368,22 @@ test('choosing an accent saves it for every device and applies it here', async (
   assert.equal(f.context.window.roostTheme.accent, 'ocean');
 });
 
+test('the custom accent previews while picking and saves the colour when the picker closes', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`globalThis.sent = []; api = async (path, options = {}) => {
+    if (options.method === 'PATCH') { sent.push(JSON.parse(options.body)); return {...${SETTINGS}, accent:'#a1b2c3'}; }
+    return ${SETTINGS}; };`);
+  f.run(`setSection('settings')`); await tick();
+  const picker = find(f.get('settings-detail'), n => n.type === 'color');
+  picker.value = '#a1b2c3'; picker.events.input();
+  assert.equal(f.context.window.roostTheme.accent, '#a1b2c3');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), []);
+  await picker.events.change(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.run('sent'))), [{accent:'#a1b2c3'}]);
+  const custom = find(f.get('settings-detail'), n => n.className === 'swatch swatch-custom chosen');
+  assert.ok(custom, 'the saved custom colour shows as chosen');
+});
+
 test('delete all stays disabled until DELETE is typed, then sends that confirmation', async () => {
   const f = settingsFixture(); await tick();
   f.run(`globalThis.calls = []; api = async (path, options = {}) => {
