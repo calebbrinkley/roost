@@ -439,4 +439,12 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .approval-actions { display: flex; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; }
 .approval-actions button { min-height: 44px; padding: 8px 18px; }
 .approval-actions .secondary { border: 1px solid var(--line); background: var(--frame); }
+/* Phones: every accent on one row. The circles shrink to share the width and the names are read aloud only. */
+@media (max-width: 700px) {
+  .swatches { flex-wrap: nowrap; gap: 10px; }
+  .swatch { flex: 1 1 0; min-width: 0; }
+  .swatch i { width: 100%; max-width: 44px; height: auto; aspect-ratio: 1; }
+  .swatch span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+  .swatch-custom input { width: 100%; height: 100%; }
+}
 @media (max-width: 700px) { .approval-panel { padding: 0 12px 10px; } .approval-actions button { flex: 1; } }
