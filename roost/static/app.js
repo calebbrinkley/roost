@@ -24,6 +24,7 @@ function applyAgentName(name) {
   for (const node of document.querySelectorAll("[data-agent-text]")) node.textContent = node.dataset.agentText.replaceAll("{agent}", agent());
   for (const node of document.querySelectorAll("[data-agent-placeholder]")) node.placeholder = node.dataset.agentPlaceholder.replaceAll("{agent}", agent());
   for (const node of document.querySelectorAll("[data-agent-initial]")) node.textContent = agent().charAt(0).toUpperCase();
+  for (const node of document.querySelectorAll("[data-agent-title]")) node.title = node.dataset.agentTitle.replaceAll("{agent}", agent());
 }
 
 // While a reply is on its way, the label rotates through these.
@@ -849,6 +850,7 @@ async function selectConversation(id, source) {
   show("origin-badge", Boolean(source && source !== "roost"));
   renderConversations();
   $("transcript").replaceChildren(el("p", "empty-transcript", "Loading conversation…"));
+  showReasoning("default"); loadReasoning(id);
   try { await loadMessages(id); } catch (error) { notice(error.message); }
 }
 
@@ -1028,11 +1030,43 @@ function renderLive() {
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
 }
 
+// How hard the model thinks in the open conversation; a new one starts at Hermes's own setting.
+function showReasoning(level) {
+  state.reasoning = level;
+  $("reasoning").value = level;
+  $("reasoning-chip").classList.toggle("chosen", level !== "default");
+}
+
+async function loadReasoning(id) {
+  const epoch = state.authEpoch, view = state.viewEpoch;
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
+    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && typeof data.reasoning === "string") showReasoning(data.reasoning);
+  } catch { /* The chip keeps Default; the next send still uses what Roost stored. */ }
+}
+
+async function changeReasoning() {
+  const level = $("reasoning").value, previous = state.reasoning || "default", id = state.current;
+  showReasoning(level);
+  // A new conversation sends its choice with the first message.
+  if (!id) return;
+  const epoch = state.authEpoch;
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ reasoning: level }) });
+    if (epoch === state.authEpoch && state.current === id) showReasoning(data.reasoning);
+  } catch (error) {
+    if (epoch !== state.authEpoch) return;
+    if (state.current === id) showReasoning(previous);
+    notice(error.message);
+  }
+}
+
 function newConversation() {
   state.viewEpoch++;
   leaveLive();
   state.current = null;
   state.draft = true;
+  showReasoning("default");
   $("app").classList.add("chat-open");
   renderConversations(); renderWelcome();
   $("message").focus();
@@ -1061,7 +1095,7 @@ async function sendText(text, { voice = false } = {}) {
   try {
     const result = oldId
       ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text }) });
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: state.reasoning || "default" }) });
     if (epoch !== state.authEpoch) return;
     accepted = true;
     if (sameView()) { state.current = result.session_id; state.draft = false; }
@@ -2160,6 +2194,7 @@ function pullToRefresh(list) {
 pullToRefresh($("conversation-list"));
 pullToRefresh($("sidebar-jobs-list"));
 $("composer").addEventListener("submit", submitMessage);
+$("reasoning").addEventListener("change", changeReasoning);
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
   sheetView("sheet-rename-form"); $("sheet-name").focus();

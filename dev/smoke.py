@@ -28,6 +28,16 @@ async def request(client, method, path, status=200, body=None):
         return data
 
 
+async def reply_contains(client, sid, text):
+    """Waits for the demo's saved reply to the latest message."""
+    for _ in range(100):
+        rows = (await request(client, "GET", f"/api/conversations/{sid}"))["messages"]
+        if rows and rows[-1]["role"] == "assistant" and text in rows[-1]["content"]:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError((sid, text))
+
+
 async def sign_in(device, password):
     """Sign in as a device behind Tailscale Serve, which forwards the device's address."""
     async with ClientSession() as client:
@@ -172,6 +182,22 @@ async def checks():
         sent = [row["content"] for row in exported["messages"] if row["role"] == "user"]
         assert exported["instructions"] == "Be brief." and sent[-1].endswith("\n\nAnd one more") and "Be brief." in sent[-1]
 
+        # Thinking: chosen per conversation, set in Hermes with each message, and restored by Default.
+        assert (await request(client, "GET", f"/api/conversations/{sid}/settings"))["reasoning"] == "default"
+        await request(client, "PUT", f"/api/conversations/{sid}/settings", 400, {"reasoning": "extreme"})
+        settings = await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"reasoning": "low"})
+        assert settings == {"instructions": "Be brief.", "reasoning": "low"}
+        await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "Think less"})
+        await reply_contains(client, sid, "Thinking for this conversation: low.")
+        await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"reasoning": "default"})
+        await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "Back to normal"})
+        await reply_contains(client, sid, "Thinking for this conversation: medium.")
+        assert (await request(client, "GET", f"/api/conversations/{sid}/settings"))["reasoning"] == "default"
+        thinking = await request(client, "POST", "/api/conversations", 201, {"text": "Quick one", "reasoning": "none"})
+        await reply_contains(client, thinking["session_id"], "Thinking for this conversation: none.")
+        assert (await request(client, "GET", f"/api/conversations/{thinking['session_id']}/settings"))["reasoning"] == "none"
+        await request(client, "POST", "/api/conversations", 400, {"text": "Quick one", "reasoning": "max"})
+
         await request(client, "PATCH", f"/api/conversations/{sid}", body={"title": "Smoke conversation"})
         await request(client, "PATCH", f"/api/conversations/{sid}", 400, {"title": "Benchmark at 96K"})
         await request(client, "DELETE", f"/api/conversations/{sid}", 400, {"confirm": 1})
@@ -242,7 +268,7 @@ async def checks():
         await request(client, "POST", "/api/logout")
         await request(client, "GET", "/api/jobs", 401)
     await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, authenticated reply measurements, voice, chat turns, streamed replies, busy-session follow-ups, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
+    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, authenticated reply measurements, voice, chat turns, streamed replies, busy-session follow-ups, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, per-conversation thinking, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
 
 
 async def main():

@@ -1309,3 +1309,28 @@ test('Hermes may persist a queued burst as one combined user row without leaving
   assert.equal(f.run('state.sentMessages.length'),0,'the combined durable row covers both accepted sends');
   assert.equal(f.get('transcript').children.filter(n=>n.className==='message from-you').length,2);
 });
+
+test('thinking level: a new conversation sends it with the first message, an open one saves it at once', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.calls = []; api = async (path, options = {}) => { calls.push([path, options.method || 'GET', options.body]);
+    return path.endsWith('/settings') ? {instructions: '', reasoning: JSON.parse(options.body || '{"reasoning":"high"}').reasoning} : {session_id: 'one'}; };
+    loadConversations = async () => {}; loadMessages = async () => {}; newConversation();`);
+  f.get('reasoning').value = 'none'; await f.run(`changeReasoning()`);
+  assert.equal(f.run('calls.length'), 0, 'nothing to save before the conversation exists');
+  assert.ok(f.get('reasoning-chip').classList.contains('chosen'));
+  f.get('message').value = 'hello'; await f.run(`submitMessage({preventDefault() {}})`);
+  assert.deepEqual(JSON.parse(f.run('calls[0][2]')), {text: 'hello', reasoning: 'none'});
+  f.get('reasoning').value = 'low'; await f.run(`changeReasoning()`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(calls.at(-1).slice(0, 2))')), ['/conversations/one/settings', 'PUT']);
+  f.run(`newConversation()`);
+  assert.equal(f.get('reasoning').value, 'default');
+  assert.ok(!f.get('reasoning-chip').classList.contains('chosen'));
+});
+
+test('a failed thinking change puts the previous level back', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; showReasoning('high'); api = async () => { throw new Error('offline'); };`);
+  f.get('reasoning').value = 'none'; await f.run(`changeReasoning()`);
+  assert.equal(f.get('reasoning').value, 'high');
+  assert.equal(f.run('state.reasoning'), 'high');
+});
