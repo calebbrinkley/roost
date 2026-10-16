@@ -130,11 +130,14 @@ class Hermes:
         finally:
             await ws.close()
 
-    async def send_message(self, text: str, stored_id: str | None = None, follow=None) -> str:
+    async def send_message(self, text: str, stored_id: str | None = None, follow=None, reasoning: str | None = None,
+                           applied=None) -> str:
         """Submit a turn; Hermes persists and finishes the turn itself even if Roost hangs up.
         With `follow`, the socket stays open and `follow(session_id, events)` is called, where `events`
         yields this turn's event frames (type and payload) until the socket closes.
-        Busy-session acknowledgements call follow(session_id, None): polling owns the overlapping turns."""
+        Busy-session acknowledgements call follow(session_id, None): polling owns the overlapping turns.
+        `reasoning` is a level to set for this conversation first ("default" restores Hermes's own);
+        `applied(level)` is called once Hermes has accepted it."""
         ws = await self._socket()
         try:
             first_method = "session.resume" if stored_id else "session.create"
@@ -146,6 +149,8 @@ class Hermes:
             runtime_id = first.get("session_id")
             if not isinstance(runtime_id, str) or not runtime_id:
                 raise HermesError(502, "Hermes did not open the conversation.")
+            if reasoning is not None and await self._set_reasoning(ws, runtime_id, reasoning) and applied is not None:
+                applied(reasoning)
             # The turn may start streaming before prompt.submit answers; keep those frames.
             early = []
             submitted = await self._rpc_on_socket(ws, 2, "prompt.submit", {"session_id": runtime_id, "text": text}, early)
@@ -168,6 +173,24 @@ class Hermes:
         else:
             follow(session_id, self._turn_events(ws, runtime_id, early))
         return session_id
+
+    async def _set_reasoning(self, ws, runtime_id: str, level: str) -> bool:
+        """Set how hard the model thinks in this conversation only. Hermes keeps a conversation's choice
+        while it stays loaded but not after a restart, so Roost sets it with each message. A rejected
+        level (an older Hermes, an unknown word) leaves the message to be sent as it would have been."""
+        try:
+            if level == "default":
+                # Without a conversation, Hermes answers with its own configured level.
+                current = await self._rpc_on_socket(ws, 3, "config.get", {"key": "reasoning"})
+                level_word = current.get("value")
+                if not isinstance(level_word, str) or not level_word:
+                    return False
+            else:
+                level_word = level
+            await self._rpc_on_socket(ws, 4, "config.set", {"session_id": runtime_id, "key": "reasoning", "value": level_word})
+            return True
+        except HermesError:
+            return False
 
     @staticmethod
     async def _turn_events(ws, runtime_id: str, early: list):

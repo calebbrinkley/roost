@@ -77,7 +77,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}, "chats": chats.Chats(sqlite3.connect(":memory:"))},
                                   content_type="application/json", json=AsyncMock(return_value={"text": "hello"}))
         await server.send_message(request)
-        hermes.send_message.assert_awaited_once_with("hello", "chat:one", follow=ANY)
+        hermes.send_message.assert_awaited_once_with("hello", "chat:one", follow=ANY, reasoning=None, applied=ANY)
         self.assertIn("chat:one", request.app["watches"])
 
 
@@ -133,6 +133,7 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         self.status = 200
         self.content_type = "application/json"
         self.submit_status = "accepted"
+        self.frames, self.configured = [], "medium"
         async def login(request):
             return web.json_response({"ok": True})
         async def response(request):
@@ -156,7 +157,14 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
                 return {"jsonrpc": "2.0", "method": "event", "params": {"type": kind, "session_id": sid, "payload": payload}}
             async for message in ws:
                 frame = message.json()
-                if frame["method"] in {"session.create", "session.resume"}:
+                self.frames.append(frame)
+                if frame["method"] == "config.get":
+                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {"value": self.configured, "display": "show"}})
+                elif frame["method"] == "config.set":
+                    answer = ({"error": {"code": 4002}} if frame["params"]["value"] == "rejected" else
+                              {"result": {"key": "reasoning", "value": frame["params"]["value"]}})
+                    await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], **answer})
+                elif frame["method"] in {"session.create", "session.resume"}:
                     await ws.send_json({"jsonrpc": "2.0", "id": frame["id"], "result": {"session_id": "runtime", "stored_session_id": "chat:one"}})
                 else:
                     await ws.send_json(event("reasoning.delta", text="Early "))
@@ -245,6 +253,33 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(followed, [("chat:one", None)], status)
 
 
+    async def test_a_reasoning_level_is_set_for_the_conversation_before_the_message(self):
+        applied = []
+        await self.hermes.send_message("hello", "chat:one", reasoning="low", applied=applied.append)
+        methods = [frame["method"] for frame in self.frames]
+        self.assertEqual(methods[-3:], ["session.resume", "config.set", "prompt.submit"])
+        self.assertEqual(self.frames[-2]["params"], {"session_id": "runtime", "key": "reasoning", "value": "low"})
+        self.assertEqual(applied, ["low"])
+
+    async def test_default_restores_the_level_hermes_is_configured_with(self):
+        self.configured, applied = "high", []
+        await self.hermes.send_message("hello", "chat:one", reasoning="default", applied=applied.append)
+        get, put = (frame for frame in self.frames if frame["method"].startswith("config."))
+        self.assertEqual(get["params"], {"key": "reasoning"})  # no conversation: Hermes's own setting
+        self.assertEqual(put["params"]["value"], "high")
+        self.assertEqual(applied, ["default"])
+
+    async def test_a_rejected_level_still_sends_the_message(self):
+        applied = []
+        await self.hermes.send_message("hello", "chat:one", reasoning="rejected", applied=applied.append)
+        self.assertEqual(self.frames[-1]["method"], "prompt.submit")
+        self.assertEqual(applied, [])
+
+    async def test_no_level_sends_no_configuration(self):
+        await self.hermes.send_message("hello", "chat:one")
+        self.assertFalse(any(frame["method"].startswith("config.") for frame in self.frames))
+
+
 class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         import sqlite3
@@ -282,6 +317,57 @@ class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((store.instructions("chat:one"), store.instructions("chat:two")), ("", "Be brief."))
         store.forget("chat:two")
         self.assertEqual(store.instructions("chat:two"), "")
+
+    def test_reasoning_is_left_alone_until_chosen_and_a_restored_default_goes_once(self):
+        store = self.chats
+        self.assertEqual((store.reasoning("chat:one"), store.reasoning_to_apply("chat:one")), ("default", None))
+        store.set_reasoning("chat:one", "default")  # never chosen: still nothing to apply
+        self.assertIsNone(store.reasoning_to_apply("chat:one"))
+        store.set_reasoning("chat:one", "high")
+        store.reasoning_applied("chat:one", "high")
+        self.assertEqual(store.reasoning_to_apply("chat:one"), "high", "Hermes forgets it on restart, so it goes every time")
+        store.set_reasoning("chat:one", "default")
+        self.assertEqual((store.reasoning("chat:one"), store.reasoning_to_apply("chat:one")), ("default", "default"))
+        store.reasoning_applied("chat:one", "default")
+        self.assertIsNone(store.reasoning_to_apply("chat:one"))
+        with self.assertRaises(ValueError):
+            store.set_reasoning("chat:one", "max")
+
+    def test_reasoning_follows_a_renamed_conversation_and_is_forgotten(self):
+        store = self.chats
+        store.set_reasoning("chat:one", "none")
+        store.moved("chat:one", "chat:two")
+        self.assertEqual((store.reasoning("chat:one"), store.reasoning("chat:two")), ("default", "none"))
+        store.forget("chat:two")
+        self.assertEqual(store.reasoning("chat:two"), "default")
+
+    async def test_messages_carry_the_conversations_reasoning_and_settings_validate_it(self):
+        async def send(text, sid=None, follow=None, reasoning=None, applied=None):
+            if applied and reasoning:
+                applied(reasoning)
+            return "chat:two"
+        hermes = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+        app = {"hermes": hermes, "watches": {}, "chats": self.chats, "live": {}}
+        def request(body, sid="chat:one"):
+            return SimpleNamespace(match_info={"sid": sid}, app=app, content_type="application/json", json=AsyncMock(return_value=body))
+        with self.assertRaises(web.HTTPBadRequest):
+            await server.update_chat_settings(request({"reasoning": "extreme"}))
+        with self.assertRaises(web.HTTPBadRequest):
+            await server.update_chat_settings(request({"title": "x"}))
+        response = await server.update_chat_settings(request({"reasoning": "low"}))
+        self.assertEqual(json.loads(response.body), {"instructions": "", "reasoning": "low"})
+        with patch("roost.server.following", lambda app, text: None):
+            await server.send_message(request({"text": "hello"}))
+        self.assertEqual(hermes.send_message.await_args.kwargs["reasoning"], "low")
+        self.assertEqual(self.chats.reasoning("chat:two"), "low", "kept when Hermes continues under a new id")
+        with patch("roost.server.following", lambda app, text: None):
+            created = await server.create_conversation(request({"text": "new", "reasoning": "none"}))
+            self.assertEqual(hermes.send_message.await_args.kwargs["reasoning"], "none")
+            await server.create_conversation(request({"text": "plain"}))
+            self.assertIsNone(hermes.send_message.await_args.kwargs["reasoning"])
+            with self.assertRaises(web.HTTPBadRequest):
+                await server.create_conversation(request({"text": "x", "reasoning": "max"}))
+        self.assertEqual(created.status, 201)
 
     async def test_the_next_message_carries_changed_instructions_and_shows_as_typed(self):
         followed = []
@@ -500,9 +586,9 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.put(url + "/settings", headers=self.headers, json=body, cookies=cookies)
             self.assertEqual(response.status, 400, body)
         response = await self.client.put(url + "/settings", headers=self.headers, json={"instructions": " Be brief. "}, cookies=cookies)
-        self.assertEqual(await response.json(), {"instructions": "Be brief."})
+        self.assertEqual(await response.json(), {"instructions": "Be brief.", "reasoning": "default"})
         response = await self.client.get(url + "/settings", cookies=cookies)
-        self.assertEqual(await response.json(), {"instructions": "Be brief."})
+        self.assertEqual(await response.json(), {"instructions": "Be brief.", "reasoning": "default"})
         # Hermes pages 500 rows at a time; the export reads until a short page.
         pages = [{"messages": [{"role": "user", "content": str(i)} for i in range(500)]}, {"messages": [{"role": "assistant", "content": "end"}]}]
         self.app["hermes"].request = AsyncMock(side_effect=pages)

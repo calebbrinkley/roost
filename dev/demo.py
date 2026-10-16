@@ -265,6 +265,17 @@ def mock_hermes():
                 app["runtime_map"][runtime_id] = stored_id
                 result = {"session_id": runtime_id, "stored_session_id": stored_id,
                           "open_requests": [pending_approvals[stored_id]["frame"]] if stored_id in pending_approvals else []}
+            elif method == "config.get" and params.get("key") == "reasoning":
+                # Like Hermes: a conversation's own choice, else the configured level.
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                result = {"value": app["reasoning"].get(stored_id, "medium"), "display": "show"}
+            elif method == "config.set" and params.get("key") == "reasoning":
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                if not stored_id or params.get("value") not in {"none", "minimal", "low", "medium", "high"}:
+                    await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 4002}})
+                    continue
+                app["reasoning"][stored_id] = params["value"]
+                result = {"key": "reasoning", "value": params["value"]}
             elif method == "approval.respond":
                 stored_id = app["runtime_map"].get(params.get("session_id"))
                 pending = pending_approvals.get(stored_id)
@@ -290,6 +301,8 @@ def mock_hermes():
                                 "type": kind, "session_id": runtime_id, **({"payload": payload} if payload else {})}})
                     answer = (f"This is the local demo reply to: “{prompt}”\n\n"
                               "The agent's real answer will appear here when Roost is connected to Hermes.")
+                    if sid in app["reasoning"]:
+                        answer += f"\n\nThinking for this conversation: {app['reasoning'][sid]}."
                     if prompt == "/approval-demo":
                         # A protocol demonstration only. This command is never executed.
                         request_id = secrets.token_hex(8)
@@ -366,6 +379,7 @@ def mock_hermes():
         return web.json_response({"ok": True, "pid": 1, "name": "gateway-restart"})
 
     app["runtime_map"] = {}
+    app["reasoning"] = {}  # stored conversation id -> the level Roost set
     app.router.add_get("/api/profiles/active", active_profile)
     app.router.add_get("/api/profiles", profiles)
     app.router.add_get("/api/profiles/{name}/soul", get_soul)

@@ -22,7 +22,7 @@ from yarl import URL
 from . import __version__, live
 
 from .auth import Sessions, verify_password
-from .chats import INSTRUCTIONS_LIMIT, Chats, with_instructions
+from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
 from .deliveries import TEXT_LIMIT as DELIVERY_LIMIT, Deliveries
 from .hermes import Hermes, HermesError
 from .passkeys import PasskeyError, Passkeys
@@ -869,8 +869,11 @@ def following(app: web.Application, text: str):
 async def create_conversation(request: web.Request):
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
+    level = reasoning_level(data.get("reasoning", "default"))
     since = time.time()
-    sid = await request.app["hermes"].send_message(text, follow=following(request.app, text))
+    sid = await request.app["hermes"].send_message(text, follow=following(request.app, text),
+                                                   reasoning=None if level == "default" else level)
+    request.app["chats"].set_reasoning(sid, level)
     watch_reply(request.app, sid, since)
     return web.json_response({"session_id": sid}, status=201)
 
@@ -884,11 +887,15 @@ async def send_message(request: web.Request):
     chats = request.app["chats"]
     unsent = chats.unsent(sid)
     outgoing = text if unsent is None else with_instructions(text, unsent)
-    stored = await request.app["hermes"].send_message(outgoing, sid, follow=following(request.app, text))
+    applied = []
+    stored = await request.app["hermes"].send_message(outgoing, sid, follow=following(request.app, text),
+                                                      reasoning=chats.reasoning_to_apply(sid), applied=applied.append)
     if unsent is None:
         chats.moved(sid, stored)
     else:
         chats.sent(sid, unsent, stored)
+    for level in applied:
+        chats.reasoning_applied(stored, level)
     watch_reply(request.app, stored, since)
     return web.json_response({"session_id": stored})
 
@@ -919,18 +926,33 @@ async def delete_conversation(request: web.Request):
     return web.json_response(result)
 
 
+def reasoning_level(value) -> str:
+    if value not in REASONING:
+        raise bad("Unknown reasoning level.")
+    return value
+
+
+def chat_settings(chats, sid: str) -> dict:
+    return {"instructions": chats.instructions(sid), "reasoning": chats.reasoning(sid)}
+
+
 async def get_chat_settings(request: web.Request):
-    sid = item_id(request, "sid", encode=False)
-    return web.json_response({"instructions": request.app["chats"].instructions(sid)})
+    return web.json_response(chat_settings(request.app["chats"], item_id(request, "sid", encode=False)))
 
 
 async def update_chat_settings(request: web.Request):
     sid = item_id(request, "sid", encode=False)
     data = await json_body(request)
-    if set(data) != {"instructions"}:
-        raise bad("Only instructions can be changed.")
-    request.app["chats"].set_instructions(sid, body_text(data["instructions"], "Instructions", INSTRUCTIONS_LIMIT, required=False))
-    return web.json_response({"instructions": request.app["chats"].instructions(sid)})
+    if not data or set(data) - {"instructions", "reasoning"}:
+        raise bad("Only instructions and reasoning can be changed.")
+    chats = request.app["chats"]
+    if "reasoning" in data:
+        level = reasoning_level(data["reasoning"])
+    if "instructions" in data:
+        chats.set_instructions(sid, body_text(data["instructions"], "Instructions", INSTRUCTIONS_LIMIT, required=False))
+    if "reasoning" in data:
+        chats.set_reasoning(sid, level)
+    return web.json_response(chat_settings(chats, sid))
 
 
 async def export_conversation(request: web.Request):

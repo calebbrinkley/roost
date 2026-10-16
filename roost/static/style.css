@@ -177,6 +177,12 @@ button:disabled { cursor: default; }
 .welcome-card h2 { font-size: calc(20px * var(--text-scale)); margin: 0 0 7px; }
 .welcome-card p { margin: 0; color: var(--muted); font-size: calc(14px * var(--text-scale)); line-height: 1.45; }
 .composer { display: flex; align-items: end; gap: 8px; min-height: 64px; padding: 9px 20px 15px; border-top: 1px solid var(--line); }
+.reasoning-chip { position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 4px; height: 34px; margin-bottom: 2px; padding: 0 10px 0 8px; border: 1px solid var(--line); border-radius: 17px; color: var(--muted); }
+.reasoning-chip svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.reasoning-chip select { appearance: none; -webkit-appearance: none; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; font-size: calc(14px * var(--text-scale)); cursor: pointer; }
+.reasoning-chip select:focus { outline: none; }
+.reasoning-chip:focus-within { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.reasoning-chip.chosen { color: var(--ink); border-color: var(--accent-text); }
 .mic-button, .send-button { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border: 0; border-radius: 50%; font-size: calc(21px * var(--text-scale)); }
 .mic-button, .send-button { color: var(--accent-ink); background: var(--accent); }
 .mic-button { touch-action: manipulation; }
@@ -301,7 +307,7 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: relative;
            padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
   /* iOS zooms into any field under 16 px and stays zoomed, pushing the page past the right edge. */
-  .search-wrap input, .composer textarea, .login-card input, .job-dialog input, .job-dialog textarea { font-size: max(16px, calc(16px * var(--text-scale))); }
+  .search-wrap input, .composer textarea, .reasoning-chip select, .login-card input, .job-dialog input, .job-dialog textarea { font-size: max(16px, calc(16px * var(--text-scale))); }
   .sidebar { width: 100%; min-height: 0; overflow: hidden; flex: 1; border-right: 0; background: var(--frame); }
   .sidebar-top { height: auto; flex: 0 0 auto; display: block; border-bottom: 0; }
   .mobile-list-heading { align-items: center; justify-content: space-between; padding: 18px 16px 7px; }
