@@ -773,8 +773,10 @@ async def conversation(request: web.Request):
     result["live"] = turn is not None
     since = watch["since"] if watch else turn.started if turn else None
     result["working"] = turns.working(result["messages"], turn=turn, since=since)
-    # Where the turn Roost sent begins: its rows are the ones with a higher id.
+    # Where the turn Roost sent begins: its rows are the ones with a higher id. `started` is the live
+    # turn's own mark (the stream sends it too), so a browser pairs `after` with the right turn.
     result["after"] = turns.after(result["messages"], since) if since is not None else None
+    result["started"] = turn.started if turn else None
     request.app["reply_usage"].attach(result.get("session_id") or sid, result["messages"])
     return web.json_response(result)
 

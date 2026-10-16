@@ -577,7 +577,8 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
         live.follow(self.app["live"], "chat:one", "hello", events())
         response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
-        self.assertIs((await response.json())["live"], True)
+        data = await response.json()
+        self.assertEqual((data["live"], data["started"], data["working"]), (True, self.app["live"]["chat:one"].started, True))
         response = await self.client.get("/api/conversations/chat:one/stream", cookies=cookies)
         self.assertEqual((response.status, response.content_type), (200, "text/event-stream"))
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
@@ -622,7 +623,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                    {"id": 2, "role": "assistant", "content": "Hello.", "timestamp": now - 50}]
         self.app["hermes"].messages.return_value = {"messages": earlier}
         data = await (await self.client.get("/api/conversations/chat:one")).json()
-        self.assertEqual((data["working"], data["after"], data["live"]), (False, None, False))
+        self.assertEqual((data["working"], data["after"], data["live"], data["started"]), (False, None, False, None))
         # Sent from Roost and accepted by Hermes, not saved yet: working, and the turn begins after row 2.
         server.watch_reply(self.app, "chat:one", now - 1)
         data = await (await self.client.get("/api/conversations/chat:one")).json()

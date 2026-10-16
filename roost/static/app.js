@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
-                sentMessages: [], busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, pending: null, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
+                sentMessages: [], busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, turn: null, working: false, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -40,17 +40,6 @@ function workingLabel(ellipsis = false) {
   const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
   label.textContent = (state.approvals?.length ? `${agent()} is waiting for your approval` : `${agent()} is ${state.workingVerb || "thinking"}`) + (ellipsis ? "…" : "");
   return label;
-}
-
-// Hermes saves each tool round as it happens, so the newest row says whether a turn is still going:
-// your message or a tool result is waiting on the agent, and a reply that calls tools has more to come.
-// A turn that ended in an error, or has been quiet for ten minutes, is over.
-function turnInProgress(rows) {
-  const last = rows.at(-1);
-  if (!last || ["error", "agent_error", "content_filter"].includes(last.finish_reason)) return false;
-  if (!(Date.now() / 1000 - Number(last.timestamp) < 600)) return false;
-  return last.role === "user" || last.role === "tool"
-    || (last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0);
 }
 
 function refreshWorkingLabels() {
@@ -169,7 +158,7 @@ function signedOut() {
   stopRecording(true); state.voiceDraft = false; state.player?.pause();
   Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
     jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, pending: null, sentMessages: [], search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
+    draft: false, turn: null, working: false, sentMessages: [], search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
     approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
   renderApprovals();
   show("app", false); show("login", true);
@@ -520,7 +509,6 @@ async function deleteConversation() {
   try {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     if (epoch !== state.authEpoch) return;
-    if (state.pending?.id === id) state.pending = null;
     state.sentMessages = state.sentMessages.filter((sent) => sent.id !== id);
     // The server's rows shift down by one, so the next page starts one row earlier. A load
     // started before the deletion could bring the row back or reuse the old offset: drop it.
@@ -553,13 +541,15 @@ function renderConversations() {
     const heading = el("span", "conversation-heading");
     heading.append(el("span", "conversation-name", sessionName(item)));
     if (item.source && item.source !== "roost") heading.append(el("span", "source-tag", item.source));
-    const preview = el("span", "row-preview" + (state.pending?.id === id ? " live" : ""));
-    preview.append(state.pending?.id === id ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
+    // The server marks conversations it is following; the open one also knows what this device just sent.
+    const working = item.working === true || (id === state.current && state.working);
+    const preview = el("span", "row-preview" + (working ? " live" : ""));
+    preview.append(working ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
     meta.append(el("span", "", timeLabel(when)));
-    if (state.pending?.id === id) meta.append(el("span", "unread-dot"));
+    if (working) meta.append(el("span", "unread-dot"));
     button.append(meta);
     const wrapper = el("div", "swipe-row" + (state.swipeOpenId === id ? " revealed" : ""));
     wrapper.dataset.id = id;
@@ -797,11 +787,12 @@ document.addEventListener("selectionchange", () => {
 });
 
 // Hermes can acknowledge a busy-session prompt before it becomes a durable transcript row.
-function withSentMessages(rows) {
-  let pending = state.sentMessages;
+// Returns the rows with this device's unsaved messages added, and the sent messages still unsaved.
+function withSentMessages(rows, sent, current) {
+  let pending = sent;
   for (const row of rows) {
     if (row.role !== "user" || typeof row.id !== "number") continue;
-    const candidates = pending.filter((sent) => sent.id === state.current && row.id > sent.after);
+    const candidates = pending.filter((item) => item.id === current && row.id > item.after);
     const saved = messageText(row);
     let combined = "";
     for (let index = 0; index < candidates.length; index++) {
@@ -809,17 +800,46 @@ function withSentMessages(rows) {
       if (combined === saved) {
         // Hermes can merge a queued burst into one user row. Consume exactly that prefix once.
         const matched = new Set(candidates.slice(0, index + 1));
-        pending = pending.filter((sent) => !matched.has(sent));
-        for (const next of pending) if (next.id === state.current) next.after = Math.max(next.after, row.id);
+        pending = pending.filter((item) => !matched.has(item))
+          .map((item) => item.id === current ? { ...item, after: Math.max(item.after, row.id) } : item);
         break;
       }
       if (!saved.startsWith(combined)) break;
     }
   }
-  state.sentMessages = pending;
-  return [...rows, ...pending.filter((sent) => sent.id === state.current).map((sent) => ({
-    role: "user", content: sent.text, timestamp: sent.since / 1000, id: sent.key, local_sent: true,
-  }))];
+  return { sent: pending, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
+    role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: true,
+  }))] };
+}
+
+// What a conversation shows: Hermes's saved rows, this device's messages Hermes has not saved yet, and
+// the turn being written live in place of the steps Hermes has saved for it. The server says whether the
+// agent is working and where the live turn begins (`after`, paired with the turn by `started`), so
+// nothing here matches messages by their text. `server` is the latest conversation response's
+// { working, after, started, at }, or {} before there is one.
+function conversationView({ rows, sent, current, live, server }) {
+  const added = withSentMessages(rows, sent, current);
+  let all = added.rows, liveAfter = null;
+  const after = live ? live.after ?? (server.started != null && server.started === live.started ? server.after : null) : null;
+  if (live) {
+    const own = after == null ? -1 : all.findIndex((row) => row.role === "user" && typeof row.id === "number" && row.id > after);
+    const nextUser = own >= 0 ? all.findIndex((row, index) => index > own && row.role === "user") : -1;
+    const last = own >= 0 ? all.slice(own + 1, nextUser >= 0 ? nextUser : undefined).at(-1) : null;
+    const answered = last?.role === "assistant" && !(Array.isArray(last.tool_calls) && last.tool_calls.length) && Boolean(messageText(last));
+    if (live.done && (answered || !server.working)) live = null;
+    else if (own >= 0) {
+      liveAfter = all[own];
+      // Replace only this turn's saved steps. Later questions and replies stay in order.
+      all = [...all.slice(0, own + 1), ...(nextUser >= 0 ? all.slice(nextUser) : [])];
+    } else {
+      // Not saved yet: the message just sent from here, or the one the stream says it answers.
+      liveAfter = all.findLast((row) => row.local_sent) || { role: "user", content: live.user };
+      if (!liveAfter.local_sent) all = [...all, liveAfter];
+    }
+  }
+  const unsaved = added.sent.some((item) => item.id === current && item.since > (server.at ?? 0));
+  return { rows: all, sent: added.sent, live, liveAfter, after,
+           working: Boolean(live && !live.done) || Boolean(server.working) || unsaved };
 }
 
 function renderMessages(rows) {
@@ -839,23 +859,14 @@ function renderMessages(rows) {
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   state.liveNodes = null;
-  let all = withSentMessages(records(rows)), live = state.live?.id === state.current ? state.live : null;
-  let liveAfter = null;
-  if (live) {
-    // The turn being written shows live: the message it answers, then its thoughts and text so far,
-    // in place of whatever steps Hermes has saved, until Hermes has saved the finished turn.
-    let own = -1;
-    for (let i = all.length - 1; i >= 0; i--) if (all[i].role === "user" && messageText(all[i]) === live.user) { own = i; break; }
-    const nextUser = all.findIndex((row, index) => index > own && row.role === "user");
-    const turnRows = all.slice(own + 1, nextUser >= 0 ? nextUser : undefined);
-    const saved = own >= 0 && !turnInProgress(turnRows) && turnRows.some((row) => row.role === "assistant" && messageText(row));
-    if (live.done && (saved || Date.now() - live.ended > 15000)) { state.live = live = null; }
-    else {
-      liveAfter = own >= 0 ? all[own] : { role: "user", content: live.user };
-      // Replace only this turn's saved steps. Later questions and replies stay in order.
-      all = own >= 0 ? [...all.slice(0, own + 1), ...(nextUser >= 0 ? all.slice(nextUser) : [])] : [...all, liveAfter];
-    }
-  }
+  const view = conversationView({ rows: records(rows), sent: state.sentMessages, current: state.current,
+    live: state.live?.id === state.current ? state.live : null, server: state.turn?.id === state.current ? state.turn : {} });
+  state.sentMessages = view.sent;
+  if (state.live?.id === state.current && !view.live) state.live = null;
+  // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
+  if (view.live && view.after != null) view.live.after = view.after;
+  state.working = view.working;
+  const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   // Thoughts from every step since the last message shown, including steps that only called tools,
@@ -900,18 +911,8 @@ function renderMessages(rows) {
     if (row === liveAfter) transcript.append(...liveNodes(live));
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
-  const working = turnInProgress(records(rows));
-  if (state.pending?.id === state.current) {
-    // Until Hermes saves the message just sent, the transcript cannot say whether its turn is over.
-    let ownMessage = -1;
-    for (let i = visible.length - 1; i >= 0; i--) {
-      if (visible[i].role === "user" && messageText(visible[i]) === state.pending.text) { ownMessage = i; break; }
-    }
-    if (!state.sentMessages.some((sent) => sent.id === state.current) &&
-        ((ownMessage >= 0 && !working) || Date.now() - state.pending.since > 600000)) state.pending = null;
-  }
-  readVoiceReply(visible, working, live);
-  if (live ? !live.done : working || state.pending?.id === state.current) {
+  readVoiceReply(visible, view.working, live);
+  if (view.working) {
     const typing = el("div", "typing-row");
     const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
     typing.append(dots, workingLabel()); transcript.append(typing);
@@ -942,12 +943,14 @@ async function selectConversation(id, source) {
 async function loadMessages(id = state.current) {
   if (!id) return;
   const epoch = state.authEpoch, view = state.viewEpoch;
-  const serial = state.messageRequest = (state.messageRequest || 0) + 1;
+  const serial = state.messageRequest = (state.messageRequest || 0) + 1, at = Date.now();
   const data = await api(`/conversations/${encodeURIComponent(id)}`);
   // Compare with the newest response applied, not the newest request issued: polls slower
   // than the interval would otherwise discard every reply and freeze the transcript.
   if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && serial > (state.messageApplied || 0)) {
     state.messageApplied = serial;
+    state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
+                   started: typeof data.started === "number" ? data.started : null, at };
     if (data.live === true) openStream(id);
     renderMessages(data.messages);
     loadApprovals(id);
@@ -1061,7 +1064,7 @@ function openStream(id) {
 
 function endStream(id) {
   closeStream();
-  if (state.live?.id === id) Object.assign(state.live, { done: true, ended: Date.now() });
+  if (state.live?.id === id) state.live.done = true;
   if (state.current === id) loadMessages(id).catch(() => {});
 }
 
@@ -1187,8 +1190,7 @@ async function sendText(text, { voice = false } = {}) {
     if (epoch !== state.authEpoch) return;
     accepted = true;
     if (sameView()) { state.current = result.session_id; state.draft = false; }
-    state.pending = { id: result.session_id, text, since: Date.now() };
-    state.sentMessages.push({ ...state.pending, after, key: `sent-${state.sentKey = (state.sentKey || 0) + 1}` });
+    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key: `sent-${state.sentKey = (state.sentKey || 0) + 1}` });
     if (voice) state.voiceReply = { id: result.session_id, text, since: Date.now() };
     if (state.current === result.session_id) {
       closeStream(); state.live = null; state.liveNodes = null;
@@ -2138,7 +2140,7 @@ function deleteEverything(kind, input) {
     const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
     if (epoch !== state.authEpoch) return;
     if (kind === "conversations") {
-      Object.assign(state, { conversations: [], current: null, pending: null, sentMessages: [], conversationOffset: 0, conversationsMore: false });
+      Object.assign(state, { conversations: [], current: null, turn: null, working: false, sentMessages: [], conversationOffset: 0, conversationsMore: false });
       state.viewEpoch++; renderConversations(); renderWelcome();
     } else {
       Object.assign(state, { jobs: [], selectedJob: null, jobPatches: Object.create(null), jobRuns: Object.create(null), jobRunsError: Object.create(null) });
