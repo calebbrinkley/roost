@@ -261,7 +261,7 @@ function openLink(search) {
 async function showJob(id) {
   setSection("jobs");
   try { await loadJobs(); } catch (error) { notice(error.message); return; }
-  if (state.jobs.some((job) => (job.id || job.job_id) === id)) selectJob(id);
+  if (state.jobs.some((job) => job.id === id)) selectJob(id);
   else notice("That job no longer exists.");
 }
 
@@ -458,7 +458,7 @@ function openConversationSheet(item) {
   state.sheetItem = item;
   $("sheet-title").textContent = sessionName(item);
   $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = ""; $("sheet-instructions-error").textContent = "";
-  $("sheet-export").href = `/api/conversations/${encodeURIComponent(conversationId(item))}/export`;
+  $("sheet-export").href = `/api/conversations/${encodeURIComponent(item.id)}/export`;
   sheetView("sheet-actions");
   if (!$("conversation-sheet").open) $("conversation-sheet").showModal();
   $("sheet-title").focus();
@@ -467,7 +467,7 @@ function openConversationSheet(item) {
 async function renameConversation(event) {
   event.preventDefault();
   if (state.sheetBusy) return;
-  const item = state.sheetItem, id = item && conversationId(item);
+  const item = state.sheetItem, id = item && item.id;
   if (!id) return;
   const title = $("sheet-name").value.trim();
   const epoch = state.authEpoch;
@@ -483,7 +483,7 @@ async function renameConversation(event) {
 }
 
 async function openInstructions() {
-  const item = state.sheetItem, id = item && conversationId(item);
+  const item = state.sheetItem, id = item && item.id;
   if (!id || state.sheetBusy) return;
   const epoch = state.authEpoch, field = $("sheet-instructions-text");
   field.value = ""; field.disabled = true;
@@ -498,7 +498,7 @@ async function openInstructions() {
 
 async function saveInstructions(event) {
   event.preventDefault();
-  const item = state.sheetItem, id = item && conversationId(item), field = $("sheet-instructions-text");
+  const item = state.sheetItem, id = item && item.id, field = $("sheet-instructions-text");
   if (!id || state.sheetBusy || field.disabled) return;
   const epoch = state.authEpoch;
   state.sheetBusy = true;
@@ -513,7 +513,7 @@ async function saveInstructions(event) {
 
 async function deleteConversation() {
   if (state.sheetBusy) return;
-  const item = state.sheetItem, id = item && conversationId(item);
+  const item = state.sheetItem, id = item && item.id;
   if (!id) return;
   const epoch = state.authEpoch;
   state.sheetBusy = true;
@@ -524,9 +524,9 @@ async function deleteConversation() {
     state.sentMessages = state.sentMessages.filter((sent) => sent.id !== id);
     // The server's rows shift down by one, so the next page starts one row earlier. A load
     // started before the deletion could bring the row back or reuse the old offset: drop it.
-    if (state.conversations.some((row) => conversationId(row) === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
+    if (state.conversations.some((row) => row.id === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
     state.conversationRequest = (state.conversationRequest || 0) + 1;
-    state.conversations = state.conversations.filter((row) => conversationId(row) !== id);
+    state.conversations = state.conversations.filter((row) => row.id !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
     if (state.current === id) { stopRecording(true); state.voiceDraft = false; state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
     $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
@@ -542,7 +542,7 @@ function renderConversations() {
   const today = dayKey(new Date());
   let group = null;
   for (const item of rows) {
-    const id = item.session_id || item.id;
+    const id = item.id;
     if (!id) continue;
     const when = item.last_active_at || item.last_active || item.updated_at || item.created_at, date = parseTime(when);
     const label = date && dayKey(date) === today ? "Today" : "Earlier";
@@ -596,14 +596,14 @@ async function loadConversations(more = false) {
     const target = more ? 0 : state.conversations.length;
     let offset = more ? state.conversationOffset : 0, data, rows;
     const loaded = more ? [...state.conversations] : [];
-    const known = new Set(loaded.map(conversationId));
+    const known = new Set(loaded.map((row) => row.id));
     do {
       data = await api(`/conversations?offset=${offset}`);
       if (epoch !== state.authEpoch || serial !== state.conversationRequest) return;
-      rows = Array.isArray(data.sessions) ? data.sessions : [];
+      rows = data.sessions;
       offset += rows.length;
       for (const item of rows) {
-        const id = conversationId(item);
+        const id = item.id;
         if (typeof id === "string" && id && !known.has(id)) { known.add(id); loaded.push(item); }
       }
     } while (!more && rows.length && offset < target && offset <= 100000 &&
@@ -628,11 +628,10 @@ function loadMoreIfNearEnd() {
   loadConversations(true).catch((error) => notice(error.message));
 }
 
-function conversationId(item) { return item?.session_id || item?.id; }
 
 function finishLoadingConversations(data, rows, more) {
   if (!state.current && !state.draft && !more && rows.length) {
-    selectConversation(conversationId(rows[0]), rows[0].source);
+    selectConversation(rows[0].id, rows[0].source);
     // Initial selection stays in the list on phones.
     $("app").classList.remove("chat-open");
     reportPresence();
@@ -929,7 +928,7 @@ async function selectConversation(id, source) {
   state.draft = false;
   $("app").classList.add("chat-open");
   reportPresence();
-  const item = state.conversations.find((row) => (row.session_id || row.id) === id);
+  const item = state.conversations.find((row) => row.id === id);
   $("chat-title").textContent = item ? sessionName(item) : "Conversation";
   setChatAvatar(id);
   $("origin-badge").textContent = source && source !== "roost" ? source : "";
@@ -950,7 +949,7 @@ async function loadMessages(id = state.current) {
   if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && serial > (state.messageApplied || 0)) {
     state.messageApplied = serial;
     if (data.live === true) openStream(id);
-    renderMessages(Array.isArray(data.messages) ? data.messages : []);
+    renderMessages(data.messages);
     loadApprovals(id);
   }
 }
@@ -1268,7 +1267,7 @@ function renderJobs() {
     [jobValue(job, "name"), jobValue(job, "prompt"), jobScheduleLabel(job)].join(" ").toLowerCase().includes(state.jobSearch));
   if (!rows.length) list.append(el("p", "empty-list", state.jobSearch ? "No matching jobs." : `No jobs yet. Add one for ${agent()} to handle on a schedule.`));
   for (const job of rows) {
-    const id = job.id || job.job_id;
+    const id = job.id;
     if (!id) continue;
     const row = el("button", "job-list-row" + (state.selectedJob === id ? " selected" : ""));
     row.type = "button";
@@ -1297,7 +1296,7 @@ function jobStatus(job) {
 }
 
 function currentJob() {
-  return state.jobs.find((job) => (job.id || job.job_id) === state.selectedJob);
+  return state.jobs.find((job) => job.id === state.selectedJob);
 }
 
 function selectJob(id) {
@@ -1336,13 +1335,13 @@ function renderJobDetail() {
   toggle.type = "button"; toggle.setAttribute("role", "switch");
   toggle.setAttribute("aria-checked", String(!paused));
   toggle.setAttribute("aria-label", (paused ? "Resume " : "Pause ") + (jobValue(job, "name") || "job"));
-  toggle.addEventListener("click", () => jobAction(job.id || job.job_id, paused ? "resume" : "pause"));
+  toggle.addEventListener("click", () => jobAction(job.id, paused ? "resume" : "pause"));
   const enabled = el("label", "job-enabled");
   enabled.append(el("span", "", paused ? "Paused" : "Enabled"), toggle);
   top.append(enabled);
   summary.append(top);
   // Hermes keeps no report on the job itself; its newest run's preview is the last report.
-  const latestRun = state.jobRuns[job.id || job.job_id]?.[0];
+  const latestRun = state.jobRuns[job.id]?.[0];
   const facts = [["Last run", timeLabel(job.last_run_at || latestRun?.started_at || latestRun?.created_at || latestRun?.timestamp) || "Not yet"],
                  ["Delivery", jobValue(job, "deliver") === "local" ? "Saved in Hermes" : jobValue(job, "deliver") || "Saved in Hermes"]];
   const stats = el("dl", "stats");
@@ -1362,11 +1361,11 @@ function renderJobDetail() {
   const refresh = el("button", "text-button", "Refresh");
   refresh.type = "button";
   refresh.setAttribute("aria-label", "Refresh recent runs");
-  refresh.addEventListener("click", () => loadJobRuns(job.id || job.job_id).catch((error) => notice(error.message)));
+  refresh.addEventListener("click", () => loadJobRuns(job.id).catch((error) => notice(error.message)));
   historyHeading.append(el("h2", "", "Recent runs"), refresh);
   history.append(historyHeading);
-  const runs = state.jobRuns[job.id || job.job_id];
-  if (!runs) history.append(el("p", "job-history-empty", state.jobRunsError[job.id || job.job_id] ?
+  const runs = state.jobRuns[job.id];
+  if (!runs) history.append(el("p", "job-history-empty", state.jobRunsError[job.id] ?
     "Recent runs could not load. Use Refresh to try again." : "Loading recent runs…"));
   else if (!runs.length) history.append(el("p", "job-history-empty", "No runs yet."));
   else for (const run of runs) {
@@ -1397,7 +1396,7 @@ async function loadJobRuns(id) {
     const data = await api(`/jobs/${encodeURIComponent(id)}/runs`);
     if (epoch !== state.authEpoch) return;
     delete state.jobRunsError[id];
-    state.jobRuns[id] = records(Array.isArray(data) ? data : (Array.isArray(data.runs) ? data.runs : []));
+    state.jobRuns[id] = records(data.runs);
     if (state.selectedJob === id) renderJobDetail();
   } catch (error) {
     if (epoch === state.authEpoch) { state.jobRunsError[id] = true; if (state.selectedJob === id) renderJobDetail(); }
@@ -1410,7 +1409,7 @@ async function loadJobRuns(id) {
 const JOB_PATCH_MS = 30000;
 
 function applyJob(job) {
-  const id = job && typeof job === "object" && (job.id || job.job_id);
+  const id = job && typeof job === "object" && job.id;
   if (!id) return;
   state.jobPatches[id] = { job, at: Date.now() };
   state.jobs = withJobPatches(state.jobs);
@@ -1421,7 +1420,7 @@ function withJobPatches(rows) {
   const now = Date.now(), merged = [...rows];
   for (const [id, patch] of Object.entries(state.jobPatches)) {
     if (now - patch.at > JOB_PATCH_MS) { delete state.jobPatches[id]; continue; }
-    const index = merged.findIndex((job) => (job.id || job.job_id) === id);
+    const index = merged.findIndex((job) => job.id === id);
     if (index >= 0) merged[index] = patch.job; else merged.push(patch.job);
   }
   return merged;
@@ -1432,9 +1431,9 @@ async function loadJobs() {
   const serial = state.jobsRequest = (state.jobsRequest || 0) + 1;
   const data = await api("/jobs");
   if (epoch !== state.authEpoch || serial !== state.jobsRequest) return;
-  state.jobs = withJobPatches(records(Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : [])));
-  if (!state.selectedJob || !state.jobs.some((job) => (job.id || job.job_id) === state.selectedJob)) {
-    state.selectedJob = state.jobs[0]?.id || state.jobs[0]?.job_id || null;
+  state.jobs = withJobPatches(records(data.jobs));
+  if (!state.selectedJob || !state.jobs.some((job) => job.id === state.selectedJob)) {
+    state.selectedJob = state.jobs[0]?.id || null;
   }
   renderJobs();
   if (state.selectedJob) await loadJobRuns(state.selectedJob).catch((error) => notice(error.message));
@@ -1461,9 +1460,9 @@ async function deleteJob(job) {
   const epoch = state.authEpoch;
   state.jobBusy = true;
   try {
-    await api(`/jobs/${encodeURIComponent(job.id || job.job_id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    await api(`/jobs/${encodeURIComponent(job.id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     if (epoch !== state.authEpoch) return;
-    delete state.jobRuns[job.id || job.job_id]; delete state.jobRunsError[job.id || job.job_id]; delete state.jobPatches[job.id || job.job_id];
+    delete state.jobRuns[job.id]; delete state.jobRunsError[job.id]; delete state.jobPatches[job.id];
     $("job-dialog").close(); state.selectedJob = null; $("app").classList.remove("job-open"); notice("Job deleted."); await loadJobs();
   } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
   finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
@@ -1493,14 +1492,14 @@ async function saveJob(event) {
   buttons.forEach((button) => { button.disabled = true; });
   const data = { name: $("job-name").value.trim(), prompt: $("job-prompt").value.trim(),
                  schedule: $("job-schedule").value.trim(), deliver: $("job-deliver").value.trim() };
-  const id = state.job && (state.job.id || state.job.job_id);
+  const id = state.job?.id;
   try {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
     if (epoch !== state.authEpoch) return;
     $("job-dialog").close(); notice(id ? "Job updated." : "Job created.");
     applyJob(result);
     if (!id) {
-      state.selectedJob = result.id || result.job_id || null;
+      state.selectedJob = result.id || null;
       await loadJobs();
       if (state.selectedJob) selectJob(state.selectedJob);
     } else await loadJobs();
@@ -2331,7 +2330,7 @@ $("sheet-instructions-form").addEventListener("submit", saveInstructions);
 $("sheet-export").addEventListener("click", () => setTimeout(() => $("conversation-sheet").close(), 0));
 $("chat-settings").addEventListener("click", () => {
   if (!state.current) return;
-  openConversationSheet(state.conversations.find((row) => conversationId(row) === state.current) || { id: state.current, title: $("chat-title").textContent });
+  openConversationSheet(state.conversations.find((row) => row.id === state.current) || { id: state.current, title: $("chat-title").textContent });
 });
 $("sheet-confirm-delete").addEventListener("click", deleteConversation);
 for (const id of ["sheet-cancel", "sheet-instructions-cancel", "sheet-rename-cancel", "sheet-confirm-cancel"]) $(id).addEventListener("click", () => $("conversation-sheet").close());
