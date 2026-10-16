@@ -487,6 +487,14 @@ class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [])
         self.assertIn("chat:one", app["watches"])
 
+    async def test_a_turn_that_ends_without_a_reply_stops_being_watched_silently(self):
+        now = time.time()
+        rows = [{"role": "user", "content": "check", "timestamp": now + 1},
+                {"role": "assistant", "content": "", "finish_reason": "agent_error", "timestamp": now + 2}]
+        app, sent = self.watching(rows, now)
+        await server.check_replies(app)
+        self.assertEqual((sent, app["watches"]), ([], {}))
+
     async def test_a_conversation_on_screen_is_not_notified_unless_that_report_is_stale(self):
         now = time.time()
         rows = [{"role": "assistant", "content": "Done.", "timestamp": now + 1}]
@@ -606,6 +614,27 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.delete(url, headers=self.headers, json={"confirm": True}, cookies=cookies)
         self.assertEqual(response.status, 200)
         self.assertEqual(self.app["chats"].instructions("chat:one"), "")
+
+    async def test_working_and_where_the_turn_begins_come_from_the_server(self):
+        await self.signed_in()
+        now = time.time()
+        earlier = [{"id": 1, "role": "user", "content": "hi", "timestamp": now - 60},
+                   {"id": 2, "role": "assistant", "content": "Hello.", "timestamp": now - 50}]
+        self.app["hermes"].messages.return_value = {"messages": earlier}
+        data = await (await self.client.get("/api/conversations/chat:one")).json()
+        self.assertEqual((data["working"], data["after"], data["live"]), (False, None, False))
+        # Sent from Roost and accepted by Hermes, not saved yet: working, and the turn begins after row 2.
+        server.watch_reply(self.app, "chat:one", now - 1)
+        data = await (await self.client.get("/api/conversations/chat:one")).json()
+        self.assertEqual((data["working"], data["after"]), (True, 2))
+        self.app["hermes"].sessions.return_value = {"sessions": [{"id": "chat:one"}, {"id": "chat:two"}]}
+        page = await (await self.client.get("/api/conversations")).json()
+        self.assertEqual([item["working"] for item in page["sessions"]], [True, False])
+        self.app["hermes"].messages.return_value = {"messages": earlier + [
+            {"id": 3, "role": "user", "content": "again", "timestamp": now},
+            {"id": 4, "role": "assistant", "content": "Done.", "timestamp": now + 1}]}
+        data = await (await self.client.get("/api/conversations/chat:one")).json()
+        self.assertEqual((data["working"], data["after"]), (False, 2))
 
     async def test_origin_and_auth_guards_and_error_headers(self):
         for headers in ({}, {**self.headers, "Origin": "https://other.example.invalid"}):
