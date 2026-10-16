@@ -63,11 +63,11 @@ test('failed send preserves a draft typed while the request was pending', async 
 test('sign-out clears private state, drafts and open dialogs', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; state.conversations = [{id:'one'}]; state.jobs = [{id:'job'}];
-    state.pending = {id:'one'}; state.jobRuns = {job: [{preview:'private report'}]}; state.search = 'old';`);
+    state.turn = {id:'one', working:true}; state.working = true; state.jobRuns = {job: [{preview:'private report'}]}; state.search = 'old';`);
   f.get('job-dialog').open = true; f.get('conversation-sheet').open = true; f.get('message').value = 'private draft';
   f.get('transcript').append({textContent:'private transcript'});
   f.run('signedOut()');
-  assert.equal(f.run('state.current'), null); assert.equal(f.run('state.pending'), null);
+  assert.equal(f.run('state.current'), null); assert.equal(f.run('state.turn'), null); assert.equal(f.run('state.working'), false);
   assert.equal(f.run('state.conversations.length'), 0); assert.equal(f.run('state.jobs.length'), 0);
   assert.equal(f.get('message').value, ''); assert.equal(f.get('transcript').children.length, 0);
   assert.equal(f.get('job-dialog').open, false); assert.equal(f.get('conversation-sheet').open, false);
@@ -660,30 +660,64 @@ test('an unreachable server at start shows Connecting and retries, never a blank
   f.run('start();'); assert.equal(calls, 2);
 });
 
-test('the thinking indicator stays through tool rounds and clears on the final reply', async () => {
+test('the thinking indicator follows the server, and shows at once for a message just sent', async () => {
   const f = fixture(); await tick();
   const now = Date.now() / 1000, thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
-  f.run(`state.current = 'one'; state.pending = {id: 'one', text: 'check the logs', since: Date.now()};`);
-  const user = {role: 'user', content: 'check the logs', timestamp: now};
-  const interim = {role: 'assistant', content: 'Let me look.', tool_calls: [{id: 'a'}], timestamp: now};
-  const tool = {role: 'tool', content: 'ok', timestamp: now};
-  for (const rows of [[], [user], [user, interim], [user, interim, tool]]) {
-    f.context.rows = rows; f.run('renderMessages(rows)');
-    assert.equal(thinking(), true, `${rows.length} rows`);
-  }
-  f.context.rows = [user, interim, tool, {role: 'assistant', content: 'All clear.', timestamp: now}];
-  f.run('renderMessages(rows)');
+  const user = {id: 1, role: 'user', content: 'check the logs', timestamp: now};
+  f.context.rows = [];
+  // Sent from this device; the server has not answered since.
+  f.run(`state.current = 'one'; state.turn = {id: 'one', working: false, at: Date.now() - 1000};
+    state.sentMessages = [{id: 'one', text: 'check the logs', since: Date.now(), after: 0, key: 'sent-1'}]; renderMessages(rows)`);
+  assert.equal(thinking(), true, 'unsaved and not yet reported on');
+  f.context.rows = [user, {id: 2, role: 'tool', content: 'ok', timestamp: now}];
+  f.run(`state.turn = {id: 'one', working: true, at: Date.now()}; renderMessages(rows)`);
+  assert.equal(thinking(), true);
+  assert.equal(f.run('state.sentMessages.length'), 0, 'the saved row replaced the local one');
+  f.context.rows.push({id: 3, role: 'assistant', content: 'All clear.', timestamp: now});
+  f.run(`state.turn = {id: 'one', working: false, at: Date.now()}; renderMessages(rows)`);
   assert.equal(thinking(), false);
-  assert.equal(f.run('state.pending'), null);
 });
 
-test('an opened conversation shows a turn still in progress, but not a stale or failed one', async () => {
+test('an opened conversation shows the indicator exactly when the server says the agent is working', async () => {
   const f = fixture(); await tick();
-  const now = Date.now() / 1000, thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
-  const show = rows => { f.context.rows = rows; f.run(`state.current = 'one'; state.pending = null; renderMessages(rows)`); return thinking(); };
-  assert.equal(show([{role: 'user', content: 'hi', timestamp: now}]), true);
-  assert.equal(show([{role: 'user', content: 'hi', timestamp: now - 3600}]), false);
-  assert.equal(show([{role: 'user', content: 'hi', timestamp: now}, {role: 'assistant', content: 'Failed.', finish_reason: 'error', tool_calls: [{id: 'a'}], timestamp: now}]), false);
+  const thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
+  f.context.rows = [{id: 1, role: 'user', content: 'hi', timestamp: Date.now() / 1000}];
+  for (const working of [true, false]) {
+    f.context.working = working;
+    f.run(`state.current = 'one'; state.turn = {id: 'one', working, at: Date.now()}; renderMessages(rows)`);
+    assert.equal(thinking(), working);
+  }
+  f.run(`state.turn = {id: 'other', working: true, at: Date.now()}; renderMessages(rows)`);
+  assert.equal(thinking(), false, "another conversation's answer does not apply here");
+});
+
+test('conversationView places the live turn by position, even beside identical messages', () => {
+  const f = fixture();
+  const rows = [{id: 1, role: 'user', content: 'ok'}, {id: 2, role: 'assistant', content: 'First answer.'},
+    {id: 3, role: 'user', content: 'ok'}, {id: 4, role: 'assistant', content: 'Step.', tool_calls: [{id: 'a'}]}];
+  f.context.rows = rows;
+  const view = f.run(`conversationView({rows, sent: [], current: 'one', server: {working: true, after: 2, started: 7},
+    live: {id: 'one', user: 'ok', started: 7, thoughts: '', text: 'Writing', done: false}})`);
+  assert.equal(view.liveAfter.id, 3, 'the second "ok", not the first');
+  assert.deepEqual(Array.from(view.rows.map(row => row.id)), [1, 2, 3], "the live turn's saved steps give way to the stream");
+  assert.equal(view.after, 2);
+  assert.equal(view.working, true);
+  const stale = f.run(`conversationView({rows, sent: [], current: 'one', server: {working: true, after: 0, started: 6},
+    live: {id: 'one', user: 'ok', started: 7, thoughts: '', text: '', done: false}})`);
+  assert.equal(stale.after, null, "a response about an earlier turn doesn't place this one");
+  assert.equal(stale.liveAfter.content, 'ok');
+  assert.equal(stale.rows.length, 5, 'shown after the transcript until the server answers');
+});
+
+test('conversationView retires a finished live turn once it is saved or the server says it is over', () => {
+  const f = fixture();
+  f.context.rows = [{id: 1, role: 'user', content: 'hi'}, {id: 2, role: 'tool', content: 'ok'}];
+  const live = "{id: 'one', user: 'hi', started: 7, thoughts: '', text: 'Hello.', done: true, after: 0}";
+  assert.ok(f.run(`conversationView({rows, sent: [], current: 'one', server: {working: true}, live: ${live}})`).live,
+    'done streaming, reply not saved yet: keep showing it');
+  assert.equal(f.run(`conversationView({rows, sent: [], current: 'one', server: {working: false}, live: ${live}})`).live, null);
+  f.context.rows.push({id: 3, role: 'assistant', content: 'Hello.'});
+  assert.equal(f.run(`conversationView({rows, sent: [], current: 'one', server: {working: true}, live: ${live}})`).live, null);
 });
 
 test('the working label never says typing', async () => {
@@ -715,7 +749,7 @@ test('an opened thoughts block stays open across polls, and a turn in progress s
   const now = Date.now() / 1000, block = () => f.get('transcript').children.find(n => n.className === 'thoughts');
   f.context.rows = [{id: 1, role: 'user', content: 'hi', timestamp: now},
     {id: 2, role: 'assistant', content: '', reasoning: 'Planning.', tool_calls: [{id: 'a'}], timestamp: now}];
-  f.run(`state.current = 'one'; renderMessages(rows)`);
+  f.run(`state.current = 'one'; state.turn = {id: 'one', working: true, at: Date.now()}; renderMessages(rows)`);
   const kids = f.get('transcript').children;
   assert.equal(kids.indexOf(block()), kids.findIndex(n => n.className === 'typing-row') - 1);
   block().open = true; block().events.toggle();
@@ -832,7 +866,8 @@ test('a reply streams its thoughts, then its text, in place of the steps Hermes 
   const user = {id: 1, role: 'user', content: 'check the logs', timestamp: now};
   const interim = {id: 2, role: 'assistant', content: 'Let me look.', reasoning: 'Read the log.', tool_calls: [{id: 'a'}], timestamp: now};
   f.context.rows = [user, interim];
-  f.run('renderMessages(rows)');
+  // As loadMessages would record it: the server is following the turn that started at 1, after row 0.
+  f.run(`state.turn = {id: 'one', working: true, after: 0, started: 1, at: Date.now()}; renderMessages(rows)`);
   opened[0].send({reset: true, user: 'check the logs', started: 1, thoughts: 'Read the log.'});
   f.run('renderLive()');
   const thoughts = kids().find(n => n.className === 'thoughts');
@@ -849,7 +884,7 @@ test('a reply streams its thoughts, then its text, in place of the steps Hermes 
   assert.equal(f.run('loads'), 2, 'the end of the stream reloads the transcript');
   f.context.rows = [user, interim, {id: 3, role: 'tool', content: 'ok', timestamp: now},
     {id: 4, role: 'assistant', content: 'All clear.', reasoning: 'Nothing failed.', timestamp: now}];
-  f.run('renderMessages(rows)');
+  f.run(`state.turn = {id: 'one', working: false, after: 0, started: null, at: Date.now()}; renderMessages(rows)`);
   assert.equal(f.run('state.live'), null);
   assert.equal(kids().find(n => n.className === 'thoughts').open, false);
   assert.equal(find(f.get('transcript'), n => n.className === 'typing-row'), undefined);
@@ -1257,8 +1292,8 @@ test('a second submitted message stays visible while the first reply is streamin
   f.context.rows = [{id:1,role:'user',content:'First question',timestamp:now},
     {id:2,role:'assistant',content:'Working on it',tool_calls:[{id:'tool-one'}],timestamp:now},
     {id:3,role:'user',content:'Second question',timestamp:now}];
-  f.run(`state.current='one'; state.live={id:'one',user:'First question',started:1,thoughts:'Checking',text:'Working on it',done:false};
-    state.pending={id:'one',text:'Second question',since:Date.now()}; renderMessages(rows);`);
+  f.run(`state.current='one'; state.live={id:'one',user:'First question',started:1,thoughts:'Checking',text:'Working on it',done:false,after:0};
+    renderMessages(rows);`);
   assert.match(text(f.get('transcript')), /First question/);
   assert.match(text(f.get('transcript')), /Second question/, 'the accepted follow-up must be visible during the first turn');
 });
@@ -1306,7 +1341,7 @@ test('a completed first stream does not hide later replies or wait for their tur
   f.context.rows=[{id:1,role:'user',content:'First',timestamp:Date.now()/1000},
     {id:2,role:'assistant',content:'First final',timestamp:Date.now()/1000},
     {id:3,role:'user',content:'Second',timestamp:Date.now()/1000}];
-  f.run(`state.current='one';state.live={id:'one',user:'First',started:1,thoughts:'',text:'First stream',done:true,ended:Date.now()};renderMessages(rows);`);
+  f.run(`state.current='one';state.live={id:'one',user:'First',started:1,thoughts:'',text:'First stream',done:true,after:0};renderMessages(rows);`);
   assert.equal(f.run('state.live'),null);
   assert.match(text(f.get('transcript')),/First final/);
   assert.match(text(f.get('transcript')),/Second/);
