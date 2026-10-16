@@ -19,7 +19,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__, live, turns
+from . import __version__, live, settings, turns
 
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
@@ -27,6 +27,7 @@ from .deliveries import TEXT_LIMIT as DELIVERY_LIMIT, Deliveries
 from .hermes import ID, Hermes, HermesError, plain_id
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
+from .settings import clean_name
 from . import reply_usage
 
 STATIC = Path(__file__).with_name("static")
@@ -42,10 +43,6 @@ USAGE_PATH = "/api/hermes/reply-usage"
 PLUGIN_PATHS = {DELIVERY_PATH, USAGE_PATH}
 COOKIE = "roost_session"
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
-# Accent presets; the browser holds each one's light and dark colours.
-ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
-# Or a custom colour from the picker; the browser derives its light and dark shades.
-CUSTOM_ACCENT = re.compile(r"#[0-9a-f]{6}")
 AGENT_NAME_CACHE_SECONDS = 300
 # systemd restarts the service after a non-zero exit (Restart=on-failure); 75 is EX_TEMPFAIL.
 RESTART_EXIT = 75
@@ -53,8 +50,6 @@ SOUL_LIMIT = 16000
 # Reply notifications: how often the watcher looks, how long it waits for a reply, and how
 # recently an open Roost must have reported a conversation on screen to count as looking at it.
 WATCH_INTERVAL, WATCH_SECONDS, PRESENCE_SECONDS = 4, 1800, 35
-# "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
-TIME_ZONE = re.compile(r"^(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})$")
 # Hermes status fields shown in About; the rest (paths, PIDs, auth) stays on the server.
 HERMES_STATUS_FIELDS = ("version", "release_date", "gateway_running", "gateway_state", "active_sessions")
 # Hermes returns at most 500 messages a page; an export reads up to this many pages.
@@ -270,43 +265,12 @@ async def logout(request: web.Request):
 async def me(request: web.Request):
     signed_in = request.app["sessions"].valid(request.cookies.get(COOKIE, ""))
     agent = await agent_name(request.app, ask_hermes=signed_in)
-    settings = load_settings(request.app)
+    saved = settings.load(request.app["settings_file"])
     return web.json_response({"signed_in": signed_in, "demo": request.app["demo"], "agent": agent,
-                              "accent": settings["accent"] if signed_in else ACCENTS[0],
-                              "time_zone": settings["time_zone"] if signed_in else "",
+                              "accent": saved["accent"] if signed_in else settings.ACCENTS[0],
+                              "time_zone": saved["time_zone"] if signed_in else "",
                               # Whether the sign-in page offers passkeys; not which ones exist.
                               "passkeys": request.app["passkeys"].count() > 0})
-
-
-def clean_name(value) -> str:
-    return value.strip() if isinstance(value, str) and 0 < len(value.strip()) <= 40 and value.strip().isprintable() else ""
-
-
-def valid_accent(value) -> bool:
-    return value in ACCENTS or (isinstance(value, str) and CUSTOM_ACCENT.fullmatch(value) is not None)
-
-
-def load_settings(app: web.Application) -> dict:
-    """Roost's own preferences, shared by every signed-in device."""
-    try:
-        stored = json.loads(app["settings_file"].read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        stored = {}
-    if not isinstance(stored, dict):
-        stored = {}
-    zone = stored.get("time_zone")
-    return {"agent_name": clean_name(stored.get("agent_name")),
-            "accent": stored.get("accent") if valid_accent(stored.get("accent")) else ACCENTS[0],
-            "time_zone": zone if isinstance(zone, str) and len(zone) <= 64 and TIME_ZONE.fullmatch(zone) else ""}
-
-
-def save_settings(app: web.Application, settings: dict) -> None:
-    path = app["settings_file"]
-    temporary = path.with_name(path.name + ".new")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(settings, stream)
-    os.replace(temporary, path)
 
 
 async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
@@ -325,11 +289,13 @@ async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
 
 async def agent_name(app: web.Application, *, ask_hermes: bool) -> str:
     """Roost's own setting wins; then the name Hermes shows for its profile; then "Agent"."""
-    return load_settings(app)["agent_name"] or await hermes_agent_name(app, ask=ask_hermes) or "Agent"
+    return settings.load(app["settings_file"])["agent_name"] or await hermes_agent_name(app, ask=ask_hermes) or "Agent"
 
 
 async def settings_view(app: web.Application) -> dict:
-    return {**load_settings(app), "hermes_agent_name": await hermes_agent_name(app, ask=True), "accents": list(ACCENTS)}
+    """The saved settings, the presets, and the name each source gives (`agent` is the one shown)."""
+    return {**settings.load(app["settings_file"]), "accents": list(settings.ACCENTS),
+            "hermes_agent_name": await hermes_agent_name(app, ask=True), "agent": await agent_name(app, ask_hermes=True)}
 
 
 async def get_settings(request: web.Request):
@@ -337,26 +303,10 @@ async def get_settings(request: web.Request):
 
 
 async def update_settings(request: web.Request):
-    data = await json_body(request)
-    if not data or set(data) - {"agent_name", "accent", "time_zone"}:
-        raise bad("Unsupported setting.")
-    settings = load_settings(request.app)
-    if "agent_name" in data:
-        value = data["agent_name"]
-        if not isinstance(value, str) or (value.strip() and not clean_name(value)):
-            raise bad("The name must be 1 to 40 printable characters, or empty to use Hermes's name.")
-        settings["agent_name"] = value.strip()
-    if "accent" in data:
-        value = data["accent"].lower() if isinstance(data["accent"], str) else data["accent"]
-        if not valid_accent(value):
-            raise bad("Choose one of the accent colours, or a colour like #2f6f4e.")
-        settings["accent"] = value
-    if "time_zone" in data:
-        zone = data["time_zone"]
-        if not isinstance(zone, str) or len(zone) > 64 or (zone and not TIME_ZONE.fullmatch(zone)):
-            raise bad("Choose a time zone from the list, or the device's own.")
-        settings["time_zone"] = zone
-    save_settings(request.app, settings)
+    try:
+        settings.update(request.app["settings_file"], await json_body(request))
+    except settings.SettingsError as exc:
+        raise bad(str(exc)) from None
     return web.json_response(await settings_view(request.app))
 
 

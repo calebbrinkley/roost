@@ -2,9 +2,9 @@
 
 (() => {
   const key = "roost-theme", accentKey = "roost-accent", textKey = "roost-text-size";
-  const accents = ["forest", "ocean", "violet", "rose", "amber", "slate"];
   const textSizes = ["small", "default", "large", "larger"];
-  const custom = /^#[0-9a-f]{6}$/;
+  // The server says which presets exist; a name the stylesheet doesn't know shows the default colour.
+  const preset = /^[a-z]{1,20}$/, custom = /^#[0-9a-f]{6}$/;
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
   let choice, customAccent;
   try {
@@ -12,7 +12,7 @@
     if (saved === "light" || saved === "dark") choice = saved;
     // The accent is a synced setting; this copy only avoids a flash of the default colour.
     const accent = localStorage.getItem(accentKey);
-    if (accents.includes(accent) || custom.test(accent)) setAccent(accent, false);
+    if (preset.test(accent) || custom.test(accent)) setAccent(accent, false);
     const textSize = localStorage.getItem(textKey);
     if (textSizes.includes(textSize)) document.documentElement.dataset.textSize = textSize;
   } catch { /* Keep the theme usable when storage is unavailable. */ }
@@ -50,11 +50,12 @@
     style.setProperty("--accent-ink", contrast(colour, [255, 255, 255]) >= contrast(colour, [20, 23, 28]) ? "#ffffff" : "#14171c");
     style.setProperty("--accent-text", hex(text));
   }
-  // A preset name or a custom "#rrggbb"; anything else falls back to the first preset.
+  // A preset name or a custom "#rrggbb"; anything else shows the default colour.
   function setAccent(name, save = true) {
-    const accent = accents.includes(name) || custom.test(name) ? name : accents[0];
+    const accent = preset.test(name) || custom.test(name) ? name : undefined;
     customAccent = custom.test(accent) ? accent : undefined;
-    document.documentElement.dataset.accent = customAccent ? "custom" : accent;
+    if (accent) document.documentElement.dataset.accent = customAccent ? "custom" : accent;
+    else delete document.documentElement.dataset.accent;
     paintCustomAccent();
     if (save) remember(accentKey, accent);
   }

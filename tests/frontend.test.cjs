@@ -404,11 +404,11 @@ test('delete all stays disabled until DELETE is typed, then sends that confirmat
   assert.equal(f.get('notice').textContent, 'Deleted 3 conversations.');
 });
 
-test('saving an agent name applies the name the server now reports', async () => {
+test('saving an agent name applies the name the server now reports, with no second request', async () => {
   const f = settingsFixture(); await tick();
-  f.run(`api = async (path, options = {}) => {
-    if (path === '/me') return {signed_in: true, agent: 'Robin', accent: 'forest'};
-    if (options.method === 'PATCH') return {...${SETTINGS}, agent_name: 'Robin'};
+  f.run(`globalThis.paths = []; api = async (path, options = {}) => {
+    paths.push(path);
+    if (options.method === 'PATCH') return {...${SETTINGS}, agent_name: 'Robin', agent: 'Robin'};
     if (path === '/settings/soul') return {content: 'Be brief.'};
     return ${SETTINGS}; };`);
   f.run(`setSection('settings'); selectSettingsGroup('agent')`); await tick(); await tick();
@@ -418,6 +418,15 @@ test('saving an agent name applies the name the server now reports', async () =>
   input.value = 'Robin'; input.events.input();
   await find(f.get('settings-detail'), n => n.textContent === 'Save name').events.click(); await tick();
   assert.equal(f.run('agent()'), 'Robin');
+  assert.equal(f.run('paths').includes('/me'), false);
+});
+
+test('Settings applies the name, accent and time zone another device saved', async () => {
+  const f = settingsFixture(); await tick();
+  f.run(`api = async () => ({...${SETTINGS}, agent: 'Wren', accent: '#a1b2c3', time_zone: 'Asia/Tokyo'}); renderConversations = () => {};`);
+  f.run(`setSection('settings')`); await tick();
+  assert.deepEqual([f.run('agent()'), f.context.window.roostTheme.accent, f.run('state.timeZone')], ['Wren', '#a1b2c3', 'Asia/Tokyo']);
+  assert.ok(find(f.get('settings-detail'), n => n.className === 'swatch swatch-custom chosen'), 'not a preset, so Custom is chosen');
 });
 
 test('times show in the chosen time zone, and the device zone when none is chosen', async () => {
