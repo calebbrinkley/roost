@@ -11,6 +11,8 @@ Roost is a public repository. Treat every change, commit, pull request, issue an
 
 ## Repository workflow
 
+Leave session links (such as `claude.ai/code/session_…` or `Claude-Session:` lines) out of commit messages, pull requests and comments.
+
 Use a short-lived work branch and a pull request to `main`; do not push directly to `main`. GitHub requires the `check` job and resolved review conversations. Approval is optional. Use squash merges, never force-push, and follow [CONTRIBUTING.md](CONTRIBUTING.md). Repository policy is recorded in [docs/repository-security.md](docs/repository-security.md).
 
 ## Verification
