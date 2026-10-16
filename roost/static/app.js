@@ -66,20 +66,77 @@ const ICONS = {
   stop: [["rect", { x: 7, y: 7, width: 10, height: 10, rx: 1.5 }]],
   gear: [["path", { d: "M10.08 4.85L10.09 2.18L13.91 2.18L13.92 4.85L15.70 5.59L17.59 3.71L20.29 6.41L18.41 8.30L19.15 10.08L21.82 10.09L21.82 13.91L19.15 13.92L18.41 15.70L20.29 17.59L17.59 20.29L15.70 18.41L13.92 19.15L13.91 21.82L10.09 21.82L10.08 19.15L8.30 18.41L6.41 20.29L3.71 17.59L5.59 15.70L4.85 13.92L2.18 13.91L2.18 10.09L4.85 10.08L5.59 8.30L3.71 6.41L6.41 3.71L8.30 5.59Z" }],
          ["circle", { cx: 12, cy: 12, r: 3 }]],
+  search: [["circle", { cx: 11, cy: 11, r: 7 }], ["path", { d: "m20 20-3.5-3.5" }]],
+  more: [["circle", { cx: 5, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }], ["circle", { cx: 12, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }],
+         ["circle", { cx: 19, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }]],
+  warning: [["path", { d: "M12 3 2.5 20h19z" }], ["path", { d: "M12 10v4M12 17v.01" }]],
+  palette: [["circle", { cx: 12, cy: 12, r: 9 }], ["circle", { cx: 8.5, cy: 10, r: 1 }], ["circle", { cx: 12, cy: 7.5, r: 1 }], ["circle", { cx: 15.5, cy: 10, r: 1 }],
+            ["path", { d: "M12 21a3 3 0 0 1 0-6h2a3 3 0 0 0 3-3" }]],
+  globe: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" }]],
+  bell: [["path", { d: "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" }], ["path", { d: "M10.3 21a1.9 1.9 0 0 0 3.4 0" }]],
+  key: [["circle", { cx: 8, cy: 15, r: 4 }], ["path", { d: "m10.8 12.2 9.2-9.2M17 6l3 3M14 9l2 2" }]],
+  data: [["ellipse", { cx: 12, cy: 6, rx: 8, ry: 3 }], ["path", { d: "M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" }]],
+  server: [["rect", { x: 3, y: 4, width: 18, height: 7, rx: 2 }], ["rect", { x: 3, y: 13, width: 18, height: 7, rx: 2 }], ["path", { d: "M7 7.5h.01M7 16.5h.01" }]],
+  info: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 11v6M12 7.5v.01" }]],
 };
 
-function icon(name) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "2"); svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
-  for (const [tag, attributes] of ICONS[name]) {
+function svgShapes(svg, shapes) {
+  for (const [tag, attributes] of shapes) {
     const shape = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [key, value] of Object.entries(attributes)) shape.setAttribute(key, String(value));
     svg.append(shape);
   }
   return svg;
 }
+
+function lineSvg(strokeWidth = 2) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", String(strokeWidth)); svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
+  return svg;
+}
+
+function icon(name) { return svgShapes(lineSvg(), ICONS[name]); }
+
+// Each conversation keeps one colour and one friendly face, both picked from a hash of its id.
+const DOT = { fill: "currentColor", stroke: "none" };
+const FACE_EYES = [
+  [["circle", { cx: 9, cy: 10, r: 1.3, ...DOT }], ["circle", { cx: 15, cy: 10, r: 1.3, ...DOT }]],
+  [["path", { d: "M7.5 10.5q1.5-2 3 0M13.5 10.5q1.5-2 3 0" }]],
+  [["circle", { cx: 9, cy: 10, r: 1.3, ...DOT }], ["path", { d: "M13.5 10.5q1.5-2 3 0" }]],
+  [["ellipse", { cx: 9, cy: 10, rx: 1, ry: 1.6, ...DOT }], ["ellipse", { cx: 15, cy: 10, rx: 1, ry: 1.6, ...DOT }]],
+];
+const FACE_MOUTHS = [
+  [["path", { d: "M8.5 14.5q3.5 3 7 0" }]],
+  [["path", { d: "M9.5 14.2h5q-.6 2.6-2.5 2.6t-2.5-2.6z", fill: "currentColor" }]],
+  [["path", { d: "M10 15q2 1.5 4 0" }]],
+  [["path", { d: "M9 15q1.5 1.5 3 0q1.5 1.5 3 0" }]],
+];
+const FACE_CHEEKS = [["circle", { cx: 7, cy: 13.5, r: 1.2, fill: "#fff", opacity: .35, stroke: "none" }],
+                     ["circle", { cx: 17, cy: 13.5, r: 1.2, fill: "#fff", opacity: .35, stroke: "none" }]];
+const AVATAR_HUES = 8;
+
+// FNV-1a: small, stable and well spread, so neighbouring ids get different faces.
+function faceSeed(id) {
+  let hash = 0x811c9dc5;
+  for (const char of String(id || "")) hash = Math.imul(hash ^ char.codePointAt(0), 0x01000193) >>> 0;
+  return hash;
+}
+
+function avatar(id, className = "") {
+  const seed = faceSeed(id), node = el("span", `av hue-${seed % AVATAR_HUES + 1}${className ? " " + className : ""}`);
+  node.setAttribute("aria-hidden", "true");
+  const face = svgShapes(lineSvg(1.8), [...FACE_EYES[(seed >>> 3) % 4], ...FACE_MOUTHS[(seed >>> 5) % 4], ...((seed >>> 7) % 2 ? FACE_CHEEKS : [])]);
+  face.setAttribute("class", "face");
+  node.append(face);
+  return node;
+}
+
+function setChatAvatar(id) { $("chat-avatar").replaceChildren(avatar(id, "sm")); }
+
+// A new conversation has no id until its first message, so its face comes from a fresh draft seed.
+function newDraftSeed() { state.draftSeed = "draft:" + Date.now() + ":" + Math.random(); }
 
 let noticeTimer;
 function notice(message) {
@@ -261,6 +318,7 @@ function setSection(section) {
   $("search").value = jobs ? state.jobSearch : state.search;
   $("search").placeholder = $("search-label").textContent = "Search " + noun;
   $("sidebar-new").setAttribute("aria-label", create); $("sidebar-new").title = create;
+  $("sidebar-new").replaceChildren(icon(jobs ? "plus" : "compose"));
   show("conversation-list", section === "messages");
   show("sidebar-jobs-list", section === "jobs");
   $("mobile-list-title").textContent = { jobs: "Jobs", settings: "Settings" }[section] || "Messages";
@@ -288,7 +346,7 @@ function parseTime(value) {
 // The calendar day in the display zone, as YYYY-MM-DD.
 function dayKey(date) { return date.toLocaleDateString("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", ...zone() }); }
 
-function clockTime(date) { return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", ...zone() }); }
+function clockTime(date) { return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true, ...zone() }); }
 
 function timeLabel(value) {
   const date = parseTime(value);
@@ -481,10 +539,16 @@ function renderConversations() {
   const rows = state.conversations.filter((item) =>
     (sessionName(item) + " " + (withoutInstructions(item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
   if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
+  const today = dayKey(new Date());
+  let group = null;
   for (const item of rows) {
     const id = item.session_id || item.id;
     if (!id) continue;
+    const when = item.last_active_at || item.last_active || item.updated_at || item.created_at, date = parseTime(when);
+    const label = date && dayKey(date) === today ? "Today" : "Earlier";
+    if (label !== group) { group = label; list.append(el("div", "group-label", label)); }
     const button = el("button", "conversation-row" + (state.current === id ? " selected" : ""));
+    button.append(avatar(id));
     const copy = el("span", "conversation-copy");
     const heading = el("span", "conversation-heading");
     heading.append(el("span", "conversation-name", sessionName(item)));
@@ -494,7 +558,7 @@ function renderConversations() {
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
-    meta.append(el("span", "", timeLabel(item.last_active_at || item.last_active || item.updated_at || item.created_at)));
+    meta.append(el("span", "", timeLabel(when)));
     if (state.pending?.id === id) meta.append(el("span", "unread-dot"));
     button.append(meta);
     const wrapper = el("div", "swipe-row" + (state.swipeOpenId === id ? " revealed" : ""));
@@ -580,13 +644,34 @@ function finishLoadingConversations(data, rows, more) {
 function renderWelcome() {
   show("chat-settings", false);
   const transcript = $("transcript"); transcript.replaceChildren();
+  if (!state.draftSeed) newDraftSeed();
+  setChatAvatar(state.draftSeed);
   const card = el("div", "welcome-card");
-  card.append(el("div", "welcome-symbol", agent().charAt(0).toUpperCase()), el("h2", "", `Message ${agent()}`),
-              el("p", "", "A question, an idea, or something to work through. Start wherever you like."));
+  const starters = el("div", "starters");
+  for (const [title, hint, text] of STARTERS) {
+    const starter = el("button", "starter");
+    starter.type = "button";
+    starter.append(el("b", "", title), el("span", "", hint));
+    starter.addEventListener("click", () => {
+      $("message").value = text;
+      $("composer").classList.add("has-text");
+      $("message").focus();
+    });
+    starters.append(starter);
+  }
+  card.append(avatar(state.draftSeed, "xl"), el("h2", "", agent()), starters);
   transcript.append(card);
   $("chat-title").textContent = "New conversation";
   show("origin-badge", false);
 }
+
+// Suggestions on a new conversation's welcome screen: a tap puts the message in the box to edit or send.
+const STARTERS = [
+  ["Plan my week", "From your calendar and notes", "Help me plan my week, using my calendar and notes if you can see them."],
+  ["Set up a job", "A briefing every weekday at 8", "Set up a job that sends me a short briefing every weekday at 8."],
+  ["Summarise a note", "Anything in your notes folder", "Summarise a note from my notes folder. Ask me which one."],
+  ["Check on the server", "Disk, services and backups", "Check on the server: disk space, services and backups."],
+];
 
 // Instructions set for a conversation travel once with the next message, between these lines
 // (roost/chats.py writes them); the transcript shows that message as it was typed.
@@ -793,7 +878,7 @@ function renderMessages(rows) {
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
       const status = row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
-      transcript.append(el("div", "under right", shown ? `${status} · ${time}` : status));
+      transcript.append(el("div", "under right", shown ? `${status} - ${time}` : status));
     } else {
       const under = el("div", "under reply-under");
       if (row.id != null) under.append(playButton(row.id));
@@ -846,6 +931,7 @@ async function selectConversation(id, source) {
   reportPresence();
   const item = state.conversations.find((row) => (row.session_id || row.id) === id);
   $("chat-title").textContent = item ? sessionName(item) : "Conversation";
+  setChatAvatar(id);
   $("origin-badge").textContent = source && source !== "roost" ? source : "";
   show("origin-badge", Boolean(source && source !== "roost"));
   renderConversations();
@@ -900,7 +986,9 @@ function renderApprovals() {
   panel.dataset.content = signature; panel.replaceChildren();
   for (const item of items) {
     const card = el("article", "approval-card");
-    card.append(el("strong", "", `${agent()} needs your approval`));
+    const heading = el("div", "approval-heading");
+    heading.append(icon("warning"), el("strong", "", item.command ? `${agent()} wants to run a command` : `${agent()} needs your approval`));
+    card.append(heading);
     if (item.description) card.append(el("p", "approval-summary", item.description));
     if (item.command) card.append(el("pre", "approval-command", item.command));
     const buttons = el("div", "approval-actions");
@@ -1066,6 +1154,7 @@ function newConversation() {
   leaveLive();
   state.current = null;
   state.draft = true;
+  newDraftSeed();
   showReasoning("default");
   $("app").classList.add("chat-open");
   renderConversations(); renderWelcome();
@@ -1419,6 +1508,8 @@ function settingsGroups() {
           ["about", "About", "Version, live status and credits"]];
 }
 
+const SETTINGS_ICONS = { appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+
 async function loadSettings() {
   const epoch = state.authEpoch;
   if (!state.settingsGroup && !phoneWidth.matches) state.settingsGroup = "appearance";
@@ -1447,10 +1538,14 @@ function selectSettingsGroup(id) {
 function renderSettings() {
   const list = $("sidebar-settings-list"); list.replaceChildren();
   for (const [id, label, hint] of settingsGroups()) {
-    const row = el("button", "job-list-row" + (state.settingsGroup === id ? " selected" : ""));
+    const row = el("button", "job-list-row settings-row" + (state.settingsGroup === id ? " selected" : ""));
     row.type = "button";
     if (state.settingsGroup === id) row.setAttribute("aria-current", "true");
-    row.append(el("span", "job-list-name", label), el("span", "settings-row-hint", hint));
+    const badge = el("span", "settings-icon");
+    if (id === "agent") badge.textContent = agent().charAt(0).toUpperCase(); else badge.append(icon(SETTINGS_ICONS[id]));
+    const copy = el("span", "settings-row-copy");
+    copy.append(el("span", "job-list-name", label), el("span", "settings-row-hint", hint));
+    row.append(badge, copy);
     row.addEventListener("click", () => selectSettingsGroup(id));
     list.append(row);
   }
@@ -2062,7 +2157,7 @@ $("nav-messages").addEventListener("click", () => setSection("messages"));
 $("nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("mobile-nav-messages").addEventListener("click", () => setSection("messages"));
 $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
-$("nav-settings").append(icon("gear")); $("mobile-nav-settings").append(icon("gear")); $("chat-settings").append(icon("gear"));
+$("chat-settings").append(icon("more"));
 $("nav-settings").addEventListener("click", () => setSection("settings"));
 $("mobile-nav-settings").addEventListener("click", () => setSection("settings"));
 $("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));

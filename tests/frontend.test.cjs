@@ -451,7 +451,7 @@ test('reply metrics distinguish unavailable and zero values without guessing fro
   assert.equal(f.run('replyUsage({roost_usage:badUsage})'), '— in / — out · — TPS');
 });
 
-test('the gear opens Settings and the section tabs stay for Messages and Jobs', async () => {
+test('the Settings tab opens Settings beside Messages and Jobs', async () => {
   const f = settingsFixture(); await tick();
   f.run(`api = async path => path === '/settings' ? ${SETTINGS} : {};`);
   f.get('nav-settings').events.click(); await tick();
