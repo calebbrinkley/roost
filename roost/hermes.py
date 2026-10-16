@@ -1,7 +1,13 @@
-"""Server-only, narrow client for the pinned Hermes dashboard API."""
+"""Server-only, narrow client for the pinned Hermes dashboard API.
+
+The rest of Roost speaks in conversations, jobs and the profile; Hermes's paths, query strings, ID quoting
+and response variants stay in this module. Records are Hermes's own, plus an `id` that is always set,
+and lists always come wrapped (`{"sessions": [...]}`, `{"jobs": [...]}`, `{"runs": [...]}`).
+"""
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,6 +18,51 @@ from . import approvals
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 RPC_TIMEOUT = 40
+# A conversation, job or profile ID: also a path segment, so never "." or "..".
+ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
+SESSION_PAGE = 100
+RUNS_LIMIT = 20
+JOB_ACTIONS = ("pause", "resume", "trigger")
+
+
+def plain_id(value) -> str:
+    """The ID when it is a safe path segment, else ""."""
+    return value if isinstance(value, str) and ID.fullmatch(value) and value not in {".", ".."} else ""
+
+
+def _segment(value: str) -> str:
+    if not plain_id(value):
+        raise HermesError(400, "Invalid identifier.")
+    return quote(value, safe="")
+
+
+def _with_id(item, *keys) -> dict | None:
+    """A copy of Hermes's record with `id` taken from the first of `keys` it has; None without one."""
+    if not isinstance(item, dict):
+        return None
+    found = next((plain_id(item.get(key)) for key in keys if plain_id(item.get(key))), "")
+    return {**item, "id": found} if found else None
+
+
+def _listed(result, key: str, *id_keys, required: bool = True) -> dict:
+    """Hermes answers some lists bare and some wrapped; Roost always wraps them under `key`.
+    A record without a usable ID is dropped, unless `required` is False (a run need not link anywhere)."""
+    rows = result if isinstance(result, list) else (result.get(key) if isinstance(result, dict) else None)
+    records = []
+    for item in rows if isinstance(rows, list) else []:
+        record = _with_id(item, *id_keys)
+        if record is None and not required and isinstance(item, dict):
+            record = {name: value for name, value in item.items() if name != "id"}
+        if record is not None:
+            records.append(record)
+    return {**(result if isinstance(result, dict) else {}), key: records}
+
+
+def _messages(result) -> dict:
+    """A transcript with `messages` always a list; anything else from Hermes is invalid."""
+    if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
+        raise HermesError(502, "Hermes returned invalid data.")
+    return result
 
 
 class HermesError(Exception):
@@ -52,7 +103,7 @@ class Hermes:
                 raise HermesError(503, "Hermes dashboard is unavailable.") from exc
             self.authenticated = True
 
-    async def request(self, method: str, path: str, body: dict | None = None, *, timeout: int = 45):
+    async def _request(self, method: str, path: str, body: dict | None = None, *, timeout: int = 45):
         await self._login()
         for attempt in range(2):
             try:
@@ -83,9 +134,109 @@ class Hermes:
                 raise HermesError(503, "Hermes is unavailable.") from exc
         raise HermesError(502, "Hermes dashboard sign-in expired.")
 
+    # Conversations ("sessions" in Hermes). Conversation records carry `id` from Hermes's `session_id`.
+
+    async def sessions(self, offset: int = 0) -> dict:
+        """One page of conversations, newest first, without job runs."""
+        result = await self._request(
+            "GET", f"/api/sessions?limit={SESSION_PAGE}&order=recent&exclude_sources=cron&offset={int(offset)}")
+        return _listed(result, "sessions", "session_id", "id")
+
+    async def messages(self, sid: str) -> dict:
+        """The newest part of a transcript (Hermes returns at most its newest 500 rows)."""
+        return _messages(await self._request("GET", f"/api/sessions/{_segment(sid)}/messages?inline_images=false"))
+
+    async def history(self, sid: str, *, offset: int, limit: int) -> list:
+        """One page of the whole transcript, oldest first, compressed history included."""
+        result = await self._request(
+            "GET", f"/api/sessions/{_segment(sid)}/messages?inline_images=false&order=oldest&include_compacted=true"
+                   f"&limit={int(limit)}&offset={int(offset)}")
+        return _messages(result)["messages"]
+
+    async def rename_session(self, sid: str, title: str) -> dict:
+        return await self._request("PATCH", f"/api/sessions/{_segment(sid)}", {"title": title})
+
+    async def delete_session(self, sid: str) -> dict:
+        return await self._request("DELETE", f"/api/sessions/{_segment(sid)}")
+
+    # Jobs ("cron jobs" in Hermes). Job records carry `id` from Hermes's `id` or `job_id`.
+
+    async def jobs(self) -> dict:
+        return _listed(await self._request("GET", "/api/cron/jobs"), "jobs", "id", "job_id")
+
+    async def job(self, jid: str) -> dict:
+        return self._job(await self._request("GET", f"/api/cron/jobs/{_segment(jid)}"))
+
+    async def runs(self, jid: str) -> dict:
+        """The job's most recent runs. A run's `id` is the conversation it wrote, when it has one."""
+        result = await self._request("GET", f"/api/cron/jobs/{_segment(jid)}/runs?limit={RUNS_LIMIT}")
+        return _listed(result, "runs", "id", "session_id", required=False)
+
+    async def create_job(self, fields: dict) -> dict:
+        return self._job(await self._request("POST", "/api/cron/jobs", fields))
+
+    async def update_job(self, jid: str, updates: dict) -> dict:
+        return self._job(await self._request("PUT", f"/api/cron/jobs/{_segment(jid)}", {"updates": updates}))
+
+    async def job_action(self, jid: str, action: str) -> dict:
+        if action not in JOB_ACTIONS:
+            raise HermesError(404, "Unknown job action.")
+        return self._job(await self._request("POST", f"/api/cron/jobs/{_segment(jid)}/{action}"))
+
+    async def delete_job(self, jid: str) -> dict:
+        return await self._request("DELETE", f"/api/cron/jobs/{_segment(jid)}")
+
+    @staticmethod
+    def _job(result) -> dict:
+        """Hermes answers a job change with the job as saved; other answers pass through."""
+        return _with_id(result, "id", "job_id") or (result if isinstance(result, dict) else {})
+
+    # The profile this dashboard serves: its name, display name and SOUL.
+
+    async def profile(self) -> dict:
+        """The active profile's record. Its name is a path segment, so anything unusual reads as "default"."""
+        name = await self._profile_name()
+        listed = await self._request("GET", "/api/profiles")
+        profiles = listed.get("profiles") if isinstance(listed, dict) else None
+        found = next((item for item in profiles if isinstance(item, dict) and item.get("name") == name), None) \
+            if isinstance(profiles, list) else None
+        return {**(found or {}), "name": name}
+
+    async def _profile_name(self) -> str:
+        active = await self._request("GET", "/api/profiles/active")
+        return plain_id(active.get("current") if isinstance(active, dict) else None) or "default"
+
+    async def soul(self) -> str:
+        result = await self._request("GET", f"/api/profiles/{_segment(await self._profile_name())}/soul")
+        content = result.get("content") if isinstance(result, dict) else None
+        return content if isinstance(content, str) else ""
+
+    async def save_soul(self, content: str) -> None:
+        await self._request("PUT", f"/api/profiles/{_segment(await self._profile_name())}/soul", {"content": content})
+
+    # The rest of the dashboard.
+
+    async def status(self) -> dict:
+        result = await self._request("GET", "/api/status", timeout=10)
+        return result if isinstance(result, dict) else {}
+
+    async def restart(self) -> None:
+        await self._request("POST", "/api/gateway/restart")
+
+    async def transcribe(self, data_url: str, mime_type: str) -> str:
+        result = await self._request("POST", "/api/audio/transcribe", {"data_url": data_url, "mime_type": mime_type}, timeout=180)
+        text = result.get("transcript") if isinstance(result, dict) else None
+        return text.strip() if isinstance(text, str) else ""
+
+    async def speak(self, text: str) -> str:
+        """The spoken text as a data URL ("" when Hermes sent none)."""
+        result = await self._request("POST", "/api/audio/speak", {"text": text}, timeout=180)
+        spoken = result.get("data_url") if isinstance(result, dict) else None
+        return spoken if isinstance(spoken, str) else ""
+
     async def _socket(self):
         await self._login()
-        ticket_data = await self.request("POST", "/api/auth/ws-ticket")
+        ticket_data = await self._request("POST", "/api/auth/ws-ticket")
         ticket = ticket_data.get("ticket") if isinstance(ticket_data, dict) else None
         if not isinstance(ticket, str) or not ticket:
             raise HermesError(502, "Hermes did not provide a chat ticket.")

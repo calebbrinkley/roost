@@ -205,7 +205,7 @@ async def checks():
         remaining = await request(client, "GET", "/api/conversations")
         assert not any(row.get("id") == sid for row in remaining["sessions"])
 
-        jobs = await request(client, "GET", "/api/jobs")
+        jobs = (await request(client, "GET", "/api/jobs"))["jobs"]
         assert len(jobs) >= 2
         for job in jobs:
             runs = await request(client, "GET", f"/api/jobs/{job['id']}/runs")
@@ -261,7 +261,7 @@ async def checks():
         await request(client, "POST", "/api/service/restart-agent")
         await request(client, "DELETE", "/api/jobs", 400, {"confirm": True})
         assert (await request(client, "DELETE", "/api/jobs", body={"confirm": "DELETE"}))["deleted"] >= 2
-        assert await request(client, "GET", "/api/jobs") == []
+        assert (await request(client, "GET", "/api/jobs"))["jobs"] == []
         assert (await request(client, "DELETE", "/api/conversations", body={"confirm": "DELETE"}))["deleted"] >= 1
         left = await request(client, "GET", "/api/conversations")
         assert not left["sessions"] and left["total"] == 0

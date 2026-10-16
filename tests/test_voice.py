@@ -6,7 +6,6 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import CookieJar
@@ -14,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from roost import server
 from roost.auth import make_password_hash
+from hermes_fake import fake_hermes
 
 AUDIO = b"ID3-fake-mp3-bytes"
 
@@ -39,17 +39,15 @@ class VoiceRouteTests(unittest.IsolatedAsyncioTestCase):
             self.app = server.create_app()
         self.calls = []
         self.speak_delay = 0
-        async def request(method, path, body=None, *, timeout=45):
-            self.calls.append((method, path, body, timeout))
-            if path.startswith("/api/sessions/"):
-                return {"messages": [{"id": 1, "role": "user", "content": "hi"}, {"id": 2, "role": "assistant", "content": "**Hello** there."}]}
-            if path == "/api/audio/speak":
-                await asyncio.sleep(self.speak_delay)
-                return {"ok": True, "data_url": "data:audio/mpeg;base64," + base64.b64encode(AUDIO).decode()}
-            if path == "/api/audio/transcribe":
-                return {"ok": True, "transcript": "  what is on today  "}
-            return {}
-        self.app["hermes"] = SimpleNamespace(start=lambda: asyncio.sleep(0), close=lambda: asyncio.sleep(0), request=request)
+        async def speak(text):
+            self.calls.append(text)
+            await asyncio.sleep(self.speak_delay)
+            return "data:audio/mpeg;base64," + base64.b64encode(AUDIO).decode()
+        self.app["hermes"] = fake_hermes()
+        self.app["hermes"].messages.return_value = {"messages": [{"id": 1, "role": "user", "content": "hi"},
+                                                                 {"id": 2, "role": "assistant", "content": "**Hello** there."}]}
+        self.app["hermes"].speak.side_effect = speak
+        self.app["hermes"].transcribe.return_value = "what is on today"
         self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
         await self.client.start_server()
         self.headers = {"Origin": "https://roost.example.invalid", "X-Roost-Request": "1"}
@@ -71,7 +69,7 @@ class VoiceRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/audio/transcribe", headers=self.headers, cookies=self.cookies,
                                           json={"data_url": recording, "mime_type": "audio/webm;codecs=opus"})
         self.assertEqual(await response.json(), {"transcript": "what is on today"})
-        self.assertEqual((self.calls[-1][1], self.calls[-1][3]), ("/api/audio/transcribe", 180))
+        self.app["hermes"].transcribe.assert_awaited_once_with(recording, "audio/webm;codecs=opus")
 
     async def test_a_reply_is_read_aloud_once_with_byte_ranges(self):
         url = "/api/conversations/chat:one/speech/2"
@@ -85,8 +83,7 @@ class VoiceRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.read(), AUDIO[-3:])
         response = await self.client.get(url, headers={"Range": "bytes=999-"}, cookies=self.cookies)
         self.assertEqual(response.status, 416)
-        spoken = [call for call in self.calls if call[1] == "/api/audio/speak"]
-        self.assertEqual(spoken, [("POST", "/api/audio/speak", {"text": "Hello there."}, 180)], "one synthesis, then the cache")
+        self.assertEqual(self.calls, ["Hello there."], "one synthesis, then the cache")
         response = await self.client.get("/api/conversations/chat:one/speech/1", cookies=self.cookies)
         self.assertEqual(response.status, 404, "only the agent's replies are read")
         response = await self.client.get(url)

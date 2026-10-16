@@ -24,7 +24,7 @@ from . import __version__, live
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
 from .deliveries import TEXT_LIMIT as DELIVERY_LIMIT, Deliveries
-from .hermes import Hermes, HermesError
+from .hermes import ID, Hermes, HermesError, plain_id
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
 from . import reply_usage
@@ -41,7 +41,6 @@ DELIVERY_PATH = "/api/hermes/deliveries"
 USAGE_PATH = "/api/hermes/reply-usage"
 PLUGIN_PATHS = {DELIVERY_PATH, USAGE_PATH}
 COOKIE = "roost_session"
-ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
 # Accent presets; the browser holds each one's light and dark colours.
 ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
@@ -94,11 +93,11 @@ async def bounded_body(request: web.Request, limit: int) -> bytes:
     return bytes(body)
 
 
-def item_id(request: web.Request, name: str, *, encode: bool = True) -> str:
-    value = request.match_info[name]
-    if not ID.fullmatch(value) or value in {".", ".."}:
+def item_id(request: web.Request, name: str) -> str:
+    value = plain_id(request.match_info[name])
+    if not value:
         raise bad("Invalid identifier.")
-    return quote(value, safe="") if encode else value
+    return value
 
 
 def secured_cookie(response: web.StreamResponse, request: web.Request, token: str) -> None:
@@ -310,23 +309,13 @@ def save_settings(app: web.Application, settings: dict) -> None:
     os.replace(temporary, path)
 
 
-async def hermes_profile(app: web.Application) -> str:
-    """The profile this dashboard serves; its name is a path segment, so it must be a plain identifier."""
-    active = await app["hermes"].request("GET", "/api/profiles/active")
-    current = active.get("current") if isinstance(active, dict) else None
-    return current if isinstance(current, str) and ID.fullmatch(current) and current not in {".", ".."} else "default"
-
-
 async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
     """The name Hermes shows for its profile ("" when it has none), cached for a few minutes."""
     cached, fetched = app["hermes_agent_name"]
     # `fetched` is None until the first lookup: monotonic time can be small just after boot.
     if ask and (fetched is None or time.monotonic() - fetched > AGENT_NAME_CACHE_SECONDS):
         try:
-            current = await hermes_profile(app)
-            listed = await app["hermes"].request("GET", "/api/profiles")
-            profiles = listed.get("profiles") if isinstance(listed, dict) else None
-            profile = next((item for item in profiles or [] if isinstance(item, dict) and item.get("name") == current), {})
+            profile = await app["hermes"].profile()
             cached = clean_name(profile.get("display_name")) or clean_name(profile.get("bot_title"))
             app["hermes_agent_name"] = (cached, time.monotonic())
         except HermesError:
@@ -372,18 +361,14 @@ async def update_settings(request: web.Request):
 
 
 async def get_soul(request: web.Request):
-    profile = await hermes_profile(request.app)
-    result = await request.app["hermes"].request("GET", f"/api/profiles/{quote(profile, safe='')}/soul")
-    content = result.get("content") if isinstance(result, dict) else None
-    return web.json_response({"content": content if isinstance(content, str) else ""})
+    return web.json_response({"content": await request.app["hermes"].soul()})
 
 
 async def update_soul(request: web.Request):
     data = await json_body(request)
     if set(data) != {"content"} or not isinstance(data["content"], str) or len(data["content"]) > SOUL_LIMIT:
         raise bad(f"Instructions must be at most {SOUL_LIMIT} characters.")
-    profile = await hermes_profile(request.app)
-    await request.app["hermes"].request("PUT", f"/api/profiles/{quote(profile, safe='')}/soul", {"content": data["content"]})
+    await request.app["hermes"].save_soul(data["content"])
     return web.json_response({"ok": True})
 
 
@@ -397,16 +382,15 @@ async def delete_all_conversations(request: web.Request):
     confirmed_everything(await json_body(request))
     hermes, deleted, attempted = request.app["hermes"], 0, set()
     while True:
-        page = await hermes.request("GET", "/api/sessions?limit=100&order=recent&exclude_sources=cron&offset=0")
-        ids = [conversation_key(item) for item in (page.get("sessions") or [] if isinstance(page, dict) else [])]
-        ids = [sid for sid in ids if sid and sid not in attempted]
+        page = await hermes.sessions()
+        ids = [item["id"] for item in page["sessions"] if item["id"] not in attempted]
         # Hermes kept rows it said it deleted: stop instead of asking again forever.
         if not ids:
             break
         for sid in ids:
             attempted.add(sid)
             try:
-                await hermes.request("DELETE", f"/api/sessions/{quote(sid, safe='')}")
+                await hermes.delete_session(sid)
             except HermesError as exc:
                 raise HermesError(exc.status, f"Deleted {deleted} conversations, then Hermes refused the next one.") from None
             request.app["chats"].forget(sid)
@@ -415,22 +399,12 @@ async def delete_all_conversations(request: web.Request):
     return web.json_response({"deleted": deleted})
 
 
-def conversation_key(item) -> str:
-    value = item.get("session_id") or item.get("id") if isinstance(item, dict) else None
-    return value if isinstance(value, str) and ID.fullmatch(value) and value not in {".", ".."} else ""
-
-
 async def delete_all_jobs(request: web.Request):
     confirmed_everything(await json_body(request))
     hermes, deleted = request.app["hermes"], 0
-    listed = await hermes.request("GET", "/api/cron/jobs")
-    rows = listed if isinstance(listed, list) else (listed.get("jobs") or [] if isinstance(listed, dict) else [])
-    for job in rows:
-        jid = conversation_key({"id": job.get("id") or job.get("job_id")}) if isinstance(job, dict) else ""
-        if not jid:
-            continue
+    for job in (await hermes.jobs())["jobs"]:
         try:
-            await hermes.request("DELETE", f"/api/cron/jobs/{quote(jid, safe='')}")
+            await hermes.delete_job(job["id"])
         except HermesError as exc:
             raise HermesError(exc.status, f"Deleted {deleted} jobs, then Hermes refused the next one.") from None
         deleted += 1
@@ -488,8 +462,8 @@ async def about(request: web.Request):
     app = request.app
     started = time.monotonic()
     try:
-        status = await app["hermes"].request("GET", "/api/status", timeout=10)
-        hermes = {key: status.get(key) for key in HERMES_STATUS_FIELDS} if isinstance(status, dict) else {}
+        status = await app["hermes"].status()
+        hermes = {key: status.get(key) for key in HERMES_STATUS_FIELDS}
         hermes.update(reachable=True, latency_ms=round((time.monotonic() - started) * 1000))
     except HermesError:
         hermes = {"reachable": False}
@@ -562,11 +536,10 @@ async def check_replies(app: web.Application) -> None:
                             "approval": {"conversation": sid, "request_id": item["request_id"],
                                          "choices": item["choices"]}})
         try:
-            data = await app["hermes"].request("GET", f"/api/sessions/{quote(sid, safe='')}/messages?inline_images=false")
+            rows = (await app["hermes"].messages(sid))["messages"]
         except HermesError:
             continue
-        rows = data.get("messages") if isinstance(data, dict) else None
-        reply = finished_reply(rows if isinstance(rows, list) else [], watch["since"])
+        reply = finished_reply(rows, watch["since"])
         if reply is None:
             continue
         app["watches"].pop(sid, None)
@@ -627,7 +600,7 @@ async def receive_delivery(request: web.Request):
 
 
 async def get_delivery(request: web.Request):
-    item = request.app["deliveries"].get(item_id(request, "did", encode=False))
+    item = request.app["deliveries"].get(item_id(request, "did"))
     if item is None:
         raise web.HTTPNotFound(text="That message is no longer kept.")
     return web.json_response(item)
@@ -704,22 +677,16 @@ async def transcribe(request: web.Request):
     if not (isinstance(data_url, str) and data_url.startswith("data:") and ";base64," in data_url[:200]
             and isinstance(mime, str) and re.fullmatch(r"(audio/[a-z0-9.+-]+|video/webm)(;[ a-z0-9=.,\"-]*)?", mime)):
         raise bad("Expected an audio recording.")
-    result = await request.app["hermes"].request("POST", "/api/audio/transcribe",
-                                                 {"data_url": data_url, "mime_type": mime}, timeout=180)
-    text = result.get("transcript") if isinstance(result, dict) else None
-    return web.json_response({"transcript": text.strip() if isinstance(text, str) else ""})
+    return web.json_response({"transcript": await request.app["hermes"].transcribe(data_url, mime)})
 
 
 async def synthesize(app: web.Application, sid: str, mid: str) -> tuple[str, bytes]:
-    data = await app["hermes"].request("GET", f"/api/sessions/{quote(sid, safe='')}/messages?inline_images=false")
-    rows = data.get("messages") if isinstance(data, dict) else None
-    row = next((row for row in rows or [] if isinstance(row, dict) and str(row.get("id")) == mid), None)
+    rows = (await app["hermes"].messages(sid))["messages"]
+    row = next((row for row in rows if isinstance(row, dict) and str(row.get("id")) == mid), None)
     text = speakable(message_text(row)) if row and row.get("role") == "assistant" else ""
     if not text:
         raise web.HTTPNotFound(text="There is nothing to read aloud there.")
-    result = await app["hermes"].request("POST", "/api/audio/speak", {"text": text}, timeout=180)
-    spoken = result.get("data_url") if isinstance(result, dict) else None
-    header, _, encoded = spoken.partition(",") if isinstance(spoken, str) else ("", "", "")
+    header, _, encoded = (await app["hermes"].speak(text)).partition(",")
     mime = header[5:].split(";", 1)[0] if header.startswith("data:") and header.endswith(";base64") else ""
     try:
         audio = base64.b64decode(encoded, validate=True)
@@ -733,7 +700,7 @@ async def synthesize(app: web.Application, sid: str, mid: str) -> tuple[str, byt
 async def speech(request: web.Request):
     """One of the agent's replies, read aloud. The URL names the reply, so a tap can start the player at once."""
     app = request.app
-    key = (item_id(request, "sid", encode=False), item_id(request, "mid", encode=False))
+    key = (item_id(request, "sid"), item_id(request, "mid"))
     cache, pending = app["speech"], app["speech_pending"]
     if key not in cache:
         # A player's first range request and the next one share one synthesis.
@@ -794,7 +761,7 @@ async def test_push(request: web.Request):
 
 
 async def restart_agent(request: web.Request):
-    await request.app["hermes"].request("POST", "/api/gateway/restart")
+    await request.app["hermes"].restart()
     return web.json_response({"ok": True})
 
 
@@ -812,30 +779,25 @@ async def conversations(request: web.Request):
     page = request.query.get("offset", "0")
     if not re.fullmatch(r"[0-9]{1,6}", page) or int(page) > 100000:
         raise bad("Invalid page offset.")
-    result = await request.app["hermes"].request("GET", f"/api/sessions?limit=100&order=recent&exclude_sources=cron&offset={page}")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].sessions(int(page)))
 
 
 async def conversation(request: web.Request):
     sid = item_id(request, "sid")
-    result = await request.app["hermes"].request("GET", f"/api/sessions/{sid}/messages?inline_images=false")
-    if isinstance(result, dict):
-        # Says a reply is being written that /stream can show before Hermes saves it.
-        raw = item_id(request, "sid", encode=False)
-        result["live"] = raw in request.app["live"]
-        rows = result.get("messages")
-        if isinstance(rows, list):
-            request.app["reply_usage"].attach(result.get("session_id") or raw, rows)
+    result = await request.app["hermes"].messages(sid)
+    # Says a reply is being written that /stream can show before Hermes saves it.
+    result["live"] = sid in request.app["live"]
+    request.app["reply_usage"].attach(result.get("session_id") or sid, result["messages"])
     return web.json_response(result)
 
 
 async def pending_approvals(request: web.Request):
-    sid = item_id(request, "sid", encode=False)
+    sid = item_id(request, "sid")
     return web.json_response({"approvals": await request.app["hermes"].approvals(sid)})
 
 
 async def respond_approval(request: web.Request):
-    sid = item_id(request, "sid", encode=False)
+    sid = item_id(request, "sid")
     data = await json_body(request)
     if set(data) != {"request_id", "choice"} or data.get("choice") not in ("once", "deny"):
         raise bad("Choose Allow once or Deny for this request.")
@@ -849,7 +811,7 @@ async def respond_approval(request: web.Request):
 
 
 async def stream(request: web.Request):
-    turn = request.app["live"].get(item_id(request, "sid", encode=False))
+    turn = request.app["live"].get(item_id(request, "sid"))
     if turn is None:
         raise web.HTTPNotFound(text="No reply is being written here.")
     response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -886,7 +848,7 @@ async def create_conversation(request: web.Request):
 
 
 async def send_message(request: web.Request):
-    sid = item_id(request, "sid", encode=False)
+    sid = item_id(request, "sid")
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
     # The reply to watch for is written after this message is sent.
@@ -914,7 +876,7 @@ async def rename_conversation(request: web.Request):
         raise bad("Send only a title.")
     title = body_text(data.get("title"), "Title", 200, required=False)
     try:
-        result = await request.app["hermes"].request("PATCH", f"/api/sessions/{sid}", {"title": title})
+        result = await request.app["hermes"].rename_session(sid, title)
     except HermesError as exc:
         if exc.status == 400:
             raise HermesError(400, "Hermes didn't accept that name. It may be too long or already used by another conversation.") from None
@@ -927,9 +889,9 @@ async def delete_conversation(request: web.Request):
     data = await json_body(request)
     if set(data) != {"confirm"} or data["confirm"] is not True:
         raise bad("Confirm conversation deletion.")
-    result = await request.app["hermes"].request("DELETE", f"/api/sessions/{sid}")
-    request.app["chats"].forget(item_id(request, "sid", encode=False))
-    request.app["reply_usage"].forget(item_id(request, "sid", encode=False))
+    result = await request.app["hermes"].delete_session(sid)
+    request.app["chats"].forget(sid)
+    request.app["reply_usage"].forget(sid)
     return web.json_response(result)
 
 
@@ -944,11 +906,11 @@ def chat_settings(chats, sid: str) -> dict:
 
 
 async def get_chat_settings(request: web.Request):
-    return web.json_response(chat_settings(request.app["chats"], item_id(request, "sid", encode=False)))
+    return web.json_response(chat_settings(request.app["chats"], item_id(request, "sid")))
 
 
 async def update_chat_settings(request: web.Request):
-    sid = item_id(request, "sid", encode=False)
+    sid = item_id(request, "sid")
     data = await json_body(request)
     if not data or set(data) - {"instructions", "reasoning"}:
         raise bad("Only instructions and reasoning can be changed.")
@@ -964,15 +926,10 @@ async def update_chat_settings(request: web.Request):
 
 async def export_conversation(request: web.Request):
     """The whole conversation as a JSON file, older compressed history included."""
-    sid, raw = item_id(request, "sid"), item_id(request, "sid", encode=False)
+    raw = item_id(request, "sid")
     messages = []
     for page in range(EXPORT_PAGES):
-        data = await request.app["hermes"].request(
-            "GET", f"/api/sessions/{sid}/messages?inline_images=false&order=oldest&include_compacted=true"
-                   f"&limit={EXPORT_PAGE}&offset={page * EXPORT_PAGE}")
-        rows = data.get("messages") if isinstance(data, dict) else None
-        if not isinstance(rows, list):
-            raise HermesError(502, "Hermes returned invalid data.")
+        rows = await request.app["hermes"].history(raw, offset=page * EXPORT_PAGE, limit=EXPORT_PAGE)
         messages.extend(rows)
         if len(rows) < EXPORT_PAGE:
             break
@@ -1001,42 +958,30 @@ def job_fields(data: dict, *, create: bool) -> dict:
 
 
 async def jobs(request: web.Request):
-    result = await request.app["hermes"].request("GET", "/api/cron/jobs")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].jobs())
 
 
 async def create_job(request: web.Request):
     data = job_fields(await json_body(request), create=True)
-    result = await request.app["hermes"].request("POST", "/api/cron/jobs", data)
-    return web.json_response(result, status=201)
+    return web.json_response(await request.app["hermes"].create_job(data), status=201)
 
 
 async def get_job(request: web.Request):
-    jid = item_id(request, "jid")
-    result = await request.app["hermes"].request("GET", f"/api/cron/jobs/{jid}")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].job(item_id(request, "jid")))
 
 
 async def job_runs(request: web.Request):
-    jid = item_id(request, "jid")
-    result = await request.app["hermes"].request("GET", f"/api/cron/jobs/{jid}/runs?limit=20")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].runs(item_id(request, "jid")))
 
 
 async def update_job(request: web.Request):
     jid = item_id(request, "jid")
     updates = job_fields(await json_body(request), create=False)
-    result = await request.app["hermes"].request("PUT", f"/api/cron/jobs/{jid}", {"updates": updates})
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].update_job(jid, updates))
 
 
 async def job_action(request: web.Request):
-    jid = item_id(request, "jid")
-    action = request.match_info["action"]
-    if action not in {"pause", "resume", "trigger"}:
-        raise web.HTTPNotFound()
-    result = await request.app["hermes"].request("POST", f"/api/cron/jobs/{jid}/{action}")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].job_action(item_id(request, "jid"), request.match_info["action"]))
 
 
 async def delete_job(request: web.Request):
@@ -1044,8 +989,7 @@ async def delete_job(request: web.Request):
     data = await json_body(request)
     if set(data) != {"confirm"} or data["confirm"] is not True:
         raise bad("Confirm job deletion.")
-    result = await request.app["hermes"].request("DELETE", f"/api/cron/jobs/{jid}")
-    return web.json_response(result)
+    return web.json_response(await request.app["hermes"].delete_job(jid))
 
 
 async def static(request: web.Request):

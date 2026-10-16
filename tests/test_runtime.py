@@ -17,6 +17,7 @@ from roost import chats, live, server
 from roost.__main__ import main as cli_main
 from roost.auth import Sessions, make_password_hash
 from roost.hermes import Hermes, HermesError
+from hermes_fake import fake_hermes
 from roost.push import unb64url
 
 
@@ -64,12 +65,12 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
                 sessions.close()
 
     async def test_offset_is_bounded_before_integer_conversion(self):
-        hermes = SimpleNamespace(request=AsyncMock(return_value={"sessions": []}))
+        hermes = fake_hermes()
         for value in ("9" * 5000, "١", "-1", "100001"):
             request = SimpleNamespace(query={"offset": value}, app={"hermes": hermes})
             with self.subTest(value=value[:10]), self.assertRaises(web.HTTPBadRequest):
                 await server.conversations(request)
-        hermes.request.assert_not_awaited()
+        hermes.sessions.assert_not_awaited()
 
     async def test_resume_uses_raw_identifier(self):
         hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
@@ -82,14 +83,14 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_deletion_requires_a_boolean_confirmation(self):
-        hermes = SimpleNamespace(request=AsyncMock(return_value={"ok": True}))
+        hermes = fake_hermes()
         for handler, name in ((server.delete_job, "jid"), (server.delete_conversation, "sid")):
             for value in (1, "true", False, None):
                 request = SimpleNamespace(match_info={name: "one"}, app={"hermes": hermes},
                                           content_type="application/json", json=AsyncMock(return_value={"confirm": value}))
                 with self.subTest(handler=handler.__name__, value=value), self.assertRaises(web.HTTPBadRequest):
                     await handler(request)
-        hermes.request.assert_not_awaited()
+        hermes.sessions.assert_not_awaited()
 
     async def test_global_login_limit_counts_pending_checks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -192,26 +193,26 @@ class HermesTests(unittest.IsolatedAsyncioTestCase):
         for body in (b'{broken', b'"not an object"', b'null', b'\xff'):
             self.response_body = body
             with self.subTest(body=body), self.assertRaises(HermesError) as caught:
-                await self.hermes.request("GET", "/api/data")
+                await self.hermes._request("GET", "/api/data")
             self.assertEqual(caught.exception.status, 502)
 
     async def test_chunked_response_is_bounded(self):
         self.chunked = True
         self.response_body = json.dumps({"data": "x" * (8 * 1024 * 1024)}).encode()
         with self.assertRaises(HermesError) as caught:
-            await self.hermes.request("GET", "/api/data")
+            await self.hermes._request("GET", "/api/data")
         self.assertEqual(caught.exception.status, 502)
 
     async def test_unreadable_password_is_a_safe_service_error(self):
         self.password.write_bytes(b"\xff")
         with self.assertRaises(HermesError) as caught:
-            await self.hermes.request("GET", "/api/data")
+            await self.hermes._request("GET", "/api/data")
         self.assertEqual(caught.exception.status, 503)
 
     async def test_valid_json_objects_and_lists(self):
         for value in ({"ok": True}, [{"id": "one"}]):
             self.response_body = json.dumps(value).encode()
-            self.assertEqual(await self.hermes.request("GET", "/api/data"), value)
+            self.assertEqual(await self.hermes._request("GET", "/api/data"), value)
 
     async def test_malformed_rpc_frames_are_safe_errors(self):
         for frame in ([], {"id": 1, "result": []}, {"id": 1, "result": "bad"}):
@@ -457,7 +458,9 @@ class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
         async def send(http, message, only=None):
             sent.append(message)
             return 1
-        app = {"hermes": SimpleNamespace(request=AsyncMock(return_value={"messages": rows})),
+        hermes = fake_hermes()
+        hermes.messages.return_value = {"messages": rows}
+        app = {"hermes": hermes,
                "push": SimpleNamespace(send=send), "push_http": None, "watches": {}, "presence": {},
                "settings_file": Path("/nonexistent/settings.json"), "hermes_agent_name": ("Kestrel", time.monotonic())}
         server.watch_reply(app, "chat:one", since)
@@ -508,7 +511,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             "ROOST_HERMES_PASSWORD_FILE": str(self.state / "upstream-password"),
         }):
             self.app = server.create_app()
-        self.app["hermes"] = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), request=AsyncMock(return_value=[]))
+        self.app["hermes"] = fake_hermes()
         self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
         await self.client.start_server()
         self.headers = {"Origin": "https://roost.example.invalid", "X-Roost-Request": "1"}
@@ -565,7 +568,6 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             yield ("message.delta", {"text": "Hi"})
             await release.wait()
         live.follow(self.app["live"], "chat:one", "hello", events())
-        self.app["hermes"].request = AsyncMock(return_value={"messages": []})
         response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
         self.assertIs((await response.json())["live"], True)
         response = await self.client.get("/api/conversations/chat:one/stream", cookies=cookies)
@@ -590,18 +592,17 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get(url + "/settings", cookies=cookies)
         self.assertEqual(await response.json(), {"instructions": "Be brief.", "reasoning": "default"})
         # Hermes pages 500 rows at a time; the export reads until a short page.
-        pages = [{"messages": [{"role": "user", "content": str(i)} for i in range(500)]}, {"messages": [{"role": "assistant", "content": "end"}]}]
-        self.app["hermes"].request = AsyncMock(side_effect=pages)
+        pages = [[{"role": "user", "content": str(i)} for i in range(500)], [{"role": "assistant", "content": "end"}]]
+        self.app["hermes"].history.side_effect = pages
         response = await self.client.get(url + "/export", cookies=cookies)
         self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename="conversation-chat_one.json"')
         exported = await response.json()
         self.assertEqual((len(exported["messages"]), exported["instructions"], exported["conversation"]), (501, "Be brief.", "chat:one"))
-        paths = [call.args[1] for call in self.app["hermes"].request.await_args_list]
-        self.assertIn("order=oldest&include_compacted=true&limit=500&offset=500", paths[1])
-        self.app["hermes"].request = AsyncMock(return_value={"messages": [{"role": "user"}] * 500})
+        self.assertEqual(self.app["hermes"].history.await_args_list[1].kwargs, {"offset": 500, "limit": 500})
+        self.app["hermes"].history.side_effect = None
+        self.app["hermes"].history.return_value = [{"role": "user"}] * 500
         response = await self.client.get(url + "/export", cookies=cookies)
         self.assertEqual(response.status, 400)
-        self.app["hermes"].request = AsyncMock(return_value={"ok": True})
         response = await self.client.delete(url, headers=self.headers, json={"confirm": True}, cookies=cookies)
         self.assertEqual(response.status, 200)
         self.assertEqual(self.app["chats"].instructions("chat:one"), "")
@@ -614,7 +615,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         response = await self.client.get("/api/jobs")
         self.assertEqual(response.status, 401)
-        self.app["hermes"].request.assert_not_awaited()
+        self.app["hermes"].jobs.assert_not_awaited()
 
     async def test_malformed_and_oversized_bodies_are_json_errors(self):
         for body, content_type, expected in (("{broken", "application/json", 400),
@@ -664,33 +665,16 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         for confirm in (True, "delete", None):
             response = await self.client.delete("/api/conversations", headers=self.headers, json={"confirm": confirm})
             self.assertEqual(response.status, 400)
-        self.app["hermes"].request.assert_not_awaited()
+        self.app["hermes"].sessions.assert_not_awaited()
         # Hermes acknowledges every delete but keeps listing the same row: Roost must not loop.
-        self.app["hermes"].request = AsyncMock(side_effect=lambda method, path, *rest: (
-            {"sessions": [{"id": "stuck"}]} if method == "GET" else {"ok": True}))
+        self.app["hermes"].sessions.return_value = {"sessions": [{"id": "stuck"}]}
         response = await self.client.delete("/api/conversations", headers=self.headers, json={"confirm": "DELETE"})
         self.assertEqual((response.status, await response.json()), (200, {"deleted": 1}))
-
-    async def test_profile_names_from_hermes_cannot_reach_other_routes(self):
-        await self.signed_in()
-        calls = []
-
-        async def request(method, path, *rest):
-            calls.append((method, path))
-            return {"current": "../config"} if path == "/api/profiles/active" else {"content": "soul"}
-        self.app["hermes"].request = request
-        response = await self.client.get("/api/settings/soul")
-        self.assertEqual(response.status, 200)
-        self.assertIn(("GET", "/api/profiles/default/soul"), calls)
 
     async def test_agent_name_is_asked_of_hermes_right_after_boot(self):
         await self.signed_in()
 
-        async def request(method, path, *rest):
-            if path == "/api/profiles/active":
-                return {"current": "default"}
-            return {"profiles": [{"name": "default", "display_name": "Kestrel"}]}
-        self.app["hermes"].request = request
+        self.app["hermes"].profile.return_value = {"name": "default", "display_name": "Kestrel"}
         # A host that has just booted reports a small monotonic clock.
         with patch.object(server.time, "monotonic", return_value=5.0):
             response = await self.client.get("/api/me")
@@ -698,8 +682,8 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_about_reports_service_stats_and_only_public_hermes_fields(self):
         await self.signed_in()
-        self.app["hermes"].request = AsyncMock(return_value={"version": "2026.9.24", "gateway_running": True,
-                                                             "hermes_home": "/private/path", "gateway_pid": 42})
+        self.app["hermes"].status.return_value = {"version": "2026.9.24", "gateway_running": True,
+                                                  "hermes_home": "/private/path", "gateway_pid": 42}
         response = await self.client.get("/api/about")
         data = await response.json()
         self.assertEqual(response.status, 200)
@@ -710,7 +694,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(data["stats"]["app_bytes"], 100_000)
         self.assertLess(data["stats"]["app_bytes"], 50_000_000)
         self.assertEqual(data["roost"]["revision"], "")
-        self.app["hermes"].request = AsyncMock(side_effect=HermesError(503, "Hermes is unavailable."))
+        self.app["hermes"].status.side_effect = HermesError(503, "Hermes is unavailable.")
         self.assertEqual((await (await self.client.get("/api/about")).json())["hermes"], {"reachable": False})
 
     async def test_ipv6_loopback_origin_and_invalid_port(self):
