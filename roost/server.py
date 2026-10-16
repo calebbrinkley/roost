@@ -45,6 +45,8 @@ ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 JOB_FIELDS = {"name", "prompt", "schedule", "deliver"}
 # Accent presets; the browser holds each one's light and dark colours.
 ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
+# Or a custom colour from the picker; the browser derives its light and dark shades.
+CUSTOM_ACCENT = re.compile(r"#[0-9a-f]{6}")
 AGENT_NAME_CACHE_SECONDS = 300
 # systemd restarts the service after a non-zero exit (Restart=on-failure); 75 is EX_TEMPFAIL.
 RESTART_EXIT = 75
@@ -281,6 +283,10 @@ def clean_name(value) -> str:
     return value.strip() if isinstance(value, str) and 0 < len(value.strip()) <= 40 and value.strip().isprintable() else ""
 
 
+def valid_accent(value) -> bool:
+    return value in ACCENTS or (isinstance(value, str) and CUSTOM_ACCENT.fullmatch(value) is not None)
+
+
 def load_settings(app: web.Application) -> dict:
     """Roost's own preferences, shared by every signed-in device."""
     try:
@@ -291,7 +297,7 @@ def load_settings(app: web.Application) -> dict:
         stored = {}
     zone = stored.get("time_zone")
     return {"agent_name": clean_name(stored.get("agent_name")),
-            "accent": stored.get("accent") if stored.get("accent") in ACCENTS else ACCENTS[0],
+            "accent": stored.get("accent") if valid_accent(stored.get("accent")) else ACCENTS[0],
             "time_zone": zone if isinstance(zone, str) and len(zone) <= 64 and TIME_ZONE.fullmatch(zone) else ""}
 
 
@@ -352,9 +358,10 @@ async def update_settings(request: web.Request):
             raise bad("The name must be 1 to 40 printable characters, or empty to use Hermes's name.")
         settings["agent_name"] = value.strip()
     if "accent" in data:
-        if data["accent"] not in ACCENTS:
-            raise bad("Choose one of the accent colours.")
-        settings["accent"] = data["accent"]
+        value = data["accent"].lower() if isinstance(data["accent"], str) else data["accent"]
+        if not valid_accent(value):
+            raise bad("Choose one of the accent colours, or a colour like #2f6f4e.")
+        settings["accent"] = value
     if "time_zone" in data:
         zone = data["time_zone"]
         if not isinstance(zone, str) or len(zone) > 64 or (zone and not TIME_ZONE.fullmatch(zone)):

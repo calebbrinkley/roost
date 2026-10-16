@@ -1624,6 +1624,19 @@ function renderAppearance(detail) {
     swatch.addEventListener("click", () => saveSettings({ accent: name }, label + " accent saved."));
     swatches.append(swatch);
   }
+  // Custom: the system colour picker. It previews while you choose and saves when the picker closes.
+  const chosen = /^#[0-9a-f]{6}$/.test(state.settings.accent) ? state.settings.accent : "";
+  const custom = el("label", "swatch swatch-custom" + (chosen ? " chosen" : ""));
+  custom.title = "Custom";
+  const dot = el("i", "", chosen ? "" : "+");
+  if (chosen) dot.style.background = chosen;
+  const picker = el("input");
+  picker.type = "color"; picker.value = chosen || "#2f6f4e"; picker.disabled = state.settingsBusy;
+  picker.setAttribute("aria-label", "Custom accent colour");
+  picker.addEventListener("input", () => window.roostTheme.setAccent(picker.value, false));
+  picker.addEventListener("change", () => saveSettings({ accent: picker.value }, "Custom accent saved."));
+  custom.append(dot, picker, el("span", "", "Custom"));
+  swatches.append(custom);
   accent.append(swatches);
 }
 
