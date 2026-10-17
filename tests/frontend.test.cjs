@@ -1059,7 +1059,7 @@ test('tap to record, tap to review the transcript, and send for a spoken reply',
   const mic = f.get('voice-button');
   await mic.events.click();
   assert.equal(f.get('composer').classList.contains('recording'), true);
-  assert.equal(players[0].src, '/api/audio/silence', 'the tap unlocks the player for the reply');
+  assert.equal(players.length ? players[0].src : '', '', 'nothing plays while the microphone opens (iOS cuts the recording short)');
   assert.equal(recorders[0].state, 'recording', 'releasing the button does not stop recording');
   mic.events.click();
   for (let i = 0; i < 5; i++) await tick();
@@ -1075,6 +1075,7 @@ test('tap to record, tap to review the transcript, and send for a spoken reply',
                     {id: 2, role: 'assistant', content: 'Nothing yet.', timestamp: now}];
   f.run('renderMessages(rows)');
   await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(players[0].src, '/api/audio/silence', 'sending the voice draft unlocks the player for the reply');
   assert.equal(f.run('calls[1][0]'), '/conversations/one/messages');
   assert.equal(f.run('state.voiceReply.key'), f.run('state.sentMessages[0].key'));
   f.context.rows.push({id: 3, role: 'user', content: 'what is on today', timestamp: now});
