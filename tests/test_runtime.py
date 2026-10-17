@@ -75,7 +75,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_uses_raw_identifier(self):
         hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
         import sqlite3
-        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}, "chats": chats.Chats(sqlite3.connect(":memory:"))},
+        request = SimpleNamespace(match_info={"sid": "chat:one"}, app={"hermes": hermes, "watches": {}, "presence": {}, "chats": chats.Chats(sqlite3.connect(":memory:"))}, cookies={},
                                   content_type="application/json", json=AsyncMock(return_value={"text": "hello"}))
         await server.send_message(request)
         hermes.send_message.assert_awaited_once_with("hello", "chat:one", follow=ANY, reasoning=None, applied=ANY)
@@ -348,9 +348,9 @@ class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
                 applied(reasoning)
             return "chat:two"
         hermes = SimpleNamespace(send_message=AsyncMock(side_effect=send))
-        app = {"hermes": hermes, "watches": {}, "chats": self.chats, "live": {}}
+        app = {"hermes": hermes, "watches": {}, "presence": {}, "chats": self.chats, "live": {}}
         def request(body, sid="chat:one"):
-            return SimpleNamespace(match_info={"sid": sid}, app=app, content_type="application/json", json=AsyncMock(return_value=body))
+            return SimpleNamespace(match_info={"sid": sid}, app=app, cookies={}, content_type="application/json", json=AsyncMock(return_value=body))
         with self.assertRaises(web.HTTPBadRequest):
             await server.update_chat_settings(request({"reasoning": "extreme"}))
         with self.assertRaises(web.HTTPBadRequest):
@@ -373,9 +373,9 @@ class ChatSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_next_message_carries_changed_instructions_and_shows_as_typed(self):
         followed = []
         hermes = SimpleNamespace(send_message=AsyncMock(return_value="chat:one"))
-        app = {"hermes": hermes, "watches": {}, "chats": self.chats, "live": {}}
+        app = {"hermes": hermes, "watches": {}, "presence": {}, "chats": self.chats, "live": {}}
         def request(text):
-            return SimpleNamespace(match_info={"sid": "chat:one"}, app=app, content_type="application/json",
+            return SimpleNamespace(match_info={"sid": "chat:one"}, app=app, cookies={}, content_type="application/json",
                                    json=AsyncMock(return_value={"text": text}))
         self.chats.set_instructions("chat:one", "Answer in French.")
         with patch("roost.server.following", lambda app, text: followed.append(text)):
@@ -615,6 +615,17 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.delete(url, headers=self.headers, json={"confirm": True}, cookies=cookies)
         self.assertEqual(response.status, 200)
         self.assertEqual(self.app["chats"].instructions("chat:one"), "")
+
+    async def test_the_device_that_sends_a_message_counts_as_looking_at_it(self):
+        await self.signed_in()
+        self.app["hermes"].send_message.return_value = "chat:new"
+        response = await self.client.post("/api/conversations", headers=self.headers, json={"text": "hello"})
+        self.assertEqual((response.status, await response.json()), (201, {"session_id": "chat:new"}))
+        # Before the app's next presence report: a quick reply must not notify the phone it is open on.
+        self.assertTrue(server.looking_at(self.app, "chat:new"))
+        self.app["hermes"].send_message.return_value = "chat:two"
+        await self.client.post("/api/conversations/chat:two/messages", headers=self.headers, json={"text": "again"})
+        self.assertEqual((server.looking_at(self.app, "chat:two"), server.looking_at(self.app, "chat:new")), (True, False))
 
     async def test_working_and_where_the_turn_begins_come_from_the_server(self):
         await self.signed_in()
