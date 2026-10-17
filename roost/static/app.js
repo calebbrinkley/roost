@@ -1206,6 +1206,9 @@ async function submitMessage(event) {
   event.preventDefault();
   if (state.busy || voice.take) return;
   const text = $("message").value.trim();
+  // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
+  // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
+  if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
 
@@ -2415,7 +2418,6 @@ async function startRecording() {
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder !== "function") { notice("This browser can’t record audio."); return; }
   const take = { scope: viewScope(), phase: "requesting", chunks: [] };
   voice.take = take; recordingUI("Waiting for microphone permission…");
-  unlockPlayer();
   try {
     take.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     if (!currentTake(take)) { releaseRecording(take); return; }
