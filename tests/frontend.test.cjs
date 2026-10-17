@@ -107,12 +107,32 @@ test('job save ignores double submission', async () => {
   assert.equal(f.run('saves'), 1); f.run(`finish({id:'one'});`); await Promise.all([first,second]);
 });
 
-test('a response from before sign-out cannot repopulate conversations', async () => {
+test('a response from before sign-out cannot repopulate conversations or show its error', async () => {
   const f = fixture(); await tick();
-  f.run(`api = () => new Promise(resolve => { globalThis.finish = resolve; });`);
+  f.context.fetch = () => new Promise(resolve => { f.context.finish = resolve; });
   const loading = f.run('loadConversations()');
-  f.run(`signedOut(); finish({sessions:[{id:'old',title:'private'}],total:1});`);
-  await loading; assert.equal(f.run('state.conversations.length'),0);
+  f.run('signedOut()');
+  f.context.finish({ok:true,status:200,json:async () => ({sessions:[{id:'old',title:'private'}],total:1})});
+  await assert.rejects(loading, /earlier sign-in/);
+  assert.equal(f.run('state.conversations.length'),0);
+  // A step that meets an error after its sign-in ended stays quiet.
+  f.run(`report(new Error('old failure'), signInScope()); report(new Error('stale'), {alive: () => false});`);
+  assert.equal(f.get('notice').textContent, 'old failure');
+});
+
+test('every field app.js writes to state is declared in a slice, so sign-out resets it or KEPT says why not', () => {
+  const f = fixture();
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'roost', 'static', 'app.js'), 'utf8');
+  const written = new Set([...source.matchAll(/state\.([A-Za-z]+)\s*(?:=(?!=)|\+\+|\+=)/g)].map(m => m[1]));
+  for (const block of source.matchAll(/Object\.assign\(state,\s*\{([^}]*)\}/g)) {
+    for (const m of block[1].matchAll(/([A-Za-z]+):/g)) written.add(m[1]);
+  }
+  const declared = new Set(f.run('Object.keys({...KEPT(), ...freshSlices()})'));
+  assert.ok(written.size > 40, 'the scan finds the writes');
+  assert.deepEqual([...written].filter(name => !declared.has(name)), []);
+  const kept = new Set(f.run('Object.keys(KEPT())'));
+  assert.deepEqual(Array.from(f.run('Object.values(SLICES).flatMap(slice => Object.keys(slice()))')).filter(name => kept.has(name)), [],
+    'a field is either reset or kept, not both');
 });
 
 test('an old unauthorized response cannot sign out a newer session', async () => {
