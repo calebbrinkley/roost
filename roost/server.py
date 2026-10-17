@@ -435,6 +435,14 @@ def watch_reply(app: web.Application, sid: str, since: float) -> None:
         app["watches"][sid] = {"since": since, "started": time.monotonic()}
 
 
+def sent_from_here(request: web.Request, sid: str) -> None:
+    """The device that just sent a message is showing that conversation. Count it as on screen now:
+    its own report can come several seconds later (a new conversation gets its id only from this
+    reply), and a quick answer would otherwise notify the device it is open on."""
+    if isinstance(sid, str) and ID.fullmatch(sid):
+        request.app["presence"][session_key(request)] = (time.monotonic(), sid)
+
+
 def looking_at(app: web.Application, sid: str) -> bool:
     now = time.monotonic()
     return any(now - seen < PRESENCE_SECONDS and conversation == sid for seen, conversation in app["presence"].values())
@@ -784,6 +792,7 @@ async def create_conversation(request: web.Request):
                                                    reasoning=None if level == "default" else level)
     request.app["chats"].set_reasoning(sid, level)
     watch_reply(request.app, sid, since)
+    sent_from_here(request, sid)
     return web.json_response({"session_id": sid}, status=201)
 
 
@@ -806,6 +815,7 @@ async def send_message(request: web.Request):
     for level in applied:
         chats.reasoning_applied(stored, level)
     watch_reply(request.app, stored, since)
+    sent_from_here(request, stored)
     return web.json_response({"session_id": stored})
 
 
