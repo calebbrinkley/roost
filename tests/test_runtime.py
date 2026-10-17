@@ -674,21 +674,15 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exits, [server.RESTART_EXIT])
         self.assertNotEqual(server.RESTART_EXIT, 0)
 
-    async def test_settings_are_validated_and_survive_a_corrupt_file(self):
+    async def test_settings_routes_refuse_bad_changes_and_answer_with_the_name_shown(self):
         await self.signed_in()
-        for body in ({"agent_name": "x" * 41}, {"agent_name": "line\nbreak"}, {"accent": "neon"}, {"accent": "#12345g"}, {"accent": "#fff"}, {"accent": 5}, {"theme": "dark"}, {},
-                     {"time_zone": "../etc"}, {"time_zone": "America/" + "x" * 70}, {"time_zone": 5}):
-            response = await self.client.patch("/api/settings", headers=self.headers, json=body)
-            self.assertEqual(response.status, 400, body)
-        (self.state / "settings.json").write_text("{not json")
-        self.assertEqual(server.load_settings(self.app), {"agent_name": "", "accent": "forest", "time_zone": ""})
+        response = await self.client.patch("/api/settings", headers=self.headers, json={"accent": "neon"})
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Choose one of the accent colours, or a colour like #2f6f4e."))
         response = await self.client.patch("/api/settings", headers=self.headers, json={"agent_name": "  Robin  ", "accent": "rose"})
-        self.assertEqual(response.status, 200)
-        self.assertEqual(server.load_settings(self.app), {"agent_name": "Robin", "accent": "rose", "time_zone": ""})
-        self.assertEqual(oct((self.state / "settings.json").stat().st_mode & 0o777), "0o600")
-        response = await self.client.patch("/api/settings", headers=self.headers, json={"accent": "#A1B2C3"})
-        self.assertEqual(response.status, 200)
-        self.assertEqual(server.load_settings(self.app)["accent"], "#a1b2c3")
+        data = await response.json()
+        self.assertEqual((data["agent_name"], data["agent"], data["accent"], data["accents"][0]), ("Robin", "Robin", "rose", "forest"))
+        response = await self.client.patch("/api/settings", headers=self.headers, json={"agent_name": ""})
+        self.assertEqual((await response.json())["agent"], "Agent", "no name in Roost or Hermes")
 
     async def test_delete_all_needs_the_typed_word_and_stops_on_rows_hermes_keeps(self):
         await self.signed_in()

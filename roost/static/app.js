@@ -273,10 +273,15 @@ async function refreshIdentity() {
   try {
     const data = await api("/me");
     if (epoch !== state.authEpoch || !data.signed_in) return;
-    applyAgentName(data.agent);
-    window.roostTheme.setAccent(data.accent);
-    applyTimeZone(data.time_zone);
+    applyServerSettings(data);
   } catch { /* The defaults stay until the next sign-in or settings visit. */ }
+}
+
+// /me, /settings and a saved change all answer with the name shown, the accent and the time zone.
+function applyServerSettings(data) {
+  applyAgentName(data.agent);
+  window.roostTheme.setAccent(data.accent);
+  applyTimeZone(data.time_zone);
 }
 
 function applyTimeZone(name) {
@@ -1532,7 +1537,7 @@ async function loadSettings() {
     const data = await api("/settings");
     if (epoch !== state.authEpoch) return;
     state.settings = data;
-    window.roostTheme.setAccent(data.accent);
+    applyServerSettings(data);
     renderSettings();
   } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
   if (state.settingsGroup === "agent") loadSoul();
@@ -1626,7 +1631,7 @@ function renderAppearance(detail) {
     swatches.append(swatch);
   }
   // Custom: the system colour picker. It previews while you choose and saves when the picker closes.
-  const chosen = /^#[0-9a-f]{6}$/.test(state.settings.accent) ? state.settings.accent : "";
+  const chosen = state.settings.accents.includes(state.settings.accent) ? "" : state.settings.accent;
   const custom = el("label", "swatch swatch-custom" + (chosen ? " chosen" : ""));
   custom.title = "Custom";
   const dot = el("i", "", chosen ? "" : "+");
@@ -1760,7 +1765,7 @@ function renderAgentSettings(detail) {
   input.addEventListener("input", () => { state.nameDraft = input.value; });
   const actions = el("div", "settings-actions");
   actions.append(settingsButton("primary", "Save name", async () => {
-    if (await saveSettings({ agent_name: input.value.trim() }, "Name saved.")) { state.nameDraft = undefined; await refreshIdentity(); renderSettings(); }
+    if (await saveSettings({ agent_name: input.value.trim() }, "Name saved.")) { state.nameDraft = undefined; renderSettings(); }
   }));
   name.append(label, input, actions);
 
@@ -2105,8 +2110,7 @@ function saveSettings(changes, message) {
     const data = await api("/settings", { method: "PATCH", body: JSON.stringify(changes) });
     if (epoch !== state.authEpoch) return;
     state.settings = data;
-    window.roostTheme.setAccent(data.accent);
-    applyTimeZone(data.time_zone);
+    applyServerSettings(data);
     notice(message);
   });
 }
