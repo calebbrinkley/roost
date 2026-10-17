@@ -1069,14 +1069,22 @@ test('tap to record, tap to review the transcript, and send for a spoken reply',
   assert.deepEqual(calls[0], ['/audio/transcribe', '{"data_url":"data:audio/mp4;base64,AAAA","mime_type":"audio/mp4"}']);
   assert.equal(calls.length, 1, 'dictation must not send a message');
   assert.equal(f.get('message').value, 'what is on today');
+  const now = Date.now() / 1000;
+  // The same words were said earlier; the reply read is the one to this message, found by position.
+  f.context.rows = [{id: 1, role: 'user', content: 'what is on today', timestamp: now},
+                    {id: 2, role: 'assistant', content: 'Nothing yet.', timestamp: now}];
+  f.run('renderMessages(rows)');
   await f.run('submitMessage({preventDefault() {}})');
   assert.equal(f.run('calls[1][0]'), '/conversations/one/messages');
-  assert.equal(f.run('state.voiceReply.text'), 'what is on today');
-  f.context.rows = [{id: 1, role: 'user', content: 'what is on today', timestamp: Date.now() / 1000},
-                    {id: 2, role: 'assistant', content: 'Two meetings.', timestamp: Date.now() / 1000}];
-  f.run('renderMessages(rows)');
+  assert.equal(f.run('state.voiceReply.key'), f.run('state.sentMessages[0].key'));
+  f.context.rows.push({id: 3, role: 'user', content: 'what is on today', timestamp: now});
+  f.run(`state.turn = {id: 'one', working: true, at: Date.now()}; renderMessages(rows)`);
+  assert.equal(f.run('state.voiceReply.row'), 3);
+  assert.equal(timers.length, 0, 'nothing is read while the agent is working');
+  f.context.rows.push({id: 4, role: 'assistant', content: 'Two meetings.', timestamp: now});
+  f.run(`state.turn = {id: 'one', working: false, at: Date.now()}; renderMessages(rows)`);
   timers.forEach(fn => fn());
-  assert.equal(players[0].src, '/api/conversations/one/speech/2');
+  assert.equal(players[0].src, '/api/conversations/one/speech/4');
   assert.equal(f.run('state.voiceReply'), null);
 });
 
