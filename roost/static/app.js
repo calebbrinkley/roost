@@ -823,9 +823,11 @@ document.addEventListener("selectionchange", () => {
 });
 
 // Hermes can acknowledge a busy-session prompt before it becomes a durable transcript row.
-// Returns the rows with this device's unsaved messages added, and the sent messages still unsaved.
+// Returns the rows with this device's unsaved messages added, the sent messages still unsaved, and
+// `savedAs`: for each sent message Hermes saved just now, its key and the id of the row that holds it.
 function withSentMessages(rows, sent, current) {
   let pending = sent;
+  const savedAs = {};
   for (const row of rows) {
     if (row.role !== "user" || typeof row.id !== "number") continue;
     const candidates = pending.filter((item) => item.id === current && row.id > item.after);
@@ -836,6 +838,7 @@ function withSentMessages(rows, sent, current) {
       if (combined === saved) {
         // Hermes can merge a queued burst into one user row. Consume exactly that prefix once.
         const matched = new Set(candidates.slice(0, index + 1));
+        for (const item of matched) savedAs[item.key] = row.id;
         pending = pending.filter((item) => !matched.has(item))
           .map((item) => item.id === current ? { ...item, after: Math.max(item.after, row.id) } : item);
         break;
@@ -843,7 +846,7 @@ function withSentMessages(rows, sent, current) {
       if (!saved.startsWith(combined)) break;
     }
   }
-  return { sent: pending, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
+  return { sent: pending, savedAs, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
     role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: true,
   }))] };
 }
@@ -874,7 +877,7 @@ function conversationView({ rows, sent, current, live, server }) {
     }
   }
   const unsaved = added.sent.some((item) => item.id === current && item.since > (server.at ?? 0));
-  return { rows: all, sent: added.sent, live, liveAfter, after,
+  return { rows: all, sent: added.sent, savedAs: added.savedAs, live, liveAfter, after,
            working: Boolean(live && !live.done) || Boolean(server.working) || unsaved };
 }
 
@@ -947,7 +950,7 @@ function renderMessages(rows) {
     if (row === liveAfter) transcript.append(...liveNodes(live));
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
-  readVoiceReply(visible, view.working, live);
+  readVoiceReply(view);
   if (view.working) {
     const typing = el("div", "typing-row");
     const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
@@ -1224,8 +1227,9 @@ async function sendText(text, { voice = false } = {}) {
       : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: state.reasoning || "default" }) });
     accepted = true;
     if (here.alive()) { state.current = result.session_id; state.draft = false; }
-    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key: `sent-${state.sentKey = state.sentKey + 1}` });
-    if (voice) state.voiceReply = { id: result.session_id, text, since: Date.now() };
+    const key = `sent-${state.sentKey = state.sentKey + 1}`;
+    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key });
+    if (voice) state.voiceReply = { id: result.session_id, key, row: null, since: Date.now() };
     if (state.current === result.session_id) {
       closeStream(); state.live = null; state.liveNodes = null;
       openStream(result.session_id);
@@ -2532,14 +2536,19 @@ function playButton(id) {
   return button;
 }
 
-// Once the reply to a voice message is in, read it aloud (once; ten minutes at most).
-function readVoiceReply(visible, working, live) {
+// Once the reply to a voice message is in, read it aloud (once; ten minutes at most). The voice message
+// is found by position: the row Hermes saved it as, and its reply is the last answer before the owner's
+// next message, once the server says the turn is over.
+function readVoiceReply(view) {
   const waiting = state.voiceReply;
-  if (!waiting || waiting.id !== state.current || live) return;
+  if (!waiting || waiting.id !== state.current || view.live) return;
   if (Date.now() - waiting.since > 600000) { state.voiceReply = null; return; }
-  let own = -1;
-  for (let i = visible.length - 1; i >= 0; i--) if (visible[i].role === "user" && messageText(visible[i]) === waiting.text) { own = i; break; }
-  const reply = own >= 0 && !working ? visible.slice(own + 1).findLast((row) => row.role === "assistant" && row.id != null) : null;
+  waiting.row ??= view.savedAs[waiting.key] ?? null;
+  const own = waiting.row == null ? -1 : view.rows.findIndex((row) => row.id === waiting.row);
+  if (own < 0 || view.working) return;
+  const next = view.rows.findIndex((row, index) => index > own && row.role === "user");
+  const reply = view.rows.slice(own + 1, next >= 0 ? next : undefined)
+    .findLast((row) => row.role === "assistant" && row.id != null && messageText(row));
   if (!reply) return;
   state.voiceReply = null;
   // After this render: starting the player renders the transcript again.
