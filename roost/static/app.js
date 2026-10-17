@@ -1,8 +1,36 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { shownTimes: new Set(), renderedConversation: null, section: "messages", current: null, selectedJob: null, jobRuns: Object.create(null), jobRunsError: Object.create(null), conversations: [], jobs: [],
-                sentMessages: [], busy: false, jobBusy: false, sheetBusy: false, authEpoch: 0, viewEpoch: 0, jobRunsLoading: new Set(), job: null, draft: false, turn: null, working: false, search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false };
+// Every field of `state`, by area, with its value at sign-in. signedOut() starts each area again from
+// here, so nothing from one sign-in reaches the next; KEPT is what deliberately survives a sign-out.
+// A test fails if app.js writes a field that is not declared here.
+const SLICES = {
+  conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
+                          search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false }),
+  conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
+                         lastRows: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false }),
+  turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
+  approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
+                      approvalFocusConversation: null, approvalLoading: null }),
+  voice: () => ({ voiceDraft: false, voiceReply: null, playing: null }),
+  jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
+                 jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
+  settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
+                     soulDraft: undefined, soulLoading: false, about: null }),
+  account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
+                    push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
+};
+const KEPT = () => ({
+  // Sign-ins and views only count up; an answer to an earlier one is ignored.
+  authEpoch: 0, viewEpoch: 0,
+  // Newest-request counters: an older answer never replaces a newer one.
+  conversationRequest: 0, messageRequest: 0, messageApplied: 0, jobsRequest: 0, approvalRevision: 0, sentKey: 0,
+  // The device and the sign-in page: not private, and needed before the next sign-in.
+  section: "messages", agentName: "", passkeysAvailable: false, passkeyLogin: null,
+  workingVerb: undefined, player: null, stream: null, liveFrame: 0,
+});
+const freshSlices = () => Object.assign({}, ...Object.values(SLICES).map((slice) => slice()));
+const state = { ...KEPT(), ...freshSlices() };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -135,8 +163,22 @@ function notice(message) {
   if (message) noticeTimer = setTimeout(() => { if ($("notice").textContent === message) show("notice", false); }, 6000);
 }
 
-async function api(path, options = {}) {
+// What an async step checks before it touches the page or state again: still the same sign-in, and for
+// a conversation also the same view of the same conversation. A sign-out or a switch ends every scope.
+function signInScope() {
   const epoch = state.authEpoch;
+  return { alive: () => epoch === state.authEpoch };
+}
+function viewScope(id = state.current) {
+  const signedIn = signInScope(), view = state.viewEpoch;
+  return { alive: () => signedIn.alive() && view === state.viewEpoch && state.current === id };
+}
+// An error is news only while the step that met it is still current.
+function report(error, scope) { if (scope.alive()) notice(error.message); }
+
+// Answers only the sign-in that asked: a response that arrives after a sign-out rejects instead.
+async function api(path, options = {}) {
+  const scope = signInScope();
   const response = await fetch("/api" + path, {
     credentials: "same-origin",
     headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
@@ -144,7 +186,7 @@ async function api(path, options = {}) {
   });
   let data;
   try { data = await response.json(); } catch { data = {}; }
-  if (epoch !== state.authEpoch) throw new Error("This request belongs to an earlier sign-in.");
+  if (!scope.alive()) throw new Error("This request belongs to an earlier sign-in.");
   if (!response.ok) {
     if (response.status === 401 && path !== "/login" && path !== "/passkeys/login") { signedOut(); throw new Error("Please sign in again."); }
     throw new Error(data.error || `Request failed (${response.status}).`);
@@ -156,15 +198,9 @@ function signedOut() {
   state.authEpoch++; state.viewEpoch++;
   closeStream();
   stopRecording(true); state.voiceDraft = false; state.player?.pause();
-  Object.assign(state, { current: null, selectedJob: null, conversations: [], jobs: [], jobRuns: Object.create(null), jobRunsError: Object.create(null),
-    jobRunsLoading: new Set(), busy: false, jobBusy: false, sheetBusy: false, job: null, sheetItem: null,
-    draft: false, turn: null, working: false, sentMessages: [], search: "", jobSearch: "", jobPatches: Object.create(null), conversationOffset: 0, conversationsMore: false, loadingMore: false, swipeOpenId: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(),
-    approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null, approvalFocusConversation: null, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null, voiceReply: null, playing: null });
+  Object.assign(state, freshSlices());
   renderApprovals();
   show("app", false); show("login", true);
-  Object.assign(state, { settings: null, settingsGroup: null, settingsBusy: false, soul: undefined, soulDraft: undefined, nameDraft: undefined,
-                         timeZone: "", about: null, passkeyList: null, passkeyRegister: null, removingPasskey: null,
-                         push: null, removingPush: null, hermesLink: null, rotatingToken: false });
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
@@ -256,23 +292,21 @@ async function showJob(id) {
 
 // A message the agent sent on its own, kept by Roost (Hermes has no transcript of it).
 async function openDelivery(id) {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const item = await api("/deliveries/" + encodeURIComponent(id));
-    if (epoch !== state.authEpoch) return;
     $("delivery-title").textContent = item.title || agent();
     $("delivery-time").textContent = dateTimeLabel(item.created);
     const body = $("delivery-text"); body.replaceChildren(); addMarkdown(body, String(item.text || ""));
     if (!$("delivery-sheet").open) $("delivery-sheet").showModal();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
 }
 
 // The agent's name and the synced accent, as the signed-in server sees them.
 async function refreshIdentity() {
-  const epoch = state.authEpoch;
   try {
     const data = await api("/me");
-    if (epoch !== state.authEpoch || !data.signed_in) return;
+    if (!data.signed_in) return;
     applyServerSettings(data);
   } catch { /* The defaults stay until the next sign-in or settings visit. */ }
 }
@@ -464,67 +498,64 @@ async function renameConversation(event) {
   const item = state.sheetItem, id = item && item.id;
   if (!id) return;
   const title = $("sheet-name").value.trim();
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.sheetBusy = true;
   try {
     const result = await api(`/conversations/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) });
-    if (epoch !== state.authEpoch) return;
     item.title = result.title ?? title;
     if (state.current === id) $("chat-title").textContent = sessionName(item);
     $("conversation-sheet").close(); renderConversations(); notice("Conversation renamed.");
-  } catch (error) { if (epoch === state.authEpoch) $("sheet-error").textContent = error.message; }
-  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
+  } catch (error) { if (scope.alive()) $("sheet-error").textContent = error.message; }
+  finally { if (scope.alive()) state.sheetBusy = false; }
 }
 
 async function openInstructions() {
   const item = state.sheetItem, id = item && item.id;
   if (!id || state.sheetBusy) return;
-  const epoch = state.authEpoch, field = $("sheet-instructions-text");
+  const scope = signInScope(), field = $("sheet-instructions-text");
   field.value = ""; field.disabled = true;
   sheetView("sheet-instructions-form");
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
-    if (epoch !== state.authEpoch || state.sheetItem !== item) return;
+    if (state.sheetItem !== item) return;
     field.value = typeof data.instructions === "string" ? data.instructions : "";
     field.disabled = false; field.focus();
-  } catch (error) { if (epoch === state.authEpoch) $("sheet-instructions-error").textContent = error.message; }
+  } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
 }
 
 async function saveInstructions(event) {
   event.preventDefault();
   const item = state.sheetItem, id = item && item.id, field = $("sheet-instructions-text");
   if (!id || state.sheetBusy || field.disabled) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.sheetBusy = true;
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value }) });
-    if (epoch !== state.authEpoch) return;
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
-  } catch (error) { if (epoch === state.authEpoch) $("sheet-instructions-error").textContent = error.message; }
-  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
+  } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
+  finally { if (scope.alive()) state.sheetBusy = false; }
 }
 
 async function deleteConversation() {
   if (state.sheetBusy) return;
   const item = state.sheetItem, id = item && item.id;
   if (!id) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.sheetBusy = true;
   try {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
-    if (epoch !== state.authEpoch) return;
     state.sentMessages = state.sentMessages.filter((sent) => sent.id !== id);
     // The server's rows shift down by one, so the next page starts one row earlier. A load
     // started before the deletion could bring the row back or reuse the old offset: drop it.
     if (state.conversations.some((row) => row.id === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
-    state.conversationRequest = (state.conversationRequest || 0) + 1;
+    state.conversationRequest = state.conversationRequest + 1;
     state.conversations = state.conversations.filter((row) => row.id !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
     if (state.current === id) { stopRecording(true); state.voiceDraft = false; state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
     $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
-  } catch (error) { if (epoch === state.authEpoch) $("sheet-confirm-error").textContent = error.message; }
-  finally { if (epoch === state.authEpoch) state.sheetBusy = false; }
+  } catch (error) { if (scope.alive()) $("sheet-confirm-error").textContent = error.message; }
+  finally { if (scope.alive()) state.sheetBusy = false; }
 }
 
 function renderConversations() {
@@ -580,11 +611,11 @@ function renderConversations() {
 }
 
 async function loadConversations(more = false) {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   // A refresh waits out a page load; both would otherwise race for the paging offset.
   if (state.loadingMore) return;
   if (more) { state.loadingMore = true; renderConversations(); }
-  const serial = state.conversationRequest = (state.conversationRequest || 0) + 1;
+  const serial = state.conversationRequest = state.conversationRequest + 1;
   try {
     // Refresh the loaded range, not just its first page: insertions would otherwise
     // push a conversation into an unfetched gap. Page offsets count raw server rows.
@@ -594,7 +625,7 @@ async function loadConversations(more = false) {
     const known = new Set(loaded.map((row) => row.id));
     do {
       data = await api(`/conversations?offset=${offset}`);
-      if (epoch !== state.authEpoch || serial !== state.conversationRequest) return;
+      if (serial !== state.conversationRequest) return;
       rows = data.sessions;
       offset += rows.length;
       for (const item of rows) {
@@ -610,9 +641,9 @@ async function loadConversations(more = false) {
       (!Number.isInteger(data.total) || offset < data.total);
     finishLoadingConversations(data, loaded, more);
   } finally {
-    if (more && epoch === state.authEpoch) { state.loadingMore = false; renderConversations(); }
+    if (more && scope.alive()) { state.loadingMore = false; renderConversations(); }
   }
-  if (epoch === state.authEpoch) loadMoreIfNearEnd();
+  if (scope.alive()) loadMoreIfNearEnd();
 }
 
 // Older conversations load as the list nears its end, or at once when the loaded ones don't fill it.
@@ -947,12 +978,12 @@ async function selectConversation(id, source) {
 
 async function loadMessages(id = state.current) {
   if (!id) return;
-  const epoch = state.authEpoch, view = state.viewEpoch;
-  const serial = state.messageRequest = (state.messageRequest || 0) + 1, at = Date.now();
+  const scope = viewScope(id);
+  const serial = state.messageRequest = state.messageRequest + 1, at = Date.now();
   const data = await api(`/conversations/${encodeURIComponent(id)}`);
   // Compare with the newest response applied, not the newest request issued: polls slower
   // than the interval would otherwise discard every reply and freeze the transcript.
-  if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && serial > (state.messageApplied || 0)) {
+  if (scope.alive() && serial > state.messageApplied) {
     state.messageApplied = serial;
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, at };
@@ -964,7 +995,7 @@ async function loadMessages(id = state.current) {
 
 // Approvals belong to the exact Hermes request. A notification link only opens the card.
 function setApprovals(items) {
-  state.approvalRevision = (state.approvalRevision || 0) + 1;
+  state.approvalRevision = state.approvalRevision + 1;
   const previous = new Set((state.approvals || []).map(item => item.request_id));
   state.approvals = items.filter(item => item && typeof item.request_id === "string");
   if (state.approvals.some(item => !previous.has(item.request_id))) state.approvalNotice = "";
@@ -974,15 +1005,15 @@ function setApprovals(items) {
 
 async function loadApprovals(id = state.current) {
   if (!id || state.approvalLoading?.id === id) return;
-  const epoch = state.authEpoch, view = state.viewEpoch, revision = state.approvalRevision;
+  const scope = viewScope(id), revision = state.approvalRevision;
   const loading = {id}; state.approvalLoading = loading;
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/approvals`);
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && revision === state.approvalRevision) {
+    if (scope.alive() && revision === state.approvalRevision) {
       setApprovals(Array.isArray(data.approvals) ? data.approvals : []);
     }
   } catch {
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) { state.approvalReady = false; renderApprovals(); }
+    if (scope.alive()) { state.approvalReady = false; renderApprovals(); }
   } finally { if (state.approvalLoading === loading) state.approvalLoading = null; }
 }
 
@@ -1018,22 +1049,22 @@ function renderApprovals() {
 
 async function decideApproval(requestId, choice) {
   if (state.approvalBusy || !state.approvalReady || !["once", "deny"].includes(choice)) return;
-  const id = state.current, epoch = state.authEpoch, view = state.viewEpoch;
+  const id = state.current, scope = viewScope(id);
   state.approvalBusy = requestId; state.approvalNotice = ""; renderApprovals();
   try {
     await api(`/conversations/${encodeURIComponent(id)}/approvals`, {
       method: "POST", body: JSON.stringify({request_id: requestId, choice})});
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
-      state.approvalRevision = (state.approvalRevision || 0) + 1;
+    if (scope.alive()) {
+      state.approvalRevision = state.approvalRevision + 1;
       state.approvals = state.approvals.filter(item => item.request_id !== requestId);
       state.approvalNotice = choice === "once" ? "Allowed once." : "Denied.";
     }
   } catch (error) {
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
+    if (scope.alive()) {
       state.approvalNotice = error.message; state.approvalReady = false;
     }
   } finally {
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id) {
+    if (scope.alive()) {
       state.approvalBusy = null; renderApprovals(); loadApprovals(id);
     }
   }
@@ -1133,10 +1164,10 @@ function showReasoning(level) {
 }
 
 async function loadReasoning(id) {
-  const epoch = state.authEpoch, view = state.viewEpoch;
+  const scope = viewScope(id);
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
-    if (epoch === state.authEpoch && view === state.viewEpoch && state.current === id && typeof data.reasoning === "string") showReasoning(data.reasoning);
+    if (scope.alive() && typeof data.reasoning === "string") showReasoning(data.reasoning);
   } catch { /* The chip keeps Default; the next send still uses what Roost stored. */ }
 }
 
@@ -1145,12 +1176,12 @@ async function changeReasoning() {
   showReasoning(level);
   // A new conversation sends its choice with the first message.
   if (!id) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ reasoning: level }) });
-    if (epoch === state.authEpoch && state.current === id) showReasoning(data.reasoning);
+    if (scope.alive() && state.current === id) showReasoning(data.reasoning);
   } catch (error) {
-    if (epoch !== state.authEpoch) return;
+    if (!scope.alive()) return;
     if (state.current === id) showReasoning(previous);
     notice(error.message);
   }
@@ -1178,9 +1209,8 @@ async function submitMessage(event) {
 // Sends what was typed, or a voice message's transcript (`voice`), whose reply is then read aloud.
 async function sendText(text, { voice = false } = {}) {
   if (state.busy) return;
-  const epoch = state.authEpoch, view = state.viewEpoch, oldId = state.current;
+  const oldId = state.current, scope = signInScope(), here = viewScope(oldId), view = state.viewEpoch;
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
-  const sameView = () => epoch === state.authEpoch && view === state.viewEpoch && state.current === oldId;
   let accepted = false;
   state.voiceDraft = false;
   state.busy = true; $("send").disabled = true; $("message").value = "";
@@ -1192,10 +1222,9 @@ async function sendText(text, { voice = false } = {}) {
     const result = oldId
       ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text }) })
       : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: state.reasoning || "default" }) });
-    if (epoch !== state.authEpoch) return;
     accepted = true;
-    if (sameView()) { state.current = result.session_id; state.draft = false; }
-    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key: `sent-${state.sentKey = (state.sentKey || 0) + 1}` });
+    if (here.alive()) { state.current = result.session_id; state.draft = false; }
+    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key: `sent-${state.sentKey = state.sentKey + 1}` });
     if (voice) state.voiceReply = { id: result.session_id, text, since: Date.now() };
     if (state.current === result.session_id) {
       closeStream(); state.live = null; state.liveNodes = null;
@@ -1205,22 +1234,22 @@ async function sendText(text, { voice = false } = {}) {
     if (state.current === result.session_id) renderMessages(state.lastRows || []);
     // A failed refresh must never turn an accepted message back into an unsent draft.
     const updates = await Promise.allSettled([loadConversations(), loadMessages()]);
-    if (epoch === state.authEpoch && updates.some((update) => update.status === "rejected")) {
+    if (scope.alive() && updates.some((update) => update.status === "rejected")) {
       notice("Message sent. The conversation could not refresh; it will retry shortly.");
     }
   } catch (error) {
-    if (epoch !== state.authEpoch) return;
-    if (!accepted && sameView() && !$("message").value) {
+    if (!scope.alive()) return;
+    if (!accepted && here.alive() && !$("message").value) {
       $("message").value = text; state.voiceDraft = voice;
       $("composer").classList.add("has-text");
     }
     notice(error.message);
-    if (sameView()) {
+    if (here.alive()) {
       if (oldId) await loadMessages(oldId).catch(() => {}); else renderWelcome();
     }
   } finally {
     sending.remove();
-    if (epoch === state.authEpoch) {
+    if (scope.alive()) {
       state.busy = false; $("send").disabled = false;
       if (view === state.viewEpoch && state.section === "messages") $("message").focus();
     }
@@ -1397,16 +1426,15 @@ function renderJobDetail() {
 
 async function loadJobRuns(id) {
   if (state.jobRunsLoading.has(id)) return;
-  const epoch = state.authEpoch, loading = state.jobRunsLoading;
+  const scope = signInScope(), loading = state.jobRunsLoading;
   loading.add(id);
   try {
     const data = await api(`/jobs/${encodeURIComponent(id)}/runs`);
-    if (epoch !== state.authEpoch) return;
     delete state.jobRunsError[id];
     state.jobRuns[id] = records(data.runs);
     if (state.selectedJob === id) renderJobDetail();
   } catch (error) {
-    if (epoch === state.authEpoch) { state.jobRunsError[id] = true; if (state.selectedJob === id) renderJobDetail(); }
+    if (scope.alive()) { state.jobRunsError[id] = true; if (state.selectedJob === id) renderJobDetail(); }
     throw error;
   } finally { loading.delete(id); }
 }
@@ -1434,10 +1462,9 @@ function withJobPatches(rows) {
 }
 
 async function loadJobs() {
-  const epoch = state.authEpoch;
-  const serial = state.jobsRequest = (state.jobsRequest || 0) + 1;
+  const serial = state.jobsRequest = state.jobsRequest + 1;
   const data = await api("/jobs");
-  if (epoch !== state.authEpoch || serial !== state.jobsRequest) return;
+  if (serial !== state.jobsRequest) return;
   state.jobs = withJobPatches(records(data.jobs));
   if (!state.selectedJob || !state.jobs.some((job) => job.id === state.selectedJob)) {
     state.selectedJob = state.jobs[0]?.id || null;
@@ -1448,31 +1475,29 @@ async function loadJobs() {
 
 async function jobAction(id, action) {
   if (state.jobBusy) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.jobBusy = true; renderJobDetail();
   try {
     const result = await api(`/jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
-    if (epoch !== state.authEpoch) return;
     notice(action === "trigger" ? `${agent()} is running this Job.` : `Job ${action === "pause" ? "paused" : "resumed"}.`);
     if (action !== "trigger") applyJob(result);
     await loadJobs();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
-  finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
+  } catch (error) { report(error, scope); }
+  finally { if (scope.alive()) { state.jobBusy = false; renderJobDetail(); } }
 }
 
 async function deleteJob(job) {
   if (state.jobBusy) return;
   const name = jobValue(job, "name") || "this Job";
   if (!window.confirm(`Delete “${name}”? This cannot be undone.`)) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.jobBusy = true;
   try {
     await api(`/jobs/${encodeURIComponent(job.id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
-    if (epoch !== state.authEpoch) return;
     delete state.jobRuns[job.id]; delete state.jobRunsError[job.id]; delete state.jobPatches[job.id];
     $("job-dialog").close(); state.selectedJob = null; $("app").classList.remove("job-open"); notice("Job deleted."); await loadJobs();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
-  finally { if (epoch === state.authEpoch) { state.jobBusy = false; renderJobDetail(); } }
+  } catch (error) { report(error, scope); }
+  finally { if (scope.alive()) { state.jobBusy = false; renderJobDetail(); } }
 }
 
 function openJob(job = null) {
@@ -1494,7 +1519,7 @@ async function saveJob(event) {
   event.preventDefault();
   if (state.jobBusy) return;
   state.jobBusy = true;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   const buttons = [...$("job-form").querySelectorAll("button")];
   buttons.forEach((button) => { button.disabled = true; });
   const data = { name: $("job-name").value.trim(), prompt: $("job-prompt").value.trim(),
@@ -1502,7 +1527,6 @@ async function saveJob(event) {
   const id = state.job?.id;
   try {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
-    if (epoch !== state.authEpoch) return;
     $("job-dialog").close(); notice(id ? "Job updated." : "Job created.");
     applyJob(result);
     if (!id) {
@@ -1510,9 +1534,9 @@ async function saveJob(event) {
       await loadJobs();
       if (state.selectedJob) selectJob(state.selectedJob);
     } else await loadJobs();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
   finally {
-    if (epoch === state.authEpoch) {
+    if (scope.alive()) {
       state.jobBusy = false; buttons.forEach((button) => { button.disabled = false; }); renderJobDetail();
     }
   }
@@ -1530,16 +1554,15 @@ function settingsGroups() {
 const SETTINGS_ICONS = { appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   if (!state.settingsGroup && !phoneWidth.matches) state.settingsGroup = "appearance";
   renderSettings();
   try {
     const data = await api("/settings");
-    if (epoch !== state.authEpoch) return;
     state.settings = data;
     applyServerSettings(data);
     renderSettings();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
   if (state.settingsGroup === "agent") loadSoul();
 }
 
@@ -1685,13 +1708,12 @@ function formatDuration(seconds) {
 }
 
 async function loadAbout() {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const data = await api("/about");
-    if (epoch !== state.authEpoch) return;
     state.about = { ...data, at: new Date() };
     if (state.section === "settings" && state.settingsGroup === "about") renderSettings();
-  } catch (error) { if (epoch === state.authEpoch && !state.about) notice(error.message); }
+  } catch (error) { if (scope.alive() && !state.about) notice(error.message); }
 }
 
 function statList(rows) {
@@ -1811,15 +1833,14 @@ function deviceName() {
 }
 
 async function loadPasskeys() {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const data = await api("/passkeys");
-    if (epoch !== state.authEpoch) return;
     state.passkeyList = data.passkeys;
     state.passkeysAvailable = data.passkeys.length > 0;
     if (state.settingsGroup === "account") renderSettings();
     if (passkeysSupported()) state.passkeyRegister = await prefetch("/passkeys/register/options");
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
 }
 
 function dateLabel(seconds) {
@@ -1863,7 +1884,7 @@ function renderPasskeys(detail) {
 }
 
 function addPasskey(name) {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async (scope) => {
     const options = fresh(state.passkeyRegister) || await api("/passkeys/register/options", { method: "POST" });
     state.passkeyRegister = null;
     let credential;
@@ -1874,7 +1895,7 @@ function addPasskey(name) {
         excludeCredentials: excluded } });
     } catch (error) {
       // The prompt didn't finish: fetch a fresh challenge so the next tap goes straight to it.
-      if (epoch === state.authEpoch) loadPasskeys();
+      if (scope.alive()) loadPasskeys();
       if (error.name === "InvalidStateError") throw new Error("This device already has a passkey for Roost.");
       if (error.name === "NotAllowedError") throw new Error("Adding the passkey was cancelled or timed out.");
       throw error;
@@ -1882,7 +1903,6 @@ function addPasskey(name) {
     await api("/passkeys", { method: "POST", body: JSON.stringify({
       name, id: toB64url(credential.rawId), clientDataJSON: toB64url(credential.response.clientDataJSON),
       attestationObject: toB64url(credential.response.attestationObject) }) });
-    if (epoch !== state.authEpoch) return;
     state.passkeyNameDraft = undefined;
     notice(`Passkey added. Next time, sign in with ${name}.`);
     await loadPasskeys();
@@ -1890,9 +1910,8 @@ function addPasskey(name) {
 }
 
 function removePasskey(passkey) {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     await api("/passkeys/" + encodeURIComponent(passkey.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
-    if (epoch !== state.authEpoch) return;
     state.removingPasskey = null;
     notice(`Removed the passkey “${passkey.name}”. Also delete it from the device’s passwords to stop it being offered.`);
     await loadPasskeys();
@@ -1946,13 +1965,13 @@ async function thisDevicePush() {
 }
 
 async function loadPush() {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const [data, mine] = await Promise.all([api("/push"), thisDevicePush().catch(() => null)]);
-    if (epoch !== state.authEpoch) return;
+    if (!scope.alive()) return;
     state.push = { ...data, mine: mine?.id || null };
     if (state.settingsGroup === "notifications") renderSettings();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
 }
 
 function renderNotifications(detail) {
@@ -1991,13 +2010,12 @@ function renderNotifications(detail) {
 }
 
 async function loadHermesLink() {
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   try {
     const data = await api("/hermes");
-    if (epoch !== state.authEpoch) return;
     state.hermesLink = data;
     if (state.settingsGroup === "notifications") renderSettings();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
 }
 
 // Job reports and messages the agent starts reach Roost through a plugin installed in Hermes.
@@ -2024,16 +2042,15 @@ function renderHermesLink(detail) {
 }
 
 function rotateDeliveryToken() {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     const data = await api("/hermes/token", { method: "POST", body: JSON.stringify({ confirm: true }) });
-    if (epoch !== state.authEpoch) return;
     state.hermesLink = data; state.rotatingToken = false;
     notice("New token made. Update ROOST_DELIVERY_TOKEN in Hermes; the old one no longer works.");
   });
 }
 
 function enablePush() {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     // First, straight from the tap: Safari shows the permission prompt only for one.
     if (await Notification.requestPermission() !== "granted") throw new Error("Notifications weren’t allowed, so they stay off.");
     const registration = await serviceWorker;
@@ -2048,29 +2065,27 @@ function enablePush() {
       subscription = await registration.pushManager.subscribe(options);
     }
     await api("/push/devices", { method: "POST", body: JSON.stringify({ subscription: subscription.toJSON(), name: deviceName() }) });
-    if (epoch !== state.authEpoch) return;
     notice("Notifications are on for this device.");
     await loadPush();
   });
 }
 
 function disablePush() {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async (scope) => {
     const mine = await thisDevicePush();
     if (mine && state.push.devices.some((device) => device.id === mine.id)) {
       await api("/push/devices/" + encodeURIComponent(mine.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
     }
     await mine?.subscription.unsubscribe();
-    if (epoch !== state.authEpoch) return;
+    if (!scope.alive()) return;
     notice("Notifications are off for this device.");
     await loadPush();
   });
 }
 
 function removePushDevice(device) {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     await api("/push/devices/" + encodeURIComponent(device.id), { method: "DELETE", body: JSON.stringify({ confirm: true }) });
-    if (epoch !== state.authEpoch) return;
     state.removingPush = null;
     notice(`${device.name} won’t get Roost’s notifications.`);
     await loadPush();
@@ -2098,17 +2113,16 @@ function reportPresence() {
 
 async function withSettingsBusy(work) {
   if (state.settingsBusy) return false;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.settingsBusy = true; renderSettings();
-  try { await work(epoch); return epoch === state.authEpoch; }
-  catch (error) { if (epoch === state.authEpoch) notice(error.message); return false; }
-  finally { if (epoch === state.authEpoch) { state.settingsBusy = false; renderSettings(); } }
+  try { await work(scope); return scope.alive(); }
+  catch (error) { report(error, scope); return false; }
+  finally { if (scope.alive()) { state.settingsBusy = false; renderSettings(); } }
 }
 
 function saveSettings(changes, message) {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     const data = await api("/settings", { method: "PATCH", body: JSON.stringify(changes) });
-    if (epoch !== state.authEpoch) return;
     state.settings = data;
     applyServerSettings(data);
     notice(message);
@@ -2117,22 +2131,20 @@ function saveSettings(changes, message) {
 
 async function loadSoul() {
   if (state.soul !== undefined || state.soulLoading) return;
-  const epoch = state.authEpoch;
+  const scope = signInScope();
   state.soulLoading = true;
   try {
     const data = await api("/settings/soul");
-    if (epoch !== state.authEpoch) return;
     state.soul = data.content;
     if (state.settingsGroup === "agent") renderSettings();
-  } catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  } catch (error) { report(error, scope); }
   finally { state.soulLoading = false; }
 }
 
 function saveSoul() {
   const content = $("settings-soul").value;
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     await api("/settings/soul", { method: "PUT", body: JSON.stringify({ content }) });
-    if (epoch !== state.authEpoch) return;
     state.soul = content; state.soulDraft = undefined;
     notice("Instructions saved.");
   });
@@ -2140,9 +2152,8 @@ function saveSoul() {
 
 function deleteEverything(kind, input) {
   if (input.value.trim() !== "DELETE") return;
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
-    if (epoch !== state.authEpoch) return;
     if (kind === "conversations") {
       Object.assign(state, { conversations: [], current: null, turn: null, working: false, sentMessages: [], conversationOffset: 0, conversationsMore: false });
       state.viewEpoch++; renderConversations(); renderWelcome();
@@ -2156,16 +2167,15 @@ function deleteEverything(kind, input) {
 }
 
 function serviceAction(path, message) {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async (scope) => {
     await api(path, { method: "POST" });
-    if (epoch === state.authEpoch) notice(message);
+    if (scope.alive()) notice(message);
   });
 }
 
 function restartRoost() {
-  return withSettingsBusy(async (epoch) => {
+  return withSettingsBusy(async () => {
     await api("/service/restart-roost", { method: "POST" });
-    if (epoch !== state.authEpoch) return;
     notice("Roost is restarting…");
     // Wait for the old process to go, then for the new one to answer.
     await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -2276,11 +2286,11 @@ function settlePull(height) {
 
 async function refreshFromPull() {
   state.refreshing = true;
-  const epoch = state.authEpoch, began = Date.now();
+  const scope = signInScope(), began = Date.now();
   pullIndicator.classList.remove("armed"); pullIndicator.classList.add("refreshing");
   settlePull(PULL_HOLD);
   try { await (state.section === "jobs" ? loadJobs() : loadConversations()); }
-  catch (error) { if (epoch === state.authEpoch) notice(error.message); }
+  catch (error) { report(error, scope); }
   // A very fast reload still shows the spinner long enough to read as "refreshed".
   await new Promise((resolve) => setTimeout(resolve, Math.max(0, PULL_MINIMUM_MS - (Date.now() - began))));
   state.refreshing = false;
@@ -2388,7 +2398,7 @@ function recordingUI(text = "") {
 }
 
 function currentTake(take) {
-  return voice.take === take && take.epoch === state.authEpoch && take.view === state.viewEpoch && take.id === state.current;
+  return voice.take === take && take.scope.alive();
 }
 
 function releaseRecording(take) {
@@ -2399,7 +2409,7 @@ function releaseRecording(take) {
 async function startRecording() {
   if (voice.take || state.busy) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder !== "function") { notice("This browser can’t record audio."); return; }
-  const take = { epoch: state.authEpoch, view: state.viewEpoch, id: state.current, phase: "requesting", chunks: [] };
+  const take = { scope: viewScope(), phase: "requesting", chunks: [] };
   voice.take = take; recordingUI("Waiting for microphone permission…");
   unlockPlayer();
   try {
