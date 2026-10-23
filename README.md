@@ -2,7 +2,7 @@
   <img src="assets/roost-logo.png" alt="roost" width="240">
 </p>
 
-<p align="center"><strong>A private home for your Hermes agent.</strong><br>Conversations and scheduled work in one modern, simple app.</p>
+<p align="center"><strong>A clean home for your Hermes agent.</strong><br>Conversations and scheduled work in one modern, simple app.</p>
 
 <p align="center">
   <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml"><img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks"></a>
@@ -20,8 +20,6 @@
   <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
 </p>
 
-<p align="center"><sub>Illustrative device mockups with sample data. <a href="assets/roost-product-tour.gif">View the animated preview</a>.</sub></p>
-
 Roost is a private web app for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Chat with your agent and manage its scheduled work from your desktop or phone. Hermes runs the agent; Roost provides the interface.
 
 **Early preview.** See [compatibility and validation status](docs/compatibility.md) for supported versions and device limitations.
@@ -36,7 +34,7 @@ Roost is a private web app for [Hermes Agent](https://github.com/NousResearch/he
 
 ## Install with your Hermes agent
 
-Requires **Python 3.11+** and a running Hermes dashboard with password authentication. Give Hermes this prompt:
+Requires **Python 3.11+** or greater and a running Hermes dashboard with password authentication. Give Hermes this prompt:
 
 ```text
 Install Roost for my existing Hermes agent from https://github.com/calebbrinkley/roost.
@@ -44,9 +42,9 @@ Read AGENTS.md and follow docs/agent-setup.md. Inspect my setup, ask for missing
 details, and verify the installation before handing me the URL.
 ```
 
-Prefer to install it yourself? Follow the [setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Dashboard credentials stay on the Roost server. See [SECURITY.md](SECURITY.md) for security reports.
+Prefer to install it yourself? Follow the [setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Tailscale is highly recommended. Dashboard credentials stay on your Roost server. See [SECURITY.md](SECURITY.md) for security reports.
 
-On your phone, add Roost to the Home Screen. iPhone and iPad notifications require a Home Screen installation on **iOS/iPadOS 16.4+**.
+On your phone, add Roost to the Home Screen. iPhone and iPad notifications require a Home Screen installation on **iOS/iPadOS 16.4+** or newer.
 
 ## Try the demo
 
