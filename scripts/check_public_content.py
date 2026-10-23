@@ -72,7 +72,7 @@ REVIEWED_ASSETS = {
     "assets/roost-iphone-chat-dark.png": "4ea75dd5311e7a6ea775698071395ba176014221c541bcccf032c36b0760d5bc",
     "assets/roost-iphone-dark.png": "9862004e1c1906df99ff07bdbebafd2b3fa141dc96e33b56bb55898531510294",
     "assets/roost-product-tour.gif": "250423f875fef1245cd5fed409fc1a09fd44e2ba1ccc4c5b42dffaa79133293a",
-    "assets/roost-readme-hero.png": "99fb7158d7ccd0e0e5a969127d55cc70fbcdcb11a5898a751b59c0f39bb8573d",
+    "assets/roost-readme-hero.png": "928e97afc43a7a4039dc4eb8c25f5982af2406f9a972a5aa97bb5da38130f1df",
 }
 
 
@@ -92,6 +92,7 @@ REVIEWED_HISTORY = {
 # Previously published assets remain reviewed for history scans only. Current files must match
 # their current pin; a retired asset is not approved for reintroduction into the working tree.
 REVIEWED_ASSET_HISTORY = {
+    "assets/roost-readme-hero.png": {"99fb7158d7ccd0e0e5a969127d55cc70fbcdcb11a5898a751b59c0f39bb8573d"},
     "assets/roost-iphone-dark.png": {"47bd3737d5d61418207dee8328342223cff6c063ca9ebcc5420ad0b9340f4db0"},
     "assets/roost-macbook-light.png": {"5b443696cf1fca80141d52287d3ca92e6207c86853c06c133ceac4b8670b9279"},
 }
