@@ -21,7 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 This notice applies to assets/roost-readme-hero.png, an AI-generated composition
-using the existing Roost device mockups as references. The reference assets'
-notice is retained in preview-mockups-MIT.txt. This license grants rights held
-by the contributors; it does not imply that AI-generated material is eligible
-for copyright protection in every jurisdiction.
+using current Roost demo interface captures as references. Earlier versions
+used the device mockups covered by preview-mockups-MIT.txt. This license grants
+rights held by the contributors; it does not imply that AI-generated material
+is eligible for copyright protection in every jurisdiction.

@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
+  <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of the current Roost Messages and Jobs screens in two angled phone mockups" width="760"></a>
 </p>
 
 Roost is a simple, private app for [Hermes Agent](https://github.com/NousResearch/hermes-agent) built around the features that matter: conversations, scheduled work, and approvals. The interface stays out of your way, with fewer buttons and toggles competing for your attention. Open it on your phone or desktop and get straight to the agent you already run.
