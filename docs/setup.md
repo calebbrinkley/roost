@@ -1,22 +1,34 @@
 # Connect Roost to Hermes
 
-Roost requires Python 3.11+ and a running Hermes dashboard. Install the package with the demo instructions in the [README](../README.md), then follow these steps.
+Roost requires Git, Python 3.11+, and a reachable Hermes dashboard with its password provider enabled and the desired agent and model already configured. The integration targets **Hermes `v2026.9.24`**; see [compatibility](compatibility.md) before using another version. Roost does not start Hermes or load a model. To have Hermes handle installation, use the [agent setup runbook](agent-setup.md).
 
+### 0. Install Roost
 
-Install Roost using the first four commands above. You also need a reachable Hermes dashboard with its password provider enabled and the desired agent and model already configured. Roost does not start Hermes or load a model.
+Run these commands on the machine that will host Roost, using a Python 3.11+ interpreter:
+
+```bash
+git clone https://github.com/calebbrinkley/roost.git
+cd roost
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+```
+
+No Node.js or frontend build is needed to run Roost. These commands install the real app; do not run `dev/demo.py` for a connected installation.
 
 ### 1. Set your Roost password
 
 ```bash
-export ROOST_STATE_DIR="$PWD/.roost-state"
+umask 077
+export ROOST_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/roost"
+mkdir -p "$ROOST_STATE_DIR"
 .venv/bin/python -m roost set-password
 ```
 
-This is your Roost sign-in password, separate from the Hermes dashboard password.
+Enter a password of at least 12 characters at the hidden prompts. This is your Roost sign-in password, separate from the Hermes dashboard password. Keep using this same absolute state directory when starting the service; it holds your account, settings, and keys.
 
 ### 2. Configure the connection
 
-Store your Hermes dashboard password in a file **outside the checkout**, readable only by the service account. Replace the placeholders below with your dashboard endpoint, username and password-file path.
+Store your Hermes dashboard password in a file **outside the checkout**, readable only by the service account (file mode `600`, private parent directory). Enter it locally with a private editor; do not put it in a shell command or chat. Replace the placeholders below with your dashboard endpoint, username and password-file path.
 
 ```bash
 export ROOST_PUBLIC_ORIGIN="http://127.0.0.1:8787"
@@ -28,9 +40,19 @@ export ROOST_HERMES_PASSWORD_FILE="/REPLACE_PRIVATE_DIRECTORY/hermes-password"
 
 Open **http://127.0.0.1:8787** and sign in with the password you set in step 1.
 
+`curl --fail --silent --show-error http://127.0.0.1:8787/api/health` should return `{"status": "ready"}`. This checks Roost only. After sign-in, load Messages and Jobs and send a short test message to verify the Hermes connection. An empty list is valid for a new agent; an authentication or connection error is not.
+
 ### 3. Access it from another device
 
 Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and set `ROOST_PUBLIC_ORIGIN` to the exact browser origin, with no path or trailing slash. Keep access restricted to your private network: authenticated users can submit work to the agent.
+
+For example, if Tailscale is already installed and authenticated on the Roost host, `tailscale serve --bg http://127.0.0.1:8787` provides a private HTTPS address. Inspect any existing Serve configuration first so you do not replace another service. Set `ROOST_PUBLIC_ORIGIN` to the HTTPS origin it reports, restart Roost with the same state and connection settings, and open that address from a device on your tailnet. Use Serve for private access; do not enable Funnel. See the [Tailscale Serve documentation](https://tailscale.com/kb/1242/tailscale-serve) for prerequisites and access controls.
+
+### Keep it running
+
+The foreground `serve` command stops when its terminal closes. For a persistent installation, configure your host's service manager (for example, systemd on Linux or launchd on macOS) with the absolute path to `.venv/bin/python`, arguments `-m roost serve`, the checkout as its working directory, and all the configuration values above. Set `ROOST_REVISION` to the installed Git commit for Settings › About. Keep any environment file outside the checkout with mode `600`; do not commit it.
+
+The service account must be able to read the Hermes password file and write the state directory. Configure restart on failure, including exit status 75 used by Settings › Restart Roost. Verify stop/start and reboot persistence before calling the installation complete. Back up the private state directory and configuration securely. For updates, record the current commit, stop Roost, back up state, fast-forward a clean checkout, rerun `.venv/bin/python -m pip install -e .`, update `ROOST_REVISION`, and restart and repeat the connection checks. Retain the old commit and backup for recovery.
 
 ### Approval requests
 
