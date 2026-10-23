@@ -86,11 +86,11 @@ async def record(live: dict, sid: str, turn: Turn, events) -> None:
             del live[sid]
 
 
-async def send(response, turn: Turn) -> None:
-    """Write `turn` to an open event stream: everything so far, then what is added, then the end."""
+async def send(response, turn: Turn, is_authorized) -> None:
+    """Write the shared turn only while this browser session remains valid."""
     sent_thoughts = sent_text = 0
     first = True
-    while True:
+    while is_authorized():
         changed = turn.changed
         data = {}
         if first:
@@ -112,4 +112,6 @@ async def send(response, turn: Turn) -> None:
         try:
             await asyncio.wait_for(changed.wait(), HEARTBEAT_SECONDS)
         except TimeoutError:
+            if not is_authorized():
+                return
             await response.write(b": still writing\n\n")

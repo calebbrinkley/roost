@@ -408,7 +408,7 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
             ("message.delta", {"text": "Here."}), ("message.complete", {}), ("message.delta", {"text": "late"})))
         turn = registry["chat:one"]
         response = SimpleNamespace(write=AsyncMock(side_effect=lambda data: written.append(data)))
-        await asyncio.gather(task, live.send(response, turn))
+        await asyncio.gather(task, live.send(response, turn, lambda: True))
         self.assertEqual((turn.thoughts, turn.text, turn.done), ("Look it up.\n\nFound it.", "Searching.\n\nHere.", True))
         self.assertNotIn("chat:one", registry)
         sent = [json.loads(line[6:]) for line in written]
@@ -527,6 +527,66 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.directory.cleanup()
+
+    async def test_logout_stops_only_that_sessions_reply_stream(self):
+        finish = asyncio.Event()
+        async def events():
+            yield ("message.delta", {"text": "Before logout."})
+            await finish.wait()
+            yield ("reasoning.delta", {"text": "Private thoughts after logout."})
+            yield ("message.delta", {"text": "After logout."})
+            yield ("message.complete", {})
+        task = live.follow(self.app["live"], "chat:one", "hello", events())
+        first = {server.COOKIE: self.app["sessions"].issue()}
+        second = {server.COOKIE: self.app["sessions"].issue()}
+        streams = []
+        try:
+            for cookies in (first, second):
+                response = await self.client.get("/api/conversations/chat:one/stream", cookies=cookies)
+                self.assertEqual(response.status, 200)
+                await asyncio.wait_for(response.content.readuntil(b"\n\n"), 1)
+                streams.append(response)
+            logout = await self.client.post("/api/logout", cookies=first, headers=self.headers)
+            self.assertEqual(logout.status, 200)
+            denied = await self.client.get("/api/jobs", cookies=first)
+            self.assertEqual(denied.status, 401)
+            finish.set()
+            revoked, valid = await asyncio.wait_for(asyncio.gather(*(stream.read() for stream in streams)), 1)
+            self.assertEqual(revoked, b"")
+            self.assertIn(b"After logout.", valid)
+            self.assertIn(b"Private thoughts after logout.", valid)
+            await asyncio.wait_for(task, 1)
+            self.assertFalse(task.cancelled())
+        finally:
+            finish.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for response in streams:
+                response.close()
+
+    async def test_expired_session_closes_an_idle_stream_before_its_heartbeat(self):
+        finish = asyncio.Event()
+        async def events():
+            yield ("message.delta", {"text": "Still working."})
+            await finish.wait()
+            yield ("message.complete", {})
+        task = live.follow(self.app["live"], "chat:one", "hello", events())
+        token = self.app["sessions"].issue()
+        response = None
+        try:
+            with patch("roost.live.HEARTBEAT_SECONDS", 0.01):
+                response = await self.client.get("/api/conversations/chat:one/stream", cookies={server.COOKIE: token})
+                self.assertEqual(response.status, 200)
+                await asyncio.wait_for(response.content.readuntil(b"\n\n"), 1)
+                self.app["sessions"].db.execute("UPDATE sessions SET expires = 0 WHERE token_hash = ?",
+                                                (Sessions._hash(token),))
+                self.app["sessions"].db.commit()
+                self.assertEqual(await asyncio.wait_for(response.content.read(), 0.5), b"")
+                self.assertFalse(task.done(), "Expiring a browser session must leave the Hermes turn running.")
+        finally:
+            finish.set()
+            await asyncio.gather(task, return_exceptions=True)
+            if response is not None:
+                response.close()
 
     async def test_push_routes_need_a_session_and_validate_input(self):
         response = await self.client.get("/api/push")

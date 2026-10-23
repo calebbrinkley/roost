@@ -766,7 +766,8 @@ async def stream(request: web.Request):
     harden(request, response)
     await response.prepare(request)
     try:
-        await live.send(response, turn)
+        await live.send(response, turn,
+                        lambda: request.app["sessions"].valid(request.cookies.get(COOKIE, "")))
     except ConnectionResetError:
         pass  # the browser left; it reconnects or reads the transcript
     return response
