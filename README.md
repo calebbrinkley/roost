@@ -11,6 +11,7 @@
 <p align="center">
   <a href="#try-the-demo">Try the demo</a> ·
   <a href="#install-with-your-hermes-agent">Install with Hermes</a> ·
+  <a href="docs/docker-compose.md">Docker Compose</a> ·
   <a href="docs/setup.md">Setup</a> ·
   <a href="docs/compatibility.md">Compatibility</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -42,7 +43,7 @@ Read AGENTS.md and follow docs/agent-setup.md. Inspect my setup, ask for missing
 details, and verify the installation before handing me the URL.
 ```
 
-Prefer to install it yourself? Follow the [setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Tailscale is highly recommended. Dashboard credentials stay on your Roost server. See [SECURITY.md](SECURITY.md) for security reports.
+Prefer to install it yourself? Use [Docker Compose](docs/docker-compose.md) or the [Python setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Tailscale is highly recommended. Dashboard credentials stay on your Roost server. See [SECURITY.md](SECURITY.md) for security reports.
 
 On your phone, add Roost to the Home Screen. iPhone and iPad notifications require a Home Screen installation on **iOS/iPadOS 16.4+** or newer.
 

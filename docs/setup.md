@@ -1,5 +1,7 @@
 # Connect Roost to Hermes
 
+Prefer containers? Follow the [Docker Compose installation guide](docker-compose.md). The steps below install Roost directly with Python.
+
 Roost requires Git, Python 3.11+, and a reachable Hermes dashboard with its password provider enabled and the desired agent and model already configured. The integration targets **Hermes `v2026.9.24`**; see [compatibility](compatibility.md) before using another version. Roost does not start Hermes or load a model. To have Hermes handle installation, use the [agent setup runbook](agent-setup.md).
 
 ### 0. Install Roost
