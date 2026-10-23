@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#ffffff">
   <meta name="description" content="Roost, a place to talk with your agent.">
-  <link rel="icon" href="/icon.svg?v=forest-green" type="image/svg+xml">
+  <link rel="icon" href="/icon-192.png?v=bird" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=bird">
   <link rel="manifest" href="/manifest.webmanifest">
   <script src="/theme.js"></script>
   <link rel="preload" href="/SpaceGrotesk-Regular.ttf" as="font" type="font/ttf" crossorigin>
@@ -13,6 +14,7 @@
   <title>Roost</title>
 </head>
 <body>
+  <div id="connecting" class="login connecting" role="status">Connecting to Roost…</div>
   <div id="login" class="login hidden">
     <form id="login-form" class="login-card">
       <div class="login-icon">R</div>
@@ -21,6 +23,7 @@
       <label for="password">Password</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <button class="primary" type="submit">Sign in</button>
+      <button id="passkey-signin" class="secondary hidden" type="button">Sign in with a passkey</button>
       <p id="login-error" class="error" role="alert"></p>
     </form>
   </div>
@@ -32,21 +35,27 @@
         <nav class="segmented desktop-only" aria-label="Sections">
           <button id="nav-messages" class="segment active" type="button">Messages</button>
           <button id="nav-jobs" class="segment" type="button">Jobs</button>
+          <button id="nav-settings" class="segment" type="button">Settings</button>
         </nav>
         <div class="mobile-list-heading mobile-only">
           <h1 id="mobile-list-title">Messages</h1>
-          <button id="top-action" class="icon-button" type="button" aria-label="New conversation" title="New conversation"></button>
+          <div class="mobile-list-actions">
+            <button id="top-action" class="icon-button filled" type="button" aria-label="New conversation" title="New conversation"></button>
+          </div>
         </div>
       </div>
       <div id="sidebar-search" class="search-wrap">
-        <label class="sr-only" for="search">Search conversations</label>
-        <input id="search" type="search" placeholder="Search conversations" autocomplete="off">
-        <button id="new-conversation" class="icon-button desktop-only" type="button" aria-label="New conversation" title="New conversation">+</button>
+        <div class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <label id="search-label" class="sr-only" for="search">Search conversations</label>
+          <input id="search" type="search" placeholder="Search conversations" autocomplete="off">
+        </div>
+        <button id="sidebar-new" class="icon-button filled desktop-only" type="button" aria-label="New conversation" title="New conversation"></button>
       </div>
+      <div id="pull-indicator" class="pull-indicator" aria-hidden="true"></div>
       <div id="conversation-list" class="conversation-list" aria-label="Conversations"></div>
-      <button id="more-conversations" class="more-button hidden" type="button">Load more</button>
       <div id="sidebar-jobs-list" class="job-sidebar-list hidden" aria-label="Scheduled jobs"></div>
-      <div class="sidebar-footer"><button id="logout" class="text-button" type="button">Sign out</button><button class="theme-toggle" type="button" data-theme-toggle></button></div>
+      <div id="sidebar-settings-list" class="job-sidebar-list hidden" aria-label="Settings"></div>
     </aside>
 
     <main class="main">
@@ -54,19 +63,32 @@
       <section id="messages-view" class="messages-view">
         <header class="chat-header">
           <button id="back-to-list" class="back-button mobile-only" type="button" aria-label="Back to Messages">‹</button>
-          <div class="chat-avatar" data-agent-initial>A</div>
+          <span id="chat-avatar" class="chat-avatar"></span>
           <div class="chat-heading"><strong data-agent-text="{agent}">Agent</strong><small id="chat-title">Your conversation</small></div>
           <div class="chat-actions">
             <span id="origin-badge" class="source-tag hidden"></span>
             <span id="presence" class="presence desktop-only"></span>
-            <button class="theme-toggle theme-icon-only mobile-only" type="button" data-theme-toggle></button>
+            <button id="chat-settings" class="icon-button hidden" type="button" aria-label="Conversation menu" title="Conversation menu"></button>
           </div>
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
+        <section id="approvals" class="approval-panel hidden" aria-label="Approval requests" aria-live="polite"></section>
+        <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
         <form id="composer" class="composer">
+          <label id="reasoning-chip" class="reasoning-chip" title="How hard the agent thinks in this conversation" data-agent-title="How hard {agent} thinks in this conversation">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>
+            <span class="sr-only">Thinking</span>
+            <select id="reasoning">
+              <option value="default">Default</option>
+              <option value="none">Off</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
           <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
           <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
-          <button id="voice-button" class="mic-button" type="button" disabled aria-label="Voice messages are coming later" title="Voice messages are coming later"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+          <button id="voice-button" class="mic-button" type="button" aria-label="Start recording" title="Start recording" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
           <button id="send" class="send-button" type="submit" aria-label="Send message">↑</button>
         </form>
       </section>
@@ -75,7 +97,6 @@
         <header class="jobs-header">
           <button id="back-to-jobs" class="back-button mobile-only" type="button" aria-label="Back to Jobs">‹</button>
           <div class="jobs-heading"><strong id="job-detail-title">Jobs</strong><small id="job-detail-subtitle">Scheduled work</small></div>
-          <div class="jobs-actions"><button class="theme-toggle theme-icon-only mobile-only" type="button" data-theme-toggle></button><button id="new-job" class="icon-button desktop-only" type="button" aria-label="New job" title="New job">+</button></div>
         </header>
         <div id="job-detail" class="job-detail"></div>
         <div id="job-detail-actions" class="job-detail-actions hidden">
@@ -83,11 +104,20 @@
           <button id="edit-selected-job" class="primary" type="button">Edit job</button>
         </div>
       </section>
+
+      <section id="settings-view" class="jobs-view hidden">
+        <header class="jobs-header">
+          <button id="back-to-settings" class="back-button mobile-only" type="button" aria-label="Back to Settings">‹</button>
+          <div class="jobs-heading"><strong id="settings-title">Settings</strong><small id="settings-subtitle"></small></div>
+        </header>
+        <div id="settings-detail" class="job-detail settings-detail"></div>
+      </section>
     </main>
 
     <nav id="mobile-tabbar" class="mobile-tabbar mobile-only" aria-label="Sections">
-      <button id="mobile-nav-messages" class="tab active" type="button"><span aria-hidden="true">▤</span>Messages</button>
-      <button id="mobile-nav-jobs" class="tab" type="button"><span aria-hidden="true">◷</span>Jobs</button>
+      <button id="mobile-nav-messages" class="tab active" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>Messages</button>
+      <button id="mobile-nav-jobs" class="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Jobs</button>
+      <button id="mobile-nav-settings" class="tab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Settings</button>
     </nav>
   </div>
 
@@ -96,19 +126,36 @@
       <div class="dialog-heading"><h2 id="job-dialog-title">New job</h2><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
       <label for="job-name">Name</label><input id="job-name" maxlength="500" required placeholder="Morning briefing">
       <label for="job-prompt" data-agent-text="What should {agent} do?">What should the agent do?</label><textarea id="job-prompt" rows="5" maxlength="16000" required placeholder="Give me a clear overview of today's priorities."></textarea>
-      <label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00.</p>
+      <label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00 AM.</p>
       <label for="job-deliver">Delivery</label><input id="job-deliver" maxlength="500" value="local" required><p class="field-help">“local” saves the result in Hermes.</p>
       <div id="job-management" class="job-management hidden"><button id="delete-job" class="danger" type="button">Delete job</button></div>
       <div class="dialog-actions"><button id="cancel-job" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>
   </dialog>
+  <dialog id="delivery-sheet" class="sheet" aria-labelledby="delivery-title">
+    <div class="sheet-view">
+      <p id="delivery-title" class="sheet-title" tabindex="-1" autofocus></p>
+      <p id="delivery-time" class="sheet-note"></p>
+      <div id="delivery-text" class="delivery-text"></div>
+      <div class="dialog-actions"><button id="delivery-close" class="secondary" type="button">Close</button></div>
+    </div>
+  </dialog>
   <dialog id="conversation-sheet" class="sheet" aria-labelledby="sheet-title">
     <div id="sheet-actions" class="sheet-view">
       <p id="sheet-title" class="sheet-title" tabindex="-1" autofocus></p>
+      <button id="sheet-instructions" class="sheet-action" type="button">Instructions</button>
+      <a id="sheet-export" class="sheet-action" href="#" download>Download as JSON</a>
       <button id="sheet-rename" class="sheet-action" type="button">Rename</button>
       <button id="sheet-delete" class="sheet-action danger-text" type="button">Delete</button>
       <button id="sheet-cancel" class="sheet-action sheet-cancel" type="button">Cancel</button>
     </div>
+    <form id="sheet-instructions-form" class="sheet-view hidden">
+      <label class="sheet-title" for="sheet-instructions-text">Instructions for this conversation</label>
+      <textarea id="sheet-instructions-text" maxlength="4000" rows="6" placeholder="How the agent should work in this conversation" data-agent-placeholder="How {agent} should work in this conversation"></textarea>
+      <p class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
+      <p id="sheet-instructions-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button id="sheet-instructions-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
+    </form>
     <form id="sheet-rename-form" class="sheet-view hidden">
       <label class="sheet-title" for="sheet-name">Rename conversation</label>
       <input id="sheet-name" maxlength="200" autocomplete="off">

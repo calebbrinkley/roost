@@ -1,40 +1,54 @@
 <p align="center">
-  <img src="assets/roost-logo.png" alt="Roost" width="240">
+  <img src="assets/roost-logo.png" alt="roost" width="240">
 </p>
 
-<p align="center">A private Progressive Web App for your Hermes agent.</p>
+<p align="center"><strong>A clean home for your Hermes agent.</strong><br>Conversations and scheduled work in one modern, simple app.</p>
 
 <p align="center">
-  <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml">
-    <img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks">
-  </a>
+  <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml"><img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks"></a>
 </p>
 
 <p align="center">
-  · <a href="docs/setup.md">Setup</a>
-  · <a href="CONTRIBUTING.md">Contributing</a>
-  · <a href="SECURITY.md">Security</a>
+  <a href="#try-the-demo">Try the demo</a> ·
+  <a href="#install-with-your-hermes-agent">Install with Hermes</a> ·
+  <a href="docs/setup.md">Setup</a> ·
+  <a href="docs/compatibility.md">Compatibility</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 <p align="center">
-  <a href="assets/roost-iphone-chat-dark.png"><img src="assets/roost-iphone-chat-dark.png" alt="Roost Messages in dark mode with a demo conversation" width="280"></a>
-  <a href="assets/roost-iphone-dark.png"><img src="assets/roost-iphone-dark.png" alt="Roost Jobs in dark mode with sample scheduled work" width="280"></a>
+  <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
 </p>
-<p align="center"><sub>Messages and Jobs in dark mode. AI device mockups with demo data.</sub></p>
 
-Roost gives one owner a focused interface for conversations and scheduled work. It connects to your existing Hermes agent, keeps dashboard credentials on the server, and supports desktop and phone layouts.
+Roost is a simple, private app for [Hermes Agent](https://github.com/NousResearch/hermes-agent) built around the features that matter: conversations, scheduled work, and approvals. The interface stays out of your way, with fewer buttons and toggles competing for your attention. Open it on your phone or desktop and get straight to the agent you already run.
 
-## Features
+**Early preview.** See [compatibility and validation status](docs/compatibility.md) for supported versions and device limitations.
 
-- **Messages:** continue conversations from Roost and other Hermes channels, with source badges and confirmed deletion.
-- **Jobs:** create schedules, edit instructions, pause or resume work, run a Job immediately, and view its history.
-- **Appearance:** light and dark themes, responsive layouts, and a configurable agent name.
+## What you can do
 
-**Early preview:** text conversations and Jobs are implemented. Voice and push notifications are planned. See [compatibility and validation status](docs/compatibility.md).
+- **Messages:** streaming replies, searchable conversations, instructions, and history export.
+- **Jobs:** schedule work, pause or run Jobs, and view their history.
+- **Voice and approvals:** dictate messages, listen to replies, and review tool requests.
+- **Notifications and reply metrics:** receive updates; add the [Hermes plugin](docs/setup.md#4-optional-reply-measurements-and-job-reports-from-hermes) for Job reports, agent-initiated messages, and token/TPS details.
+- **Make it yours:** themes, accent colors, agent settings, and password or passkey sign-in.
+
+## Install with your Hermes agent
+
+Requires **Python 3.11+** or greater and a running Hermes dashboard with password authentication. Give Hermes this prompt:
+
+```text
+Install Roost for my existing Hermes agent from https://github.com/calebbrinkley/roost.
+Read AGENTS.md and follow docs/agent-setup.md. Inspect my setup, ask for missing
+details, and verify the installation before handing me the URL.
+```
+
+Prefer to install it yourself? Follow the [setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Tailscale is highly recommended. Dashboard credentials stay on your Roost server. See [SECURITY.md](SECURITY.md) for security reports.
+
+On your phone, add Roost to the Home Screen. iPhone and iPad notifications require a Home Screen installation on **iOS/iPadOS 16.4+** or newer.
 
 ## Try the demo
 
-Requires **Python 3.11+**. The demo uses a local Hermes stand-in and disposable sample data.
+Requires **Python 3.11+**. Uses disposable sample data; no Hermes agent or model needed.
 
 ```bash
 git clone https://github.com/calebbrinkley/roost.git
@@ -44,25 +58,21 @@ python3 -m venv .venv
 .venv/bin/python dev/demo.py
 ```
 
-Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**. Stop with Ctrl+C. Demo state is stored in the Git-ignored `.roost-demo-state/` directory.
+Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**.
 
-## Use your agent
+## Development
 
-Follow the [setup guide](docs/setup.md) to connect a running Hermes dashboard. Roost has its own owner password and stores the dashboard password in a private file outside the checkout.
-
-Keep Roost behind a private HTTPS front door for access from other devices. Authenticated access can submit work to your agent. Roost does not start Hermes or load models.
-
-## Contributing
-
-Work on a short-lived branch and open a pull request. Merges to `main` require passing repository checks and resolved review conversations; reviewer approval is optional. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [repository security policy](docs/repository-security.md).
+Python server, plain HTML/CSS/JavaScript. Install the package as above, then run the checks with **Node.js 18+** available:
 
 ```bash
 make hooks
 make PYTHON=.venv/bin/python check
 ```
 
-Server and interface changes also need the [demo smoke check](CONTRIBUTING.md#validation). CI uses sample data and does not validate a live deployment.
+Run `make PYTHON=.venv/bin/python smoke` for server or interface changes. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and validation requirements.
 
 ## License
 
-[MIT](LICENSE). Bundled Space Grotesk fonts by Florian Karsten use the [SIL Open Font License](LICENSES/SpaceGrotesk-OFL.txt).
+[MIT](LICENSE). Bundled Space Grotesk fonts by Florian Karsten use the [SIL Open Font License](LICENSES/SpaceGrotesk-OFL.txt). Asset notices are in [LICENSES](LICENSES).
+
+*Roost is an independent project and is not affiliated with or endorsed by Nous Research.*

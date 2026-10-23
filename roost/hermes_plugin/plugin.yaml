@@ -1,0 +1,22 @@
+name: roost
+label: Roost
+kind: platform
+version: 1.1.0
+description: >
+  Delivers job reports and messages the agent sends to Roost, which keeps them and
+  notifies the owner's devices. Records whole-reply token usage and model-call timing. Outbound only: conversations happen in Roost itself.
+  Ships with Roost; Settings › Notifications in Roost has the token and setup steps.
+requires_env:
+  - name: ROOST_URL
+    description: "Roost's address as Hermes reaches it (e.g. https://roost.example.ts.net)"
+    prompt: "Roost URL"
+    password: false
+  - name: ROOST_DELIVERY_TOKEN
+    description: "The delivery token from Roost's Settings › Notifications"
+    prompt: "Roost delivery token"
+    password: true
+optional_env:
+  - name: ROOST_HOME_CHANNEL
+    description: "Set to roost so jobs can deliver to Roost (deliver: roost)"
+    prompt: "Home channel (roost)"
+    password: false

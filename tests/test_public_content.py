@@ -75,9 +75,9 @@ class PublicContentTests(unittest.TestCase):
         sample = "\n".join([
             "OPENAI_API_KEY=REPLACE_WITH_LOCAL_SECRET",
             "api_key: ${OPENAI_API_KEY}",
-            "SWAP_KEY_ENV=SKYNET_SWAP_KEY",
-            "secret_path = /etc/skynet-ai/secrets/inference",
-            "token_file = /etc/skynet-ai/secrets/controller",
+            "SWAP_KEY_ENV=EXAMPLE_SWAP_KEY",
+            "secret_path = /etc/example-agent/secrets/inference",
+            "token_file = /etc/example-agent/secrets/controller",
             "password = short",
             "sha256 = " + "a" * 64,
             "image = example.invalid/component@sha256:" + "b" * 64,

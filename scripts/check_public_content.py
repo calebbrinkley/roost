@@ -65,9 +65,14 @@ ZERO_SHA = re.compile(r"^0+$")
 REVIEWED_ASSETS = {
     "roost/static/SpaceGrotesk-Regular.ttf": "54f91de389ffe508d384a0a0f7e0ca489f170acf40ceebc458086903cf483bc7",
     "roost/static/SpaceGrotesk-Bold.ttf": "54c4dc92c236f5eca503670045125c77d61ef3a22601c76f2f252cf3cad4a088",
+    "roost/static/icon-192.png": "393c5118288910757e38e0edf4651b711effc35da3444ec7c855c1c1a40851b1",
+    "roost/static/icon-512.png": "f48fca30dfd45d6b1692af98e339d5cca09dd94e4ad7f04ab8ef6121be2c711c",
+    "roost/static/apple-touch-icon.png": "cd72bcfb9b14c5d385456e98ae9d0ad2063e08a22783cee3679aa760ef4ab182",
     "assets/roost-logo.png": "d4739d7b3dec098486d6e6e5adb71651e56d7ab457bbf535e5f2f5284020d377",
     "assets/roost-iphone-chat-dark.png": "4ea75dd5311e7a6ea775698071395ba176014221c541bcccf032c36b0760d5bc",
     "assets/roost-iphone-dark.png": "9862004e1c1906df99ff07bdbebafd2b3fa141dc96e33b56bb55898531510294",
+    "assets/roost-product-tour.gif": "250423f875fef1245cd5fed409fc1a09fd44e2ba1ccc4c5b42dffaa79133293a",
+    "assets/roost-readme-hero.png": "99fb7158d7ccd0e0e5a969127d55cc70fbcdcb11a5898a751b59c0f39bb8573d",
 }
 
 

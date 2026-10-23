@@ -1,7 +1,9 @@
 """Loopback-only Roost preview with a small, disposable Hermes stand-in."""
 
 import asyncio
+import base64
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -9,7 +11,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from roost.auth import make_password_hash
-from roost.server import create_app
+from roost.server import SILENCE, create_app
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = ROOT / ".roost-demo-state"
@@ -56,7 +58,7 @@ def sample_data():
         ],
         "terminal_ntfy": [
             {"role": "user", "content": "Can you fix the ntfy port?"},
-            {"role": "assistant", "content": "Moved the listener to 2586; containers drop the capability for low ports."},
+            {"role": "assistant", "content": "Moved the listener to 2586; containers drop the capability for low ports.", "reasoning": "The bind fails with permission denied. Rootless containers cannot bind below 1024, so moving to a high port is simpler than adding a capability."},
         ],
         "roost_packing": [
             {"role": "user", "content": "Add a rain shell to the packing list."},
@@ -91,6 +93,9 @@ def mock_hermes():
     app = web.Application()
     sessions, messages, jobs = sample_data()
     tickets = set()
+    pending_approvals = {}
+    # The profile's display name is where Hermes keeps the agent's name.
+    profile = {"name": "default", "display_name": "Kestrel", "soul": "You are a calm, concise assistant."}
 
     def require(request):
         if request.cookies.get("demo_hermes") != "signed-in":
@@ -122,7 +127,9 @@ def mock_hermes():
         sid = request.match_info["sid"]
         if sid not in messages:
             raise web.HTTPNotFound()
-        return web.json_response({"session_id": sid, "messages": messages[sid], "pagination": {"returned": len(messages[sid])}})
+        # Hermes numbers its rows; the play button reads a reply by its number.
+        rows = [{"id": index + 1, **row} for index, row in enumerate(messages[sid])]
+        return web.json_response({"session_id": sid, "messages": rows, "pagination": {"returned": len(rows)}})
 
     async def rename_session(request):
         require(request)
@@ -202,6 +209,28 @@ def mock_hermes():
         jobs.remove(job)
         return web.json_response({"deleted": True})
 
+    # The real gateway can acknowledge a busy prompt as queued before persisting its user row.
+    reply_counts, reply_locks, queued_inputs = {}, {}, {}
+
+    async def queued_reply(write, runtime_id, sid, envelope):
+        try:
+            async with reply_locks.setdefault(sid, asyncio.Lock()):
+                if sid not in messages:
+                    return
+                if queued_inputs.get(sid) is envelope:
+                    del queued_inputs[sid]
+                prompt = envelope["text"]
+                messages[sid].append({"role": "user", "content": prompt, "timestamp": time.time()})
+                session = next(s for s in sessions if s["id"] == sid)
+                session.update(title=prompt[:42], preview=prompt[:80], last_active_at=time.time())
+                await write(runtime_id, sid, prompt)
+        finally:
+            reply_counts[sid] -= 1
+            if not reply_counts[sid]:
+                del reply_counts[sid]
+                reply_locks.pop(sid, None)
+                queued_inputs.pop(sid, None)
+
     async def ws(request):
         ticket_value = request.query.get("ticket")
         if ticket_value not in tickets:
@@ -215,7 +244,9 @@ def mock_hermes():
                 continue
             frame = message.json()
             method, params = frame.get("method"), frame.get("params") or {}
-            if method == "session.create":
+            if method == "client.capabilities":
+                result = {}
+            elif method == "session.create":
                 stored_id = "roost_" + secrets.token_hex(5)
                 runtime_id = "runtime_" + secrets.token_hex(5)
                 sessions.insert(0, {"id": stored_id, "title": "New conversation", "preview": "", "source": "roost", "last_active_at": time.time()})
@@ -227,37 +258,134 @@ def mock_hermes():
                 if stored_id not in messages:
                     await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                     continue
-                runtime_id = "runtime_" + secrets.token_hex(5)
+                # Hermes reuses a live runtime on resume; approval frames keep that identity.
+                runtime_id = next((key for key, value in app["runtime_map"].items() if value == stored_id), None)
+                if runtime_id is None:
+                    runtime_id = "runtime_" + secrets.token_hex(5)
                 app["runtime_map"][runtime_id] = stored_id
-                result = {"session_id": runtime_id, "stored_session_id": stored_id}
+                result = {"session_id": runtime_id, "stored_session_id": stored_id,
+                          "open_requests": [pending_approvals[stored_id]["frame"]] if stored_id in pending_approvals else []}
+            elif method == "config.get" and params.get("key") == "reasoning":
+                # Like Hermes: a conversation's own choice, else the configured level.
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                result = {"value": app["reasoning"].get(stored_id, "medium"), "display": "show"}
+            elif method == "config.set" and params.get("key") == "reasoning":
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                if not stored_id or params.get("value") not in {"none", "minimal", "low", "medium", "high"}:
+                    await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 4002}})
+                    continue
+                app["reasoning"][stored_id] = params["value"]
+                result = {"key": "reasoning", "value": params["value"]}
+            elif method == "approval.respond":
+                stored_id = app["runtime_map"].get(params.get("session_id"))
+                pending = pending_approvals.get(stored_id)
+                if pending and pending["frame"]["params"]["request_id"] == params.get("request_id") and params.get("choice") in {"once", "deny"}:
+                    pending["choice"] = params["choice"]
+                    pending["answered"].set()
+                    result = {"resolved": 1}
+                else:
+                    result = {"resolved": 0}
             elif method == "prompt.submit":
                 stored_id = app["runtime_map"].get(params.get("session_id"))
                 if not stored_id:
                     await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                     continue
                 text = params.get("text", "")
-                messages[stored_id].append({"role": "user", "content": text, "timestamp": time.time()})
-                session = next(s for s in sessions if s["id"] == stored_id)
-                session["title"] = text[:42]
-                session["preview"] = text[:80]
-                session["last_active_at"] = time.time()
+                busy = reply_counts.get(stored_id, 0) > 0
 
-                async def reply(sid, prompt):
-                    await asyncio.sleep(1)
+                async def reply(runtime_id, sid, prompt):
+                    # Streams like Hermes: thoughts, then the reply, a few words at a time, then the saved row.
+                    async def emit(kind, payload=None):
+                        if not socket.closed:
+                            await socket.send_json({"jsonrpc": "2.0", "method": "event", "params": {
+                                "type": kind, "session_id": runtime_id, **({"payload": payload} if payload else {})}})
+                    answer = (f"This is the local demo reply to: “{prompt}”\n\n"
+                              "The agent's real answer will appear here when Roost is connected to Hermes.")
+                    if sid in app["reasoning"]:
+                        answer += f"\n\nThinking for this conversation: {app['reasoning'][sid]}."
+                    if prompt == "/approval-demo":
+                        # A protocol demonstration only. This command is never executed.
+                        request_id = secrets.token_hex(8)
+                        frame = {"jsonrpc": "2.0", "id": "demo-" + request_id, "method": "approval", "params": {
+                            "session_id": runtime_id, "request_id": request_id, "tool_name": "terminal",
+                            "command": "printf 'example note' > /workspace/example.md",
+                            "description": "Create a sample note in the execution workspace.", "choices": ["once", "deny"]}}
+                        pending = {"frame": frame, "answered": asyncio.Event()}
+                        pending_approvals[sid] = pending
+                        await socket.send_json(frame)
+                        try:
+                            await asyncio.wait_for(pending["answered"].wait(), 120)
+                            answer = "Demo decision: " + ("Allowed once." if pending["choice"] == "once" else "Denied.") + " No command was executed."
+                        except TimeoutError:
+                            answer = "The demo request expired. No command was executed."
+                        finally:
+                            pending_approvals.pop(sid, None)
+                            await emit("request.cancel", {"id": frame["id"], "method": "approval", "reason": "resolved"})
+                    thoughts = "The owner sent a message to the demo. I'll answer with the demo reply and say where the real one comes from."
+                    await emit("message.start")
+                    for kind, text in (("reasoning.delta", thoughts), ("message.delta", answer)):
+                        for word in re.findall(r"\S+\s*", text):
+                            await asyncio.sleep(0.03)
+                            await emit(kind, {"text": word})
                     if sid not in messages:
                         return  # The owner may delete a conversation while its demo reply is pending.
-                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": f"This is the local demo reply to: “{prompt}”\n\nThe agent's real answer will appear here when Roost is connected to Hermes."})
+                    messages[sid].append({"role": "assistant", "timestamp": time.time(), "content": answer, "reasoning": thoughts})
                     next(s for s in sessions if s["id"] == sid)["last_active_at"] = time.time()
+                    await emit("message.complete", {"text": answer, "status": "complete"})
 
-                asyncio.create_task(reply(stored_id, text))
-                result = {"status": "accepted"}
+                if busy and stored_id in queued_inputs:
+                    queued_inputs[stored_id]["text"] += "\n\n" + text
+                else:
+                    envelope = {"text": text}
+                    if busy:
+                        queued_inputs[stored_id] = envelope
+                    reply_counts[stored_id] = reply_counts.get(stored_id, 0) + 1
+                    asyncio.create_task(queued_reply(reply, params.get("session_id"), stored_id, envelope))
+                result = {"status": "queued" if busy else "accepted"}
             else:
                 await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "error": {"code": 404}})
                 continue
             await socket.send_json({"jsonrpc": "2.0", "id": frame.get("id"), "result": result})
         return socket
 
+    async def active_profile(request):
+        require(request)
+        return web.json_response({"active": "default", "current": "default"})
+
+    async def profiles(request):
+        require(request)
+        return web.json_response({"profiles": [{"name": "default", "display_name": profile["display_name"], "bot_title": ""}]})
+
+    async def get_soul(request):
+        require(request)
+        if request.match_info["name"] != "default":
+            raise web.HTTPNotFound()
+        return web.json_response({"content": profile["soul"], "exists": True})
+
+    async def put_soul(request):
+        require(request)
+        if request.match_info["name"] != "default":
+            raise web.HTTPNotFound()
+        profile["soul"] = (await request.json())["content"]
+        return web.json_response({"ok": True})
+
+    async def status(request):
+        # Public in Hermes too; the real one also carries paths and PIDs that Roost drops.
+        return web.json_response({"version": "demo", "release_date": "2026-09-24", "gateway_running": True,
+                                  "gateway_state": "running", "active_sessions": 1, "hermes_home": "/demo/home"})
+
+    async def restart_gateway(request):
+        require(request)
+        return web.json_response({"ok": True, "pid": 1, "name": "gateway-restart"})
+
     app["runtime_map"] = {}
+    app["reasoning"] = {}  # stored conversation id -> the level Roost set
+    app.router.add_get("/api/profiles/active", active_profile)
+    app.router.add_get("/api/profiles", profiles)
+    app.router.add_get("/api/profiles/{name}/soul", get_soul)
+    app.router.add_put("/api/profiles/{name}/soul", put_soul)
+    app.router.add_post("/api/gateway/restart", restart_gateway)
+    app.router.add_get("/api/status", status)
     app.router.add_post("/auth/password-login", login)
     app.router.add_post("/api/auth/ws-ticket", ticket)
     app.router.add_get("/api/sessions", session_list)
@@ -272,6 +400,23 @@ def mock_hermes():
     app.router.add_post("/api/cron/jobs/{jid}/{action}", job_action)
     app.router.add_delete("/api/cron/jobs/{jid}", delete_job)
     app.router.add_get("/api/ws", ws)
+
+    # Voice: a fixed transcript, and a moment of silence for any reply read aloud.
+    async def transcribe(request):
+        require(request)
+        data = await request.json()
+        if not str(data.get("data_url", "")).startswith("data:audio/"):
+            raise web.HTTPBadRequest()
+        return web.json_response({"ok": True, "transcript": "This is the demo transcript of a voice message."})
+
+    async def speak(request):
+        require(request)
+        if not (await request.json()).get("text"):
+            raise web.HTTPBadRequest()
+        return web.json_response({"ok": True, "data_url": "data:audio/wav;base64," + base64.b64encode(SILENCE).decode()})
+
+    app.router.add_post("/api/audio/transcribe", transcribe)
+    app.router.add_post("/api/audio/speak", speak)
     return app
 
 
