@@ -20,7 +20,7 @@
   <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
 </p>
 
-Roost is a private web app for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Chat with your agent and manage its scheduled work from your desktop or phone. Hermes runs the agent; Roost provides the interface.
+Roost is a private messaging app built specifically for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Pick up conversations from other Hermes channels, manage scheduled Jobs, and review tool approvals from your phone or desktop. It connects to the agent you already run, keeping your tools, memory, and model configuration in Hermes.
 
 **Early preview.** See [compatibility and validation status](docs/compatibility.md) for supported versions and device limitations.
 
@@ -74,3 +74,5 @@ Run `make PYTHON=.venv/bin/python smoke` for server or interface changes. See [C
 ## License
 
 [MIT](LICENSE). Bundled Space Grotesk fonts by Florian Karsten use the [SIL Open Font License](LICENSES/SpaceGrotesk-OFL.txt). Asset notices are in [LICENSES](LICENSES).
+
+*Roost is an independent project and is not affiliated with or endorsed by Nous Research.*
