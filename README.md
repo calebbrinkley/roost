@@ -10,14 +10,17 @@
 
 <p align="center">
   <a href="#try-the-demo">Try the demo</a> ·
+  <a href="#install-with-your-hermes-agent">Install with Hermes</a> ·
   <a href="docs/setup.md">Setup</a> ·
   <a href="docs/compatibility.md">Compatibility</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 <p align="center">
-  <a href="assets/roost-product-tour.gif"><img src="assets/roost-product-tour.gif" alt="Roost animation" width="550"></a>
+  <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
 </p>
+
+<p align="center"><sub>Illustrative device mockups with sample data. <a href="assets/roost-product-tour.gif">View the animated preview</a>.</sub></p>
 
 Roost is an owner-only Progressive Web App for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It connects to your existing Hermes dashboard and brings conversations and scheduled Jobs into a focused interface for desktop and phone layouts. Your dashboard credentials stay on the Roost server.
 
@@ -52,7 +55,23 @@ Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**.
 
 Demo state lives in the Git-ignored `.roost-demo-state/` directory.
 
-## Connect your agent
+## Install with your Hermes agent
+
+Already have Hermes running? Give it this prompt:
+
+```text
+Set up Roost for my existing Hermes agent from https://github.com/calebbrinkley/roost.
+Read README.md, AGENTS.md, and docs/agent-setup.md, then follow that runbook.
+Inspect my existing setup first and ask only for missing details. Keep credentials
+and state outside the checkout and remote access behind private HTTPS. Have me
+enter passwords locally. Verify the service and Hermes connection, then give me
+the URL and the commands to start, stop, update, and recover my installation.
+Report anything that still needs my browser or phone to verify.
+```
+
+The [agent setup runbook](docs/agent-setup.md) covers discovery, installation, service management, and acceptance checks. It requires **Python 3.11+** and a reachable Hermes dashboard with password authentication enabled. Roost currently targets **Hermes `v2026.9.24`**; other versions need compatibility checks.
+
+## Connect your agent manually
 
 Follow the [setup guide](docs/setup.md) to connect a running Hermes dashboard with its password provider enabled. The integration currently targets **Hermes `v2026.9.24`**.
 

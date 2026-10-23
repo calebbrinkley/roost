@@ -16,7 +16,7 @@ The integration targets Hermes **`v2026.9.24`**. The project records a successfu
 Integration with **local-ai-stack** is planned as a CPU-only service. Packaging, installer changes, a private HTTPS front door and host commissioning are separate deployment work. Hermes retains responsibility for model access and the gaming gate.
 
 
-The README images are AI-generated device mockups based on demo captures. They are not evidence of physical iPhone testing.
+The README images are AI-generated device mockups based on demo captures. The new two-phone hero uses the existing demo mockups as references; it is an illustration, not an exact capture of the current interface. See [asset provenance](../assets/README.md). These images are not evidence of physical iPhone testing.
 
 Runtime and UI fixes and their regression coverage are recorded in the [code review](code-review.md). Those checks use fake data and do not repeat the historical live Hermes validation.
 
