@@ -20,7 +20,7 @@
   <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of Roost's Messages and Jobs screens in two dark phone mockups" width="760"></a>
 </p>
 
-Roost is a private messaging app built specifically for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Pick up conversations from other Hermes channels, manage scheduled Jobs, and review tool approvals from your phone or desktop. It connects to the agent you already run, keeping your tools, memory, and model configuration in Hermes.
+Roost is a simple, private app for [Hermes Agent](https://github.com/NousResearch/hermes-agent) built around the features that matter: conversations, scheduled work, and approvals. The interface stays out of your way, with fewer buttons and toggles competing for your attention. Open it on your phone or desktop and get straight to the agent you already run.
 
 **Early preview.** See [compatibility and validation status](docs/compatibility.md) for supported versions and device limitations.
 
