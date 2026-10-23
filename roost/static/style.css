@@ -155,10 +155,10 @@ button:disabled { cursor: default; }
 .day { align-self: center; margin: 8px 0 12px; padding: 3px 10px; border-radius: 999px; color: var(--muted); background: var(--chip); font-size: calc(12px * var(--text-scale)); font-weight: 500; }
 .message { max-width: 78%; min-width: 0; }
 .message.from-you { align-self: flex-end; }
-.message.from-wren { align-self: flex-start; }
+.message.from-agent { align-self: flex-start; }
 .message-body { padding: 9px 14px; border-radius: 20px; background: var(--agent); color: var(--ink); font-size: calc(15px * var(--text-scale)); line-height: 1.4; overflow-wrap: anywhere; }
 .from-you .message-body { background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 6px; }
-.from-wren .message-body { border-bottom-left-radius: 6px; }
+.from-agent .message-body { border-bottom-left-radius: 6px; }
 .message-body p { margin: 0 0 7px; white-space: pre-wrap; }
 .message-body p:last-child { margin-bottom: 0; }
 .message-body ul { margin: 3px 0 7px; padding-left: 19px; }

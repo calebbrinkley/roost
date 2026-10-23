@@ -51,7 +51,7 @@ class EncryptionTests(unittest.TestCase):
                         ("https://updates.push.services.mozilla.com/wpush/v2/x", True),
                         ("https://wns2-bl2p.notify.windows.com/w/?token=x", True),
                         ("http://web.push.apple.com/QW", False), ("https://push.apple.com.evil.example/x", False),
-                        ("https://skynet-hermes:9119/api/env", False), ("https://user:@web.push.apple.com/x", False),
+                        ("https://hermes.example.invalid:9119/api/env", False), ("https://user:@web.push.apple.com/x", False),
                         ("https://web.push.apple.com:8443/x", False)):
             with self.subTest(url=url):
                 self.assertEqual(allowed_endpoint(url), ok)
@@ -101,7 +101,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_subscriptions_are_validated_renewed_in_place_and_removed_when_gone(self):
         with self.assertRaisesRegex(PushError, "isn't one Roost sends to"):
-            self.push.subscribe(self.browser("https://skynet-hermes:9119/x"), "iPhone")
+            self.push.subscribe(self.browser("https://hermes.example.invalid:9119/x"), "iPhone")
         bad = self.browser("https://web.push.apple.com/a")
         bad["keys"]["p256dh"] = b64url(b"\x04" + b"\x01" * 64)
         with self.assertRaisesRegex(PushError, "unusable"):

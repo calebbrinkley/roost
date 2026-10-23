@@ -543,7 +543,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/presence", headers=self.headers, json={"conversation": "chat:one"}, cookies=cookies)
         self.assertEqual(response.status, 200)
         response = await self.client.post("/api/push/devices", headers=self.headers, json={
-            "subscription": {"endpoint": "https://skynet-hermes:9119/x", "keys": {}}, "name": "iPhone"}, cookies=cookies)
+            "subscription": {"endpoint": "https://hermes.example.invalid:9119/x", "keys": {}}, "name": "iPhone"}, cookies=cookies)
         self.assertEqual(response.status, 400)
         self.assertIn("isn't one Roost sends to", (await response.json())["error"])
         response = await self.client.get("/sw.js")

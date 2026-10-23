@@ -1,6 +1,6 @@
 # Set up Roost with a Hermes agent
 
-This runbook is for the agent installing Roost for its owner. Read [AGENTS.md](../AGENTS.md), the [setup guide](setup.md), and [compatibility status](compatibility.md) before changing the host. Install a connected Roost instance, not the disposable demo. Roost is a personal Hermes client; it does not require local-ai-stack, a new model server, or a separate worker.
+This runbook is for the agent installing Roost for its owner. Read [AGENTS.md](../AGENTS.md), the [setup guide](setup.md), and [compatibility status](compatibility.md) before changing the host. Install a connected Roost instance, not the disposable demo. Roost is a personal Hermes client; it does not require a new model server or a separate worker.
 
 ## 1. Discover the existing installation
 

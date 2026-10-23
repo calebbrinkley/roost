@@ -443,9 +443,9 @@ test('saving an agent name applies the name the server now reports, with no seco
 
 test('Settings applies the name, accent and time zone another device saved', async () => {
   const f = settingsFixture(); await tick();
-  f.run(`api = async () => ({...${SETTINGS}, agent: 'Wren', accent: '#a1b2c3', time_zone: 'Asia/Tokyo'}); renderConversations = () => {};`);
+  f.run(`api = async () => ({...${SETTINGS}, agent: 'Example Agent', accent: '#a1b2c3', time_zone: 'Asia/Tokyo'}); renderConversations = () => {};`);
   f.run(`setSection('settings')`); await tick();
-  assert.deepEqual([f.run('agent()'), f.context.window.roostTheme.accent, f.run('state.timeZone')], ['Wren', '#a1b2c3', 'Asia/Tokyo']);
+  assert.deepEqual([f.run('agent()'), f.context.window.roostTheme.accent, f.run('state.timeZone')], ['Example Agent', '#a1b2c3', 'Asia/Tokyo']);
   assert.ok(find(f.get('settings-detail'), n => n.className === 'swatch swatch-custom chosen'), 'not a preset, so Custom is chosen');
 });
 
@@ -769,7 +769,7 @@ test('thoughts from every step fold, collapsed, into one block above the reply t
   assert.equal(blocks.length, 1);
   assert.equal(blocks[0].open, false);
   assert.match(text(blocks[0]), /Read the log first\.[\s\S]*Nothing failed\./);
-  assert.equal(kids[kids.indexOf(blocks[0]) + 1].className, 'message from-wren');
+  assert.equal(kids[kids.indexOf(blocks[0]) + 1].className, 'message from-agent');
   assert.match(text(kids[kids.indexOf(blocks[0]) + 1]), /All clear/);
 });
 
@@ -885,7 +885,7 @@ test('a reply streams its thoughts, then its text, in place of the steps Hermes 
   const {opened, globals} = eventSources();
   const f = fixture(undefined, globals); await tick();
   const now = Date.now() / 1000, kids = () => f.get('transcript').children;
-  const message = n => n.className === 'message from-wren';
+  const message = n => n.className === 'message from-agent';
   f.get('message').value = 'check the logs';
   f.run(`state.current = 'one'; api = async () => ({session_id: 'one'}); loadConversations = async () => {};
     globalThis.loads = 0; loadMessages = async () => { loads++; };`);

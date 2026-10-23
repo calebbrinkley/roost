@@ -921,7 +921,7 @@ function renderMessages(rows) {
     const row = visible[index];
     if (thoughtsBefore.has(row)) transcript.append(thoughtsBlock(...thoughtsBefore.get(row)));
     const key = String(row.id ?? index), time = messageTime(row.timestamp);
-    const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-wren"));
+    const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-agent"));
     const body = el("div", "message-body"); addMarkdown(body, messageText(row)); wrapper.append(body);
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
@@ -1133,7 +1133,7 @@ function liveNodes(live) {
   details.append(el("summary", "", "Thoughts"));
   const thoughts = el("div", "thoughts-body"); details.append(thoughts);
   details.addEventListener("toggle", () => { state.liveThoughtsOpen = details.open; });
-  const message = el("article", "message from-wren"), body = el("div", "message-body"); message.append(body);
+  const message = el("article", "message from-agent"), body = el("div", "message-body"); message.append(body);
   state.liveNodes = { details, thoughts, message, body, shownThoughts: null, shownText: null };
   fillLive(live);
   return [details, message];
