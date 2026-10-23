@@ -1,7 +1,7 @@
 PYTHON ?= python3
 NODE ?= node
 
-.PHONY: check check-python check-public check-history check-scaffold hooks test test-ui smoke
+.PHONY: check check-python check-public check-history check-scaffold hooks test test-ui smoke smoke-compose
 
 check: check-python check-public check-history check-scaffold test test-ui
 
@@ -31,3 +31,7 @@ test-ui:
 # The demo and its smoke check need aiohttp: run with a venv that has Roost installed.
 smoke:
 	$(PYTHON) dev/smoke.py
+
+# Requires a running Docker engine and Compose v2; uses disposable containers and state.
+smoke-compose:
+	$(PYTHON) dev/compose_smoke.py

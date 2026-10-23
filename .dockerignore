@@ -1,0 +1,19 @@
+# Send only the package and its license notices to the build engine.
+*
+!Dockerfile
+!pyproject.toml
+!LICENSE
+!LICENSES/
+!LICENSES/**
+!roost/
+!roost/*.py
+!roost/hermes_plugin/
+!roost/hermes_plugin/*.py
+!roost/hermes_plugin/plugin.yaml
+!roost/static/
+!roost/static/*.html
+!roost/static/*.css
+!roost/static/*.js
+!roost/static/*.png
+!roost/static/*.ttf
+!roost/static/manifest.webmanifest

@@ -6,7 +6,7 @@ This runbook is for the agent installing Roost for its owner. Read [AGENTS.md](.
 
 Inspect what you can before asking the owner for information. Never print secret values or live transcripts into chat, logs, or a public issue.
 
-- Find the machine and account that should run Roost, its operating system, Git, and a Python 3.11+ interpreter. Node.js is only needed for development checks.
+- Find the machine and account that should run Roost, its operating system, Git, and either Docker with Compose v2 or a Python 3.11+ interpreter. Node.js is only needed for development checks.
 - Find the existing Hermes dashboard URL, password-provider username, version, and the profile it serves. Confirm a model is already configured. A running messaging gateway alone is not a dashboard endpoint.
 - Find any existing Roost checkout, service, private configuration, state directory, and HTTPS proxy. Inspect port availability and reuse the installation when appropriate; do not overwrite state, reset the owner's password, or create a duplicate service.
 - Determine the browser URL and how the owner's devices reach it. Prefer an existing private HTTPS proxy; Tailscale Serve is an option. Do not publish Roost to the public internet or change unrelated proxy routes.
@@ -15,9 +15,9 @@ Ask only for details you cannot discover, including the intended host or access 
 
 ## 2. Install and configure
 
-Follow [setup steps 0–3](setup.md#0-install-roost) on the Roost host. For a new installation, clone the repository, create a virtual environment with Python 3.11+, and install with `.venv/bin/python -m pip install -e .`. Keep an existing checkout's local changes intact. Do not use `dev/demo.py`, its sample password, or `ROOST_DEMO=1` for this installation.
+Use the [Docker Compose guide](docker-compose.md) if the owner already uses Docker; otherwise follow [setup steps 0–3](setup.md#0-install-roost) on the Roost host. Keep an existing checkout's local changes intact. Do not use `dev/demo.py`, its sample password, or `ROOST_DEMO=1` for this installation. With Compose, use its password-setup command and service lifecycle commands instead of installing a host virtual environment or a separate service manager.
 
-Choose an absolute private state directory outside the checkout, owned by the service account. Use `umask 077` when creating private directories and files. Persist these environment values in the service manager's private configuration:
+For Compose, complete its guide and then continue at [verification](#4-verify-before-handing-over); Compose manages the service, and its guide distinguishes host paths from container paths. For a native installation, choose an absolute private state directory outside the checkout, owned by the service account. Use `umask 077` when creating private directories and files. Persist these environment values in the service manager's private configuration:
 
 | Variable | Value to discover or arrange |
 | --- | --- |
