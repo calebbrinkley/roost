@@ -36,12 +36,12 @@ def main():
         override = private / "compose-test.json"
         image = project + ":test"
         program = ("from aiohttp import web; import runpy; "
-                   "web.run_app(runpy.run_path('/demo.py')['mock_hermes'](), "
+                   "web.run_app(runpy.run_path('/app/dev/demo.py')['mock_hermes'](), "
                    "host='0.0.0.0', port=18719, access_log=None)")
         override.write_text(json.dumps({"services": {
             "roost": {"image": image, "depends_on": ["hermes"]},
             "hermes": {"image": image, "entrypoint": ["python", "-c", program], "command": [],
-                       "volumes": [str(ROOT / "dev/demo.py") + ":/demo.py:ro"]}}}))
+                       "volumes": [str(ROOT / "dev/demo.py") + ":/app/dev/demo.py:ro"]}}}))
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("ROOST_", "COMPOSE_"))}
         compose = ["docker", "compose", "--project-name", project, "--env-file", str(env_file),
