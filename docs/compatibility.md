@@ -13,10 +13,7 @@ The integration targets Hermes **`v2026.9.24`**. The project records a successfu
 - Job history shows what Hermes returns. Job reports and messages the agent sends on its own reach Roost through its Hermes platform plugin (`roost/hermes_plugin`, see [setup](setup.md)), written against the `v2026.9.24` platform interface (`register_platform`, a live adapter's `send` with the job id in its metadata, and `standalone_sender_fn` for out-of-process cron delivery, where Roost reads the job id from Hermes's report header). It is tested against stand-ins for Hermes's gateway modules and for Roost, not inside a running Hermes.
 - Replies to messages sent from Roost stream as they are written: Roost keeps the dashboard socket open for the turn and passes Hermes's `reasoning.delta` and `message.delta` events (read from the `v2026.9.24` source) to the browser as Server-Sent Events, with the thoughts open while they are written. The transcript stays the record. Turns from other clients, a turn followed for more than 30 minutes, and a turn in progress when Roost restarts appear when Hermes saves them, because Roost polls for the transcript as before. Hermes continues submitted turns after Roost disconnects. Streaming is checked against a local stand-in, not a live agent or a phone.
 
-Integration with **local-ai-stack** is planned as a CPU-only service. Packaging, installer changes, a private HTTPS front door and host commissioning are separate deployment work. Hermes retains responsibility for model access and the gaming gate.
-
-
-The README images are AI-generated device mockups based on demo captures. They are not evidence of physical iPhone testing.
+The README images are AI-generated device mockups based on demo captures. The new two-phone hero uses the existing demo mockups as references; it is an illustration, not an exact capture of the current interface. See [asset provenance](../assets/README.md). These images are not evidence of physical iPhone testing.
 
 Runtime and UI fixes and their regression coverage are recorded in the [code review](code-review.md). Those checks use fake data and do not repeat the historical live Hermes validation.
 

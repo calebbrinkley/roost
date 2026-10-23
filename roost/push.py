@@ -1,6 +1,6 @@
 """Web Push: Roost's VAPID identity (RFC 8292), payload encryption (RFC 8291) and delivery (RFC 8030).
 
-Each notification is encrypted for one browser's keys before it leaves Skynet, so the push service
+Each notification is encrypted for one browser's keys before it leaves the Roost server, so the push service
 (Apple, Google, Mozilla or Microsoft) relays it without being able to read it.
 """
 

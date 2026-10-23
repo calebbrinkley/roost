@@ -4,7 +4,7 @@ Roost is public. Keep credentials, personal identifiers, conversation transcript
 
 ## Branches and pull requests
 
-`main` is the integration branch. Create a short-lived branch for each change, using `feat/`, `fix/`, `docs/` or `security/`. The existing `wren` branch is retained; start new work from current `main`.
+`main` is the integration branch. Create a short-lived branch for each change, using `feat/`, `fix/`, `docs/` or `security/`. Start new work from current `main`.
 
 ```bash
 git fetch origin
