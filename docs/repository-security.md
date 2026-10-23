@@ -7,12 +7,12 @@ Roost uses pull requests, mandatory CI, publication checks and restricted automa
 | Scope | Rules |
 | --- | --- |
 | `main` | Pull request required; zero required approvals; review conversations resolved; required `check` from GitHub Actions; branch current with the base; linear history; squash merges; force pushes and deletion blocked. |
-| All branches | Force pushes blocked, including work branches and the retained `wren` branch. |
+| All branches | Force pushes blocked, including work branches. |
 | Work branches | Short-lived `feat/`, `fix/`, `docs/` and `security/` branches from current `main`; deleted after merge. |
 
 Both rulesets are active and contain no bypass actors. Reviewer and code-owner approvals are optional so the solo maintainer can merge a passing pull request. `CODEOWNERS` requests maintainer review for contributions; it is not an approval requirement. Repository administrators can still edit the settings themselves, so repository rules do not replace security of the owner account.
 
-The integration branch is `main`. The existing `wren` branch is preserved rather than rewritten. New changes follow the [contribution workflow](../CONTRIBUTING.md). There is no deployment workflow attached to a merge.
+The integration branch is `main`. New changes follow the [contribution workflow](../CONTRIBUTING.md). There is no deployment workflow attached to a merge.
 
 ## Checks and automation
 
