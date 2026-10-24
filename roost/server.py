@@ -50,6 +50,9 @@ SOUL_LIMIT = 16000
 # Reply notifications: how often the watcher looks, how long it waits for a reply, and how
 # recently an open Roost must have reported a conversation on screen to count as looking at it.
 WATCH_INTERVAL, WATCH_SECONDS, PRESENCE_SECONDS = 4, 1800, 35
+# A finished reply no device accepted: how many times the watcher pushes it before giving up, and
+# the wait after each failed attempt (times the attempt number), so a short outage can pass.
+PUSH_ATTEMPTS, PUSH_RETRY_SECONDS = 3, 30
 # Hermes status fields shown in About; the rest (paths, PIDs, auth) stays on the server.
 HERMES_STATUS_FIELDS = ("version", "release_date", "gateway_running", "gateway_state", "active_sessions")
 # Hermes returns at most 500 messages a page; an export reads up to this many pages.
@@ -478,10 +481,21 @@ async def check_replies(app: web.Application) -> None:
             if not turns.working(rows, turn=turn, since=watch["since"]):
                 app["watches"].pop(sid, None)
             continue
-        app["watches"].pop(sid, None)
-        if not looking_at(app, sid):
-            await notify(app, {"title": await agent_name(app, ask_hermes=True), "body": preview(reply),
-                               "url": "/?c=" + quote(sid, safe=""), "tag": "reply-" + sid})
+        if looking_at(app, sid):
+            app["watches"].pop(sid, None)
+        elif time.monotonic() < watch.get("push_retry_at", 0):
+            continue
+        else:
+            attempts = watch.get("push_attempts", 0) + 1
+            delivered = await notify(app, {"title": await agent_name(app, ask_hermes=True),
+                                           "body": preview(reply),
+                                           "url": "/?c=" + quote(sid, safe=""), "tag": "reply-" + sid})
+            if delivered == 0 and attempts < PUSH_ATTEMPTS and app["push"].list():
+                # No device accepted it: keep the watch so later passes retry the push.
+                watch["push_attempts"] = attempts
+                watch["push_retry_at"] = time.monotonic() + PUSH_RETRY_SECONDS * attempts
+            else:
+                app["watches"].pop(sid, None)
 
 
 async def notify(app: web.Application, message: dict) -> int:
