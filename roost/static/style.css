@@ -164,6 +164,8 @@ button:disabled { cursor: default; }
 .from-agent .message-body { border-bottom-left-radius: 6px; }
 .message-body p { margin: 0 0 7px; white-space: pre-wrap; }
 .message-body p:last-child { margin-bottom: 0; }
+.paste-toggle { display: block; min-height: 44px; padding: 6px 0 0; border: 0; background: transparent; color: inherit; font: inherit; text-decoration: underline; }
+.paste-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .message-body ul { margin: 3px 0 7px; padding-left: 19px; }
 .message-body li + li { margin-top: 3px; }
 .message-body code { font-family: var(--mono); font-size: .87em; padding: 1px 5px; border-radius: 5px; background: color-mix(in srgb, currentColor 10%, transparent); }
