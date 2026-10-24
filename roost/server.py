@@ -57,6 +57,8 @@ PUSH_ATTEMPTS, PUSH_RETRY_SECONDS = 3, 30
 HERMES_STATUS_FIELDS = ("version", "release_date", "gateway_running", "gateway_state", "active_sessions")
 # Hermes returns at most 500 messages a page; an export reads up to this many pages.
 EXPORT_PAGE, EXPORT_PAGES = 500, 40
+SEND_TTL, SEND_LIMIT = 15 * 60, 500
+SEND_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 
 
 def bad(message: str, status: int = 400) -> web.HTTPException:
@@ -815,9 +817,18 @@ async def create_conversation(request: web.Request):
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
     level = reasoning_level(data.get("reasoning", "default"))
+    entry, response = begin_send(request, data, 201)
+    if response is not None:
+        return response
     since = time.time()
-    sid = await request.app["hermes"].send_message(text, follow=following(request.app, text),
-                                                   reasoning=None if level == "default" else level)
+    try:
+        sid = await request.app["hermes"].send_message(text, follow=following(request.app, text),
+                                                       reasoning=None if level == "default" else level)
+    except HermesError as exc:
+        failed_send(request, data, entry, exc)
+        raise
+    if entry is not None:
+        entry.update(state="done", session_id=sid)
     request.app["chats"].set_reasoning(sid, level)
     watch_reply(request.app, sid, since)
     sent_from_here(request, sid)
@@ -828,14 +839,23 @@ async def send_message(request: web.Request):
     sid = item_id(request, "sid")
     data = await json_body(request)
     text = body_text(data.get("text"), "Message", 16000)
+    entry, response = begin_send(request, data, 200)
+    if response is not None:
+        return response
     # The reply to watch for is written after this message is sent.
     since = time.time()
     chats = request.app["chats"]
     unsent = chats.unsent(sid)
     outgoing = text if unsent is None else with_instructions(text, unsent)
     applied = []
-    stored = await request.app["hermes"].send_message(outgoing, sid, follow=following(request.app, text),
-                                                      reasoning=chats.reasoning_to_apply(sid), applied=applied.append)
+    try:
+        stored = await request.app["hermes"].send_message(outgoing, sid, follow=following(request.app, text),
+                                                          reasoning=chats.reasoning_to_apply(sid), applied=applied.append)
+    except HermesError as exc:
+        failed_send(request, data, entry, exc)
+        raise
+    if entry is not None:
+        entry.update(state="done", session_id=stored)
     if unsent is None:
         chats.moved(sid, stored)
     else:
@@ -845,6 +865,35 @@ async def send_message(request: web.Request):
     watch_reply(request.app, stored, since)
     sent_from_here(request, stored)
     return web.json_response({"session_id": stored})
+
+
+def begin_send(request: web.Request, data: dict, status: int):
+    # Older clients can omit the key. Keyed requests reserve it before any Hermes call.
+    if "request_id" not in data:
+        return None, None
+    key = data["request_id"]
+    if not isinstance(key, str) or not SEND_ID.fullmatch(key):
+        raise bad("Invalid send request identifier.")
+    entries, now = request.app["send_requests"], time.monotonic()
+    while entries and now - next(iter(entries.values()))["started"] >= SEND_TTL:
+        entries.popitem(last=False)
+    if key in entries:
+        entry = entries[key]
+        if entry["state"] == "done":
+            return entry, web.json_response({"session_id": entry["session_id"]}, status=entry["status"])
+        return entry, web.json_response({"pending": True, "error": "Still sending. Check again shortly."}, status=409)
+    while len(entries) >= SEND_LIMIT:
+        entries.popitem(last=False)
+    entry = {"state": "pending", "session_id": None, "started": now, "status": status}
+    entries[key] = entry
+    return entry, None
+
+
+def failed_send(request: web.Request, data: dict, entry, error: HermesError):
+    if entry is not None and (error.not_accepted or 400 <= error.status < 500):
+        entries = request.app["send_requests"]
+        if entries.get(data["request_id"]) is entry:
+            del entries[data["request_id"]]
 
 
 async def rename_conversation(request: web.Request):
@@ -1037,6 +1086,7 @@ def create_app() -> web.Application:
     app["deliveries"] = Deliveries(app["sessions"].db, state / "delivery-token")
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
     app["watches"], app["presence"], app["live"], app["speech"], app["speech_pending"] = {}, {}, {}, OrderedDict(), {}
+    app["send_requests"] = OrderedDict()
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
     app.on_startup.append(startup)

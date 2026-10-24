@@ -24,7 +24,7 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
     querySelectorAll: () => [], querySelector: () => get('main'), events: {}, addEventListener(name, fn) { this.events[name] = fn; } };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
-    fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, ...globals });
+    fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, crypto: require('node:crypto').webcrypto, ...globals });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
   return {context, get, run: code => vm.runInContext(code, context)};
 }
@@ -1184,8 +1184,9 @@ test('a rejected voice-draft send retains spoken reply behavior when retried', a
   f.get('message').value = 'Dictated draft';
   f.run(`state.current = 'one'; state.voiceDraft = true; api = async () => { throw new Error('offline'); }; loadMessages = async () => {};`);
   await f.run('submitMessage({preventDefault() {}})');
-  assert.equal(f.get('message').value, 'Dictated draft');
-  assert.equal(f.run('state.voiceDraft'), true);
+  assert.equal(f.get('message').value, '');
+  assert.equal(f.run('state.sentMessages[0].voice'), true);
+  assert.equal(f.run('state.sentMessages[0].failed'), true);
 });
 
 
@@ -1408,7 +1409,8 @@ test('thinking level: a new conversation sends it with the first message, an ope
   assert.equal(f.run('calls.length'), 0, 'nothing to save before the conversation exists');
   assert.ok(f.get('reasoning-chip').classList.contains('chosen'));
   f.get('message').value = 'hello'; await f.run(`submitMessage({preventDefault() {}})`);
-  assert.deepEqual(JSON.parse(f.run('calls[0][2]')), {text: 'hello', reasoning: 'none'});
+  assert.equal(JSON.parse(f.run('calls[0][2]')).text, 'hello');
+  assert.equal(JSON.parse(f.run('calls[0][2]')).reasoning, 'none');
   f.get('reasoning').value = 'low'; await f.run(`changeReasoning()`);
   assert.deepEqual(JSON.parse(f.run('JSON.stringify(calls.at(-1).slice(0, 2))')), ['/conversations/one/settings', 'PUT']);
   f.run(`newConversation()`);
@@ -1577,6 +1579,411 @@ test('live reply chunks mark jump to latest without moving the reader', async ()
   f.run('renderLive()'); assert.equal(jump.classList.contains('unread'), false);
   f.run(`state.live.text += ' next chunk'; renderLive();`);
   assert.equal(transcript.scrollTop, 100); assert.equal(jump.classList.contains('unread'), true);
+});
+
+test('failed messages stay in their conversation and Retry sends once without consuming a new draft', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.posts = []; api = async (path, options) => {
+    if (options?.method === 'POST') { posts.push(JSON.parse(options.body).text); throw new Error('rejected'); }
+    return {messages:[]}; }; loadReasoning = () => {};`);
+  f.get('message').value = 'Keep this prompt';
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.match(text(f.get('transcript')), /Keep this prompt.*Not sent.*Retry.*Delete/s);
+  assert.equal(f.run('state.working'), false);
+  await f.run(`selectConversation('two')`);
+  assert.doesNotMatch(text(f.get('transcript')), /Keep this prompt/);
+  await f.run(`selectConversation('one')`);
+  f.get('message').value = 'Next draft'; f.get('message').events.input();
+  f.run(`api = (path, options) => {
+    if (options?.method === 'POST') { posts.push(JSON.parse(options.body).text); return new Promise(resolve => {globalThis.finish = resolve;}); }
+    return Promise.resolve({messages:[]}); }; loadConversations = async () => {}; loadMessages = async () => {};`);
+  const retry = f.get('transcript').children.flatMap(n => n.children).find(n => n.textContent === 'Retry');
+  const first = retry.events.click(); const second = retry.events.click();
+  assert.equal(f.run('posts.length'), 2);
+  f.run(`finish({session_id:'one'})`); await Promise.all([first, second]);
+  assert.equal(f.get('message').value, 'Next draft');
+  assert.equal(f.run('state.sentMessages.filter(row => row.failed).length'), 0);
+});
+
+test('a timed-out send keeps its key on Retry and uses the cached acknowledgment for queued and coalesced text', async () => {
+  for (const saved of [[], [{id:2, role:'user', content:'Accepted prompt\n\nOther prompt'}]]) {
+    const f = fixture(); await tick();
+    const posts = [], entries = new Map(); let hermes = 0;
+    f.context.fetch = async (url, options = {}) => {
+      if (options.method !== 'POST') return {ok:true, json:async () => ({messages:saved})};
+      const body = JSON.parse(options.body); posts.push(body);
+      if (entries.has(body.request_id)) return {ok:true, json:async () => ({session_id:entries.get(body.request_id)})};
+      hermes++; entries.set(body.request_id, 'one');
+      const error = new Error('timed out after acceptance'); error.name = 'TimeoutError'; throw error;
+    };
+    f.run(`state.current = 'one'; loadConversations = async () => {}; loadMessages = async () => {};`);
+    f.get('message').value = 'Accepted prompt'; await f.run('submitMessage({preventDefault() {}})');
+    assert.equal(f.run('state.sentMessages[0].pending'), true);
+    assert.doesNotMatch(text(f.get('transcript')), /Not sent/);
+    await f.run('retryMessage(state.sentMessages[0])');
+    assert.equal(posts.length, 2); assert.equal(hermes, 1);
+    assert.equal(posts[0].request_id, posts[1].request_id);
+    assert.match(posts[0].request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(f.run('state.sentMessages[0].failed'), false);
+  }
+});
+
+test('an accepted send releases busy even while its refresh never settles', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; api = async () => ({session_id:'one'});
+    loadConversations = () => new Promise(() => {}); loadMessages = () => new Promise(() => {});`);
+  f.get('message').value = 'Hello';
+  f.run('submitMessage({preventDefault() {}})'); await tick();
+  assert.equal(f.run('state.busy'), false);
+  assert.equal(f.get('send').disabled, false);
+});
+
+test('composer drafts restore per conversation, survive reload and clear on accepted send and sign-out', async () => {
+  const stored = new Map(), localStorage = {getItem: key => stored.get(key) || null,
+    setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key)};
+  const f = fixture(undefined, {localStorage}); await tick();
+  f.run(`loadMessages = async () => {}; loadReasoning = () => {}; loadConversations = async () => {}; newConversation();`);
+  f.get('message').value = 'New draft'; f.get('message').events.input();
+  await f.run(`selectConversation('one')`); assert.equal(f.get('message').value, '');
+  f.get('message').value = 'One draft'; f.get('message').events.input();
+  await f.run(`selectConversation('two')`);
+  f.get('message').value = 'Two draft'; f.get('message').events.input();
+  await f.run(`selectConversation('one')`); assert.equal(f.get('message').value, 'One draft');
+  f.run('newConversation()'); assert.equal(f.get('message').value, 'New draft');
+  const reloaded = fixture(async () => ({ok:true, json:async () => ({signed_in:true})}), {localStorage});
+  reloaded.run(`signedIn = async () => {}; loadMessages = async () => {}; loadReasoning = () => {};`); await tick();
+  await reloaded.run(`selectConversation('two')`); assert.equal(reloaded.get('message').value, 'Two draft');
+  await f.run(`selectConversation('one'); api = async () => ({session_id:'one'}); submitMessage({preventDefault() {}})`);
+  await f.run(`selectConversation('two'); selectConversation('one')`); assert.equal(f.get('message').value, '');
+  f.run('signedOut()'); assert.equal(stored.size, 0);
+});
+
+test('GET and send timeouts preserve caller cancellation with and without AbortSignal.any', async () => {
+  for (const any of [AbortSignal.any.bind(AbortSignal), undefined]) {
+    const timeouts = [];
+    const signals = {any, timeout(ms) { const controller = new AbortController(); timeouts.push({ms, controller}); return controller.signal; }};
+    const f = fixture(undefined, {AbortSignal: signals, AbortController}); await tick(); timeouts.length = 0;
+    for (const [path, options, ms] of [['/jobs', {}, 15000], ['/jobs', {method:'GET'}, 15000],
+      ['/conversations', {method:'POST', body:'{}'}, 50000], ['/conversations/one/messages', {method:'POST', body:'{}'}, 50000]]) {
+      let signal;
+      f.context.fetch = async (url, options) => { signal = options.signal; return {ok:true, json:async () => ({})}; };
+      f.context.options = options; f.context.path = path;
+      await f.run('api(path, options)');
+      assert.equal(timeouts.at(-1).ms, ms); assert.ok(signal);
+    }
+    for (const cancel of ['caller', 'timeout', 'already aborted']) {
+      const caller = new AbortController(), error = new DOMException('cancelled', 'TimeoutError');
+      if (cancel === 'already aborted') caller.abort(error);
+      f.context.options = {signal: caller.signal};
+      f.context.fetch = (url, {signal}) => new Promise((resolve, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), {once:true});
+      });
+      const request = f.run(`api('/jobs', options)`);
+      if (cancel === 'caller') caller.abort(error);
+      if (cancel === 'timeout') timeouts.at(-1).controller.abort(error);
+      await assert.rejects(request, /cancelled/);
+    }
+  }
+});
+
+test('a send timeout during response parsing stays ambiguous instead of accepting an empty response', async () => {
+  const controllers = [];
+  const f = fixture(undefined, {AbortSignal: {timeout() { const controller = new AbortController(); controllers.push(controller); return controller.signal; }, any:AbortSignal.any.bind(AbortSignal)}});
+  await tick();
+  f.context.fetch = async (url, {signal}) => ({ok:true, json:() => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), {once:true});
+  })});
+  const sending = f.run(`api('/conversations/one/messages', {method:'POST', body:'{}'})`);
+  await tick(); controllers.at(-1).abort(new DOMException('timed out', 'TimeoutError'));
+  await assert.rejects(sending, /timed out/);
+});
+
+test('failed new conversations retain voice on Retry and can Delete a failed row', async () => {
+  const f = fixture(); await tick();
+  f.run(`newConversation(); state.voiceDraft = true; api = async () => {throw new Error('rejected');};`);
+  f.get('message').value = 'Dictated new prompt';
+  await f.run('submitMessage({preventDefault() {}})');
+  await f.run(`loadMessages = async () => {}; loadReasoning = () => {}; selectConversation('other');`);
+  f.run('newConversation()'); assert.match(text(f.get('transcript')), /Dictated new prompt.*Not sent/s);
+  f.run(`globalThis.posts = []; api = async (path, options) => {posts.push([path, JSON.parse(options.body)]); return {session_id:'created'};};
+    loadConversations = async () => {};`);
+  const retry = f.get('transcript').children.flatMap(n => n.children).find(n => n.textContent === 'Retry');
+  await retry.events.click();
+  assert.equal(f.run('posts.length'), 1); assert.equal(f.run('posts[0][0]'), '/conversations');
+  assert.equal(f.run('posts[0][1].text'), 'Dictated new prompt');
+  assert.equal(f.run('state.voiceReply.id'), 'created'); assert.equal(f.run('state.current'), 'created');
+  f.run(`api = async () => {throw new Error('rejected');}`); f.get('message').value = 'Discard me';
+  await f.run('submitMessage({preventDefault() {}})');
+  const remove = f.get('transcript').children.flatMap(n => n.children).find(n => n.textContent === 'Delete');
+  remove.events.click(); assert.doesNotMatch(text(f.get('transcript')), /Discard me/);
+  f.run('signedOut()'); assert.equal(f.run('state.sentMessages.length'), 0);
+});
+
+test('Retry of a new send receives its created id from the cached result', async () => {
+  const f = fixture(); await tick();
+  const posts = [], entries = new Map(); let hermes = 0;
+  f.context.fetch = async (url, options = {}) => {
+    assert.equal(url, '/api/conversations');
+    const body = JSON.parse(options.body); posts.push(body);
+    if (entries.has(body.request_id)) return {ok:true, json:async () => ({session_id:'created'})};
+    hermes++; entries.set(body.request_id, 'created'); throw new TypeError('lost response');
+  };
+  f.run(`newConversation(); loadMessages = async () => {}; loadConversations = async () => {};`);
+  f.get('message').value = 'New prompt'; await f.run('submitMessage({preventDefault() {}})');
+  await f.run('retryMessage(state.sentMessages[0])');
+  assert.equal(posts.length, 2); assert.equal(hermes, 1);
+  assert.equal(posts[0].request_id, posts[1].request_id); assert.equal(f.run('state.current'), 'created');
+});
+
+test('a 503 after acceptance and repeated pending responses never make another Hermes call', async () => {
+  const f = fixture(); await tick();
+  const posts = [], entries = new Map(); let hermes = 0;
+  f.context.fetch = async (url, options = {}) => {
+    const body = JSON.parse(options.body); posts.push(body);
+    if (entries.has(body.request_id)) return {ok:false, status:409, json:async () => ({pending:true, error:'Still sending. Check again shortly.'})};
+    hermes++; entries.set(body.request_id, 'pending');
+    return {ok:false, status:503, json:async () => ({error:'Acknowledgment lost'})};
+  };
+  f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
+  f.get('message').value = 'Late prompt'; await f.run('submitMessage({preventDefault() {}})');
+  await f.run('retryMessage(state.sentMessages[0])'); await f.run('retryMessage(state.sentMessages[0])');
+  assert.equal(posts.length, 3); assert.equal(hermes, 1);
+  assert.equal(new Set(posts.map(row => row.request_id)).size, 1);
+  assert.equal(f.run('state.sentMessages[0].pending'), true);
+  assert.match(text(f.get('transcript')), /Sending….*Check again/s);
+  assert.doesNotMatch(text(f.get('transcript')), /Not sent/);
+  assert.equal(f.run('state.busy'), false);
+});
+
+test('deliberately repeated text gets distinct keys and an earlier row cannot confirm the second send', async () => {
+  const f = fixture(); await tick();
+  const posts = [], entries = new Map(); let hermes = 0;
+  f.context.fetch = async (url, options = {}) => {
+    const body = JSON.parse(options.body); posts.push(body);
+    if (entries.has(body.request_id)) return {ok:false, status:409, json:async () => ({pending:true})};
+    hermes++; entries.set(body.request_id, 'pending');
+    return hermes === 1 ? {ok:true, json:async () => ({session_id:'one'})}
+      : {ok:false, status:503, json:async () => ({error:'Reply lost'})};
+  };
+  f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
+  f.get('message').value = 'Again'; await f.run('submitMessage({preventDefault() {}})');
+  f.run(`renderMessages([{id:1, role:'user', content:'Again', timestamp:Date.now()/1000}]);`);
+  f.get('message').value = 'Again'; await f.run('submitMessage({preventDefault() {}})');
+  await f.run('retryMessage(state.sentMessages[0])');
+  assert.equal(posts.length, 3); assert.equal(hermes, 2);
+  assert.notEqual(posts[0].request_id, posts[1].request_id);
+  assert.equal(posts[1].request_id, posts[2].request_id);
+  assert.equal(f.run('state.sentMessages[0].pending'), true);
+});
+
+test('drafts work without storage and retain only the 50 most recently edited plain texts', async () => {
+  for (const broken of [false, true]) {
+    const stored = new Map();
+    const localStorage = {getItem: key => stored.get(key) || null, setItem(key, value) {
+      if (broken) throw new Error('blocked'); stored.set(key, value);
+    }, removeItem(key) { if (broken) throw new Error('blocked'); stored.delete(key); }};
+    const f = fixture(undefined, {localStorage}); await tick();
+    if (broken) Object.defineProperty(f.context, 'localStorage', {get() {throw new Error('blocked');}});
+    f.run(`loadMessages = async () => {}; loadReasoning = () => {};`);
+    for (let index = 0; index < 52; index++) {
+      f.context.id = String(index); await f.run('selectConversation(id)');
+      f.get('message').value = `draft ${index}`; f.get('message').events.input();
+    }
+    assert.equal(f.run('state.composerDrafts.length'), 50);
+    await f.run(`selectConversation('2')`); assert.equal(f.get('message').value, 'draft 2');
+    await f.run(`selectConversation('0')`); assert.equal(f.get('message').value, '');
+    if (!broken) for (const row of JSON.parse([...stored.values()][0])) assert.deepEqual(Object.keys(row), ['id', 'text']);
+    f.run('signedOut()');
+  }
+});
+
+test('a send failing after navigation stays with its original conversation and cannot return after sign-out', async () => {
+  for (const signOut of [false, true]) {
+    const f = fixture(); await tick();
+    f.run(`state.current = 'one'; api = (path, options) => options?.method === 'POST'
+      ? new Promise((resolve, reject) => {globalThis.fail = reject;}) : Promise.resolve({messages:[]});
+      loadReasoning = () => {};`);
+    f.get('message').value = 'Original prompt'; const sending = f.run('submitMessage({preventDefault() {}})');
+    if (signOut) f.run('signedOut()'); else await f.run(`selectConversation('two')`);
+    f.get('message').value = 'Other draft'; f.get('message').events.input();
+    f.run(`fail(new Error('rejected'))`); await sending;
+    assert.equal(f.get('message').value, 'Other draft');
+    assert.doesNotMatch(text(f.get('transcript')), /Original prompt/);
+    if (signOut) assert.equal(f.run('state.sentMessages.length'), 0);
+    else {
+      await f.run(`selectConversation('one')`);
+      assert.match(text(f.get('transcript')), /Original prompt.*Not sent/s);
+    }
+  }
+});
+
+test('persisting an accepted row never consumes or replaces an unrelated failed row', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.failed = {id:'one', key:'failed', text:'Lost before', failed:true, since:1, after:0};
+    state.sentMessages = [failed, {id:'one', key:'accepted', text:'Accepted', since:2, after:0}];
+    renderMessages([{id:1, role:'user', content:'Accepted'}]);`);
+  assert.equal(f.run('state.sentMessages[0] === failed'), true);
+  assert.equal(f.run('state.sentMessages[0].after'), 0);
+  assert.match(text(f.get('transcript')), /Lost before.*Not sent/s);
+});
+
+
+test('a new conversation migrates its follow-up draft even after navigation', async () => {
+  const f = fixture(); await tick();
+  f.run(`loadReasoning = () => {}; loadMessages = async () => {}; loadConversations = async () => {};
+    api = (path, options) => options?.method === 'POST' ? new Promise(resolve => {globalThis.finish = resolve;}) : Promise.resolve({}); newConversation();`);
+  f.get('message').value = 'First'; const sending = f.run('submitMessage({preventDefault() {}})');
+  f.get('message').value = 'Follow-up'; f.get('message').events.input();
+  await f.run(`selectConversation('other')`);
+  f.get('message').value = 'Other draft'; f.get('message').events.input();
+  f.run(`finish({session_id:'created'})`); await sending;
+  assert.equal(f.get('message').value, 'Other draft');
+  await f.run(`selectConversation('created')`); assert.equal(f.get('message').value, 'Follow-up');
+  f.run('newConversation()'); assert.equal(f.get('message').value, '');
+});
+
+test('deleting the open conversation discards its draft and restores the new draft', async () => {
+  const f = fixture(); await tick();
+  f.run(`loadMessages = async () => {}; loadReasoning = () => {}; api = async () => ({}); newConversation();`);
+  f.get('message').value = 'Unsaved new'; f.get('message').events.input();
+  await f.run(`selectConversation('one')`);
+  f.get('message').value = 'Deleted draft'; f.get('message').events.input();
+  await f.run(`state.sheetItem = {id:'one'}; deleteConversation()`);
+  assert.equal(f.get('message').value, 'Unsaved new');
+  assert.equal(f.run(`composerDrafts().some(row => row.id === 'one')`), false);
+  f.run('newConversation()'); assert.equal(f.get('message').value, 'Unsaved new');
+});
+
+test('initial signed-in welcome restores the stored new draft before any typing', async () => {
+  const stored = new Map([['roost.composer-drafts', JSON.stringify([{id:'new', text:'Saved new'}])]]);
+  const f = fixture(() => new Promise(() => {}), {localStorage: {getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value)}});
+  f.run(`renderWelcome()`);
+  assert.equal(f.get('message').value, 'Saved new');
+  assert.equal(f.get('composer').classList.contains('has-text'), true);
+  f.get('message').value += ' continued'; f.get('message').events.input();
+  f.run('renderWelcome()'); assert.equal(f.get('message').value, 'Saved new continued');
+});
+
+
+test('send ids use getRandomValues when randomUUID is missing and Retry never generates another id', async () => {
+  let generated = 0;
+  const crypto = {getRandomValues(value) {generated++; return require('node:crypto').webcrypto.getRandomValues(value);}};
+  const f = fixture(undefined, {crypto}); await tick();
+  f.run(`state.current = 'one'; globalThis.posts = []; api = async (path, options) => {
+    posts.push(JSON.parse(options.body)); throw new Error('rejected');
+  };`);
+  f.get('message').value = 'Retry safely'; await f.run('submitMessage({preventDefault() {}})');
+  await f.run('retryMessage(state.sentMessages[0])');
+  assert.equal(generated, 1); assert.equal(f.run('posts.length'), 2);
+  assert.equal(f.run('posts[0].request_id'), f.run('posts[1].request_id'));
+  assert.match(f.run('posts[0].request_id'), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+function pendingClock() {
+  let now = 1800000000000, next = 0;
+  const timers = new Map();
+  class ClockDate extends Date { static now() { return now; } }
+  return {timers, globals: {Date: ClockDate,
+    setTimeout(fn, ms = 0) { const id = ++next; timers.set(id, {fn, ms, at:now + ms}); return id; },
+    clearTimeout(id) { timers.delete(id); }},
+    async advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        const due = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        now = due[1].at; timers.delete(due[0]); await due[1].fn(); await tick();
+      }
+      now = target;
+    }, checks: () => [...timers.values()].filter(timer => timer.ms === 5000).length};
+}
+
+test('saved user rows retire pending echoes and their timers, including coalesced sends', async () => {
+  const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
+  f.run(`state.current = 'one'; api = async () => {const error = new Error('Still sending'); error.pending = true; throw error;};`);
+  for (const value of ['First', 'Second']) {
+    f.get('message').value = value; await f.run('submitMessage({preventDefault() {}})');
+  }
+  assert.equal(clock.checks(), 2);
+  f.run(`state.sentMessages.push({id:'one', key:'failed', text:'Not accepted', since:Date.now(), after:0, failed:true});
+    renderMessages([{id:1, role:'user', content:'First\\n\\nSecond', timestamp:Date.now()/1000}]);`);
+  assert.equal(f.run('state.sentMessages.length'), 1);
+  assert.equal(f.run('state.sentMessages[0].key'), 'failed');
+  assert.equal(clock.checks(), 0);
+  const own = f.get('transcript').children.filter(n => n.className === 'message from-you');
+  assert.equal(own.length, 2);
+  assert.doesNotMatch(text(f.get('transcript')), /Sending…|Check again/);
+  await clock.advance(15000); assert.equal(clock.checks(), 0);
+});
+
+test('pending auto-checks reuse one key and resolve with exactly one Hermes-bound submission', async () => {
+  const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
+  const posts = [], entries = new Map(); let hermes = 0, done = false;
+  f.context.fetch = async (url, options) => {
+    const body = JSON.parse(options.body); posts.push(body);
+    if (entries.has(body.request_id)) return done ? {ok:true, json:async () => ({session_id:'one'})}
+      : {ok:false, status:409, json:async () => ({pending:true, error:'Still sending'})};
+    hermes++; entries.set(body.request_id, 'pending');
+    return {ok:false, status:503, json:async () => ({error:'Lost acknowledgment'})};
+  };
+  f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
+  f.get('message').value = 'Check automatically'; await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(clock.checks(), 1);
+  await clock.advance(5000); assert.equal(posts.length, 2); assert.equal(clock.checks(), 1);
+  done = true; await clock.advance(5000);
+  assert.equal(posts.length, 3); assert.equal(hermes, 1);
+  assert.equal(new Set(posts.map(row => row.request_id)).size, 1);
+  assert.equal(f.run('state.sentMessages[0].pending'), false); assert.equal(clock.checks(), 0);
+  await clock.advance(15000); assert.equal(posts.length, 3);
+});
+
+test('pending auto-checks stop two minutes after the first send, even after manual checks', async () => {
+  const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
+  const posts = [], entries = new Map(); let hermes = 0;
+  f.context.fetch = async (url, options) => {
+    const body = JSON.parse(options.body); posts.push(body);
+    if (!entries.has(body.request_id)) {hermes++; entries.set(body.request_id, 'pending');}
+    return {ok:false, status:409, json:async () => ({pending:true, error:'Still sending'})};
+  };
+  f.run(`state.current = 'one'`); f.get('message').value = 'Keep checking';
+  await f.run('submitMessage({preventDefault() {}})'); const since = f.run('state.sentMessages[0].since');
+  await clock.advance(60000); await f.run('retryMessage(state.sentMessages[0])');
+  await clock.advance(65000);
+  assert.equal(f.run('state.sentMessages[0].since'), since);
+  assert.equal(hermes, 1); assert.equal(clock.checks(), 0);
+  assert.ok(posts.length > 10);
+  const count = posts.length; await clock.advance(60000); assert.equal(posts.length, count);
+  assert.match(text(f.get('transcript')), /Check again/);
+});
+
+test('sign-out cancels pending timers and a delayed callback cannot post into a new sign-in', async () => {
+  const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
+  f.run(`state.current = 'one'; globalThis.posts = 0; api = async () => {posts++; const error = new Error('pending'); error.pending = true; throw error;};`);
+  f.get('message').value = 'Pending'; await f.run('submitMessage({preventDefault() {}})');
+  const callback = [...clock.timers.values()].find(timer => timer.ms === 5000)?.fn;
+  assert.ok(callback); f.run('signedOut()'); assert.equal(clock.checks(), 0);
+  await callback(); await clock.advance(15000); assert.equal(f.run('posts'), 1);
+});
+
+test('saving one pending row preserves the other item and its active timer', async () => {
+  const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
+  f.run(`state.current = 'one'; globalThis.posts = []; api = async (path, options) => {
+    const body = JSON.parse(options.body); posts.push(body); const error = new Error('Still sending'); error.pending = true; throw error;
+  };`);
+  for (const value of ['First', 'Second']) {
+    f.get('message').value = value; await f.run('submitMessage({preventDefault() {}})');
+  }
+  const second = f.run('state.sentMessages[1]');
+  f.run(`renderMessages([{id:1, role:'user', content:'First'}]);`);
+  assert.equal(f.run('state.sentMessages[0]'), second); assert.equal(clock.checks(), 1);
+  const own = f.get('transcript').children.filter(n => n.className === 'message from-you');
+  assert.equal(own.length, 2);
+  await clock.advance(5000); assert.equal(f.run('posts.length'), 3);
+  assert.equal(f.run('posts.at(-1).text'), 'Second');
+  assert.equal(f.run('posts[1].request_id'), f.run('posts[2].request_id'));
+  const remove = f.get('transcript').children.flatMap(n => n.children).find(n => n.textContent === 'Delete');
+  remove.events.click(); assert.equal(clock.checks(), 0);
+  await clock.advance(15000); assert.equal(f.run('posts.length'), 3);
 });
 
 test('loading earlier messages prepends rows without moving the reader, and polls retain them', async () => {
