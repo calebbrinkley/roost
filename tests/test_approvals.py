@@ -185,3 +185,23 @@ class ApprovalHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["approval"], {"conversation": "stored-one", "request_id": "request-one", "choices": ["once", "deny"]})
         self.assertIn("&a=request-one", message["url"])
         del self.app["live"]["stored-one"]
+
+    async def test_approval_first_seen_while_viewing_is_pushed_once_the_owner_leaves(self):
+        item = approvals.view(PAYLOAD, "srv-one")
+        turn = live.Turn("test")
+        turn.approvals[item["request_id"]] = item
+        self.app["live"]["stored-one"] = turn
+        server.watch_reply(self.app, "stored-one", time.time())
+        with patch.object(server, "notify", new_callable=AsyncMock) as notify, patch.object(server, "agent_name", new_callable=AsyncMock, return_value="Kestrel"):
+            # The owner is looking at this conversation when the request first appears: no push, and no mark.
+            self.app["presence"]["device"] = (time.monotonic(), "stored-one")
+            await server.check_replies(self.app)
+            self.assertEqual(notify.await_count, 0)
+            # The owner leaves while the request is still pending: exactly one push.
+            del self.app["presence"]["device"]
+            await server.check_replies(self.app)
+            self.assertEqual(notify.await_count, 1)
+            # A later pass does not push again.
+            await server.check_replies(self.app)
+            self.assertEqual(notify.await_count, 1)
+        del self.app["live"]["stored-one"]

@@ -459,8 +459,8 @@ async def check_replies(app: web.Application) -> None:
             sent = watch.setdefault("approvals_notified", set())
             for item in list(turn.approvals.values()):
                 if item["request_id"] not in sent:
-                    sent.add(item["request_id"])
                     if not looking_at(app, sid):
+                        sent.add(item["request_id"])
                         await notify(app, {
                             "title": await agent_name(app, ask_hermes=True) + " needs approval",
                             "body": preview("\n".join(filter(None, [item["description"], item["command"]])) or "Review this action in Roost.", 300),
