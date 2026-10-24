@@ -129,6 +129,13 @@ def mock_hermes():
             raise web.HTTPNotFound()
         # Hermes numbers its rows; the play button reads a reply by its number.
         rows = [{"id": index + 1, **row} for index, row in enumerate(messages[sid])]
+        offset = int(request.query.get("offset", "0"))
+        limit = min(int(request.query.get("limit", "500")), 500)
+        latest = request.query.get("order", "latest" if "limit" not in request.query else "oldest") == "latest"
+        rows = list(reversed(rows)) if latest else rows
+        rows = rows[offset:offset + limit]
+        if latest:
+            rows.reverse()
         return web.json_response({"session_id": sid, "messages": rows, "pagination": {"returned": len(rows)}})
 
     async def rename_session(request):

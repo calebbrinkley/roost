@@ -452,16 +452,17 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
-    def watching(self, rows, since):
+    def watching(self, rows, since, results=(1, 1, 1), devices=1):
         sent = []
 
         async def send(http, message, only=None):
             sent.append(message)
-            return 1
+            return results[min(len(sent) - 1, len(results) - 1)]
         hermes = fake_hermes()
         hermes.messages.return_value = {"messages": rows}
         app = {"hermes": hermes,
-               "push": SimpleNamespace(send=send), "push_http": None, "watches": {}, "presence": {},
+               "push": SimpleNamespace(send=send, list=lambda: [{"name": "phone"}] * devices), "push_http": None,
+               "watches": {}, "presence": {},
                "settings_file": Path("/nonexistent/settings.json"), "hermes_agent_name": ("Kestrel", time.monotonic())}
         server.watch_reply(app, "chat:one", since)
         return app, sent
@@ -506,6 +507,39 @@ class ReplyNotificationTests(unittest.IsolatedAsyncioTestCase):
         app["presence"]["phone"] = (time.monotonic() - server.PRESENCE_SECONDS - 1, "chat:one")
         await server.check_replies(app)
         self.assertEqual(len(sent), 1)
+
+    async def test_a_failed_reply_push_is_retried_until_a_device_accepts_it(self):
+        now = time.time()
+        rows = [{"role": "assistant", "content": "Done.", "timestamp": now + 1}]
+        app, sent = self.watching(rows, now, results=(0, 1))
+        await server.check_replies(app)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("chat:one", app["watches"])
+        await server.check_replies(app)
+        self.assertEqual(len(sent), 1, "waits before retrying")
+        app["watches"]["chat:one"]["push_retry_at"] = 0
+        await server.check_replies(app)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(app["watches"], {})
+
+    async def test_a_failed_reply_push_is_retried_a_bounded_number_of_times(self):
+        now = time.time()
+        rows = [{"role": "assistant", "content": "Done.", "timestamp": now + 1}]
+        app, sent = self.watching(rows, now, results=(0,))
+        for _ in range(5):
+            await server.check_replies(app)
+            if "chat:one" in app["watches"]:
+                app["watches"]["chat:one"]["push_retry_at"] = 0
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(app["watches"], {})
+
+    async def test_a_reply_push_is_not_retried_when_no_device_is_subscribed(self):
+        now = time.time()
+        rows = [{"role": "assistant", "content": "Done.", "timestamp": now + 1}]
+        app, sent = self.watching(rows, now, results=(0,), devices=0)
+        await server.check_replies(app)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(app["watches"], {})
 
 
 class HTTPTests(unittest.IsolatedAsyncioTestCase):
@@ -648,6 +682,31 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"done": true', body)
         response = await self.client.get("/api/conversations/chat:one", cookies=cookies)
         self.assertIs((await response.json())["live"], False)
+
+    async def test_transcript_history_flag_and_before_page(self):
+        await self.signed_in()
+        hermes = self.app["hermes"]
+        url = "/api/conversations/chat:one"
+        for count, more in ((0, False), (499, False), (500, True)):
+            hermes.messages.return_value = {"messages": [{"id": i + 10} for i in range(count)]}
+            data = await (await self.client.get(url)).json()
+            self.assertEqual((len(data["messages"]), data["has_older"]), (count, more))
+        hermes.history.assert_not_awaited()
+        hermes.older_messages.return_value = {"messages": [{"id": 7}, {"id": 8}], "has_older": True}
+        data = await (await self.client.get(url + "?before=10&limit=2")).json()
+        self.assertEqual(data, {"messages": [{"id": 7}, {"id": 8}], "has_older": True})
+        hermes.older_messages.assert_awaited_once_with("chat:one", before=10, limit=2)
+        self.assertEqual(hermes.messages.await_count, 3, "older pages never run the polling path")
+
+    async def test_transcript_history_rejects_invalid_params(self):
+        await self.signed_in()
+        for query in ("before=0", "before=-1", "before=x", "before=١", "before=" + "9" * 100,
+                      "before=1&limit=0", "before=1&limit=501", "before=1&limit=x", "limit=2",
+                      "before=1&before=2", "before=1&limit=2&limit=3"):
+            response = await self.client.get("/api/conversations/chat:one?" + query)
+            self.assertEqual(response.status, 400, query)
+        self.app["hermes"].messages.assert_not_awaited()
+        self.app["hermes"].history.assert_not_awaited()
 
     async def test_conversation_settings_export_and_deletion(self):
         response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})

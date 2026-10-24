@@ -9,7 +9,7 @@ const SLICES = {
                           search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false }),
   conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
                          composerDrafts: null, composerKey: undefined,
-                         lastRows: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
+                         lastRows: null, messageHistory: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
   approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
                       approvalFocusConversation: null, approvalLoading: null }),
@@ -745,6 +745,7 @@ function finishLoadingConversations(data, rows, more) {
 }
 
 function renderWelcome() {
+  state.messageHistory = null; state.lastRows = null;
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -996,15 +997,24 @@ function renderMessages(rows) {
     return;
   }
   state.selectionDeferred = false;
+  const prepend = state.messageHistory?.prepend === true;
+  if (prepend) state.messageHistory.prepend = false;
   // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
   const fresh = state.renderedConversation !== state.current;
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-  const keepScroll = transcript.scrollTop;
+  const keepScroll = transcript.scrollTop, keepHeight = transcript.scrollHeight;
   state.renderedConversation = state.current;
   show("chat-settings", Boolean(state.current));
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   state.liveNodes = null;
+  if (state.messageHistory?.id === state.current && state.messageHistory.hasOlder) {
+    const button = el("button", "secondary load-earlier", "Load earlier messages");
+    button.id = "load-earlier"; button.type = "button";
+    button.disabled = state.messageHistory.loading;
+    button.addEventListener("click", loadEarlierMessages);
+    transcript.append(button);
+  }
   const view = conversationView({ rows: records(rows), sent: state.sentMessages, current: state.current,
     live: state.live?.id === state.current ? state.live : null, server: state.turn?.id === state.current ? state.turn : {} });
   state.sentMessages = view.sent;
@@ -1015,7 +1025,7 @@ function renderMessages(rows) {
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   const content = JSON.stringify([visible.filter((row) => row.role === "assistant").map((row) => [row.id, messageText(row)]), live?.text || ""]);
-  const changed = !fresh && content !== state.latestContent;
+  const changed = !fresh && !prepend && content !== state.latestContent;
   state.latestContent = content;
   if (fresh) $("jump-latest").classList.remove("unread");
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
@@ -1084,7 +1094,7 @@ function renderMessages(rows) {
     typing.append(dots, workingLabel()); transcript.append(typing);
   }
   renderConversations();
-  transcript.scrollTop = fresh || atBottom ? transcript.scrollHeight : keepScroll;
+  transcript.scrollTop = prepend ? keepScroll + transcript.scrollHeight - keepHeight : fresh || atBottom ? transcript.scrollHeight : keepScroll;
   updateLatest(changed);
 }
 
@@ -1102,6 +1112,7 @@ async function selectConversation(id, source) {
   state.viewEpoch++;
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
+  state.messageHistory = null; state.lastRows = null;
   state.current = id;
   restoreComposer();
   state.draft = false;
@@ -1135,8 +1146,41 @@ async function loadMessages(id = state.current) {
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, at };
     if (data.live === true) openStream(id);
-    renderMessages(data.messages);
+    let history = state.messageHistory;
+    if (history?.id !== id) history = state.messageHistory = { id, rows: [], loaded: false, loading: false };
+    history.rows = history.loaded ? mergeMessages(history.rows, data.messages) : data.messages;
+    if (!history.loaded) history.hasOlder = data.has_older === true;
+    renderMessages(history.rows);
     loadApprovals(id);
+  }
+}
+
+function mergeMessages(older, newer) {
+  const rows = new Map();
+  for (const row of records([...older, ...newer])) rows.set(String(row.id), row);
+  return [...rows.values()].sort((a, b) => a.id - b.id);
+}
+
+async function loadEarlierMessages() {
+  const history = state.messageHistory, id = state.current, scope = viewScope(id);
+  if (history?.id !== id || !history.hasOlder || history.loading || selectingTranscript()) return;
+  const before = history.rows[0]?.id;
+  if (!Number.isSafeInteger(before)) return;
+  history.loading = true;
+  $("load-earlier").disabled = true;
+  try {
+    const data = await api(`/conversations/${encodeURIComponent(id)}?before=${before}&limit=500`);
+    if (!scope.alive() || state.messageHistory !== history) return;
+    history.rows = mergeMessages(data.messages, history.rows);
+    history.hasOlder = data.has_older === true;
+    history.loaded = true;
+    history.loading = false;
+    history.prepend = true;
+    renderMessages(history.rows);
+  } catch (error) { report(error, scope); }
+  finally {
+    history.loading = false;
+    if (scope.alive() && state.messageHistory === history) $("load-earlier").disabled = false;
   }
 }
 
@@ -2579,7 +2623,10 @@ $("jump-latest").append(icon("down"));
 $("jump-latest").addEventListener("click", () => {
   $("transcript").scrollTop = $("transcript").scrollHeight; updateLatest();
 });
-$("transcript").addEventListener("scroll", () => updateLatest(), { passive: true });
+$("transcript").addEventListener("scroll", () => {
+  updateLatest();
+  if ($("transcript").scrollTop <= 0) loadEarlierMessages();
+}, { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});

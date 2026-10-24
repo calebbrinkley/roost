@@ -154,6 +154,7 @@ button:disabled { cursor: default; }
 .chat-actions .icon-button { width: 40px; height: 40px; border-radius: 12px; color: var(--muted); }
 .chat-actions .icon-button svg { width: 20px; height: 20px; }
 .transcript { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 24px max(24px, calc((100% - 832px) / 2)); }
+.load-earlier { align-self: center; min-height: 44px; flex-shrink: 0; }
 .day { align-self: center; margin: 8px 0 12px; padding: 3px 10px; border-radius: 999px; color: var(--muted); background: var(--chip); font-size: calc(12px * var(--text-scale)); font-weight: 500; }
 .message { max-width: 78%; min-width: 0; }
 .message.from-you { align-self: flex-end; }
