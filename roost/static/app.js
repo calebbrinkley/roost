@@ -8,7 +8,7 @@ const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false }),
   conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
-                         lastRows: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false }),
+                         lastRows: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
   approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
                       approvalFocusConversation: null, approvalLoading: null }),
@@ -31,6 +31,7 @@ const KEPT = () => ({
 });
 const freshSlices = () => Object.assign({}, ...Object.values(SLICES).map((slice) => slice()));
 const state = { ...KEPT(), ...freshSlices() };
+const navigation = { pending: "", signingIn: false };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -79,6 +80,8 @@ function refreshWorkingLabels() {
 const ICONS = {
   compose: [["path", { d: "M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" }], ["path", { d: "M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 8.5-8.5z" }]],
   plus: [["path", { d: "M12 5v14M5 12h14" }]],
+  copy: [["rect", { x: 8, y: 8, width: 12, height: 12, rx: 2 }], ["path", { d: "M16 8V4H4v12h4" }]],
+  down: [["path", { d: "M12 4v16m-6-6 6 6 6-6" }]],
   speaker: [["path", { d: "M11 5 6 9H3v6h3l5 4V5z" }], ["path", { d: "M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" }]],
   stop: [["rect", { x: 7, y: 7, width: 10, height: 10, rx: 1.5 }]],
   gear: [["path", { d: "M10.08 4.85L10.09 2.18L13.91 2.18L13.92 4.85L15.70 5.59L17.59 3.71L20.29 6.41L18.41 8.30L19.15 10.08L21.82 10.09L21.82 13.91L19.15 13.92L18.41 15.70L20.29 17.59L17.59 20.29L15.70 18.41L13.92 19.15L13.91 21.82L10.09 21.82L10.08 19.15L8.30 18.41L6.41 20.29L3.71 17.59L5.59 15.70L4.85 13.92L2.18 13.91L2.18 10.09L4.85 10.08L5.59 8.30L3.71 6.41L6.41 3.71L8.30 5.59Z" }],
@@ -194,11 +197,18 @@ async function api(path, options = {}) {
   return data;
 }
 
-function signedOut() {
+function signedOut(clearLink = true) {
   state.authEpoch++; state.viewEpoch++;
+  if (clearLink) {
+    navigation.pending = "";
+    if (globalThis.location?.search) history.replaceState(null, "", "/");
+  }
+  navigation.signingIn = false;
+  $("presence").classList.remove("reconnecting");
   closeStream();
   stopRecording(true); state.voiceDraft = false; state.player?.pause();
   Object.assign(state, freshSlices());
+  updateLatest();
   renderApprovals();
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
@@ -263,15 +273,51 @@ async function passkeySignIn() {
 }
 
 async function signedIn() {
+  const scope = signInScope();
+  navigation.signingIn = true;
   show("login", false); show("app", true);
   $("password").value = "";
   $("login-error").textContent = "";
   setSection("messages");
   refreshIdentity();
-  try { await loadConversations(); } catch (error) { notice(error.message); }
+  try { await loadConversations(); if (scope.alive()) setConnection(true); } catch (error) { if (scope.alive()) { setConnection(false); notice(error.message); } }
+  if (!scope.alive()) return;
+  navigation.signingIn = false;
   // A tapped notification opens Roost at /?c=<conversation>, /?j=<job> or /?d=<delivered message>.
-  const search = globalThis.location?.search || "";
-  if (search) { history.replaceState(null, "", "/"); openLink(search); }
+  const search = navigation.pending || globalThis.location?.search || "";
+  navigation.pending = "";
+  if (search) { if (globalThis.location?.search) history.replaceState(null, "", "/"); openLink(search); }
+}
+
+function notificationLink(link) {
+  if ($("app").classList.contains("hidden") || navigation.signingIn) navigation.pending = link;
+  else openLink(link);
+}
+
+function setConnection(online) {
+  $("presence").textContent = online ? "Online" : "Reconnecting…";
+  $("presence").classList.toggle("reconnecting", !online);
+  placePresence();
+}
+
+function placePresence() {
+  const app = $("app"), section = state.section;
+  const list = phoneWidth.matches && !app.classList.contains({ messages: "chat-open", jobs: "job-open", settings: "settings-open" }[section]);
+  const slot = $("presence").classList.contains("reconnecting") ?
+    (list ? "mobile-list-actions" : { messages: "chat-actions", jobs: "jobs-header", settings: "settings-header" }[section]) : "chat-actions";
+  $(slot).append($("presence"));
+}
+
+async function refreshConnection(load) {
+  const scope = signInScope();
+  try { await load(); if (scope.alive()) setConnection(true); }
+  catch { if (scope.alive() && !$("app").classList.contains("hidden")) setConnection(false); }
+}
+
+function refreshOnResume() {
+  if ($("app").classList.contains("hidden") || navigation.signingIn) return;
+  return refreshConnection(() => Promise.all([loadConversations(),
+    state.section === "jobs" ? loadJobs() : state.current ? loadMessages() : Promise.resolve()]));
 }
 
 function openLink(search) {
@@ -332,6 +378,7 @@ function setSection(section) {
   $("app").classList.toggle("section-jobs", section === "jobs");
   $("app").classList.toggle("section-settings", section === "settings");
   $("app").classList.remove("chat-open", "job-open", "settings-open");
+  placePresence();
   reportPresence();
   show("messages-view", section === "messages"); show("jobs-view", section === "jobs"); show("settings-view", section === "settings");
   for (const name of ["messages", "jobs", "settings"]) {
@@ -636,7 +683,6 @@ async function loadConversations(more = false) {
       }
     } while (!more && rows.length && offset < target && offset <= 100000 &&
              (!Number.isInteger(data.total) || offset < data.total));
-    $("presence").textContent = "Online";
     state.conversations = loaded;
     state.conversationOffset = offset;
     state.conversationsMore = rows.length > 0 && offset <= 100000 &&
@@ -670,6 +716,7 @@ function finishLoadingConversations(data, rows, more) {
 
 function renderWelcome() {
   show("chat-settings", false);
+  show("jump-latest", false); $("jump-latest").classList.remove("unread");
   const transcript = $("transcript"); transcript.replaceChildren();
   if (!state.draftSeed) newDraftSeed();
   setChatAvatar(state.draftSeed);
@@ -777,10 +824,30 @@ function addMarkdown(parent, value) {
   let last = 0;
   for (const match of value.matchAll(fence)) {
     addPlainMarkdown(parent, value.slice(last, match.index));
-    const pre = el("pre"); pre.append(el("code", "", match[1].replace(/\n$/, ""))); parent.append(pre);
+    const code = match[1].replace(/\n$/, "");
+    const block = el("div", "code-block"), pre = el("pre"); pre.append(el("code", "", code));
+    block.append(copyButton(code, "Copy code"), pre); parent.append(block);
     last = match.index + match[0].length;
   }
   addPlainMarkdown(parent, value.slice(last));
+}
+
+function copyButton(text, label) {
+  const button = el("button", "play-reply copy-button");
+  button.type = "button"; button.title = label; button.setAttribute("aria-label", label);
+  button.setAttribute("aria-live", "polite");
+  button.append(icon("copy"));
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try { await navigator.clipboard.writeText(text); button.textContent = "Copied"; }
+    catch { button.textContent = "Copy failed"; }
+    button.setAttribute("aria-label", button.textContent);
+    setTimeout(() => {
+      button.replaceChildren(icon("copy")); button.setAttribute("aria-label", label); button.disabled = false;
+    }, 2000);
+  });
+  return button;
 }
 
 // The same field precedence as Hermes's own desktop app.
@@ -909,6 +976,10 @@ function renderMessages(rows) {
   state.working = view.working;
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
+  const content = JSON.stringify([visible.filter((row) => row.role === "assistant").map((row) => [row.id, messageText(row)]), live?.text || ""]);
+  const changed = !fresh && content !== state.latestContent;
+  state.latestContent = content;
+  if (fresh) $("jump-latest").classList.remove("unread");
   if (!visible.length) transcript.append(el("p", "empty-transcript", "No messages here yet."));
   // Thoughts from every step since the last message shown, including steps that only called tools,
   // go in one block above the next message; a turn still going shows its thoughts so far at the end.
@@ -933,6 +1004,7 @@ function renderMessages(rows) {
     } else {
       const under = el("div", "under reply-under");
       if (row.id != null) under.append(playButton(row.id));
+      under.append(copyButton(messageText(row), "Copy reply"));
       if (shown) {
         const details = el("span", "reply-usage", `${time} · ${replyUsage(row)}`);
         details.title = "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
@@ -960,6 +1032,16 @@ function renderMessages(rows) {
   }
   renderConversations();
   transcript.scrollTop = fresh || atBottom ? transcript.scrollHeight : keepScroll;
+  updateLatest(changed);
+}
+
+function updateLatest(changed = false) {
+  const transcript = $("transcript"), button = $("jump-latest");
+  const away = Boolean(state.current) && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight >= 80;
+  show("jump-latest", away);
+  if (!away) button.classList.remove("unread");
+  else if (changed) button.classList.add("unread");
+  button.setAttribute("aria-label", button.classList.contains("unread") ? "Jump to latest, new reply" : "Jump to latest");
 }
 
 async function selectConversation(id, source) {
@@ -969,6 +1051,7 @@ async function selectConversation(id, source) {
   state.current = id;
   state.draft = false;
   $("app").classList.add("chat-open");
+  placePresence();
   reportPresence();
   const item = state.conversations.find((row) => row.id === id);
   $("chat-title").textContent = item ? sessionName(item) : "Conversation";
@@ -977,6 +1060,7 @@ async function selectConversation(id, source) {
   show("origin-badge", Boolean(source && source !== "roost"));
   renderConversations();
   $("transcript").replaceChildren(el("p", "empty-transcript", "Loading conversation…"));
+  show("jump-latest", false);
   showReasoning("default"); loadReasoning(id);
   try { await loadMessages(id); } catch (error) { notice(error.message); }
 }
@@ -1157,8 +1241,10 @@ function renderLive() {
   if (!state.liveNodes) return renderMessages(state.lastRows);
   const transcript = $("transcript");
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  const changed = state.liveNodes.shownText !== live.text;
   fillLive(live);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+  updateLatest(changed);
 }
 
 // How hard the model thinks in the open conversation; a new one starts at Hermes's own setting.
@@ -1200,6 +1286,7 @@ function newConversation() {
   newDraftSeed();
   showReasoning("default");
   $("app").classList.add("chat-open");
+  placePresence();
   renderConversations(); renderWelcome();
   if (!touchScreen.matches) $("message").focus();
 }
@@ -1347,6 +1434,7 @@ function currentJob() {
 function selectJob(id) {
   state.selectedJob = id;
   $("app").classList.add("job-open");
+  placePresence();
   renderJobs();
   $("job-detail").scrollTop = 0;
   if (!Object.hasOwn(state.jobRuns, id)) loadJobRuns(id).catch((error) => notice(error.message));
@@ -1578,6 +1666,7 @@ async function loadSettings() {
 function selectSettingsGroup(id) {
   state.settingsGroup = id;
   $("app").classList.add("settings-open");
+  placePresence();
   renderSettings();
   $("settings-detail").scrollTop = 0;
   if (id === "agent") loadSoul();
@@ -2211,11 +2300,11 @@ $("mobile-nav-jobs").addEventListener("click", () => setSection("jobs"));
 $("chat-settings").append(icon("more"));
 $("nav-settings").addEventListener("click", () => setSection("settings"));
 $("mobile-nav-settings").addEventListener("click", () => setSection("settings"));
-$("back-to-settings").addEventListener("click", () => $("app").classList.remove("settings-open"));
+$("back-to-settings").addEventListener("click", () => { $("app").classList.remove("settings-open"); placePresence(); });
 $("top-action").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
 $("sidebar-new").addEventListener("click", () => state.section === "jobs" ? openJob() : newConversation());
-$("back-to-list").addEventListener("click", () => { stopRecording(true); $("app").classList.remove("chat-open"); reportPresence(); });
-$("back-to-jobs").addEventListener("click", () => $("app").classList.remove("job-open"));
+$("back-to-list").addEventListener("click", () => { stopRecording(true); $("app").classList.remove("chat-open"); placePresence(); reportPresence(); });
+$("back-to-jobs").addEventListener("click", () => { $("app").classList.remove("job-open"); placePresence(); });
 
 // Swipe right on a phone to leave a conversation or job, like iOS's back gesture (which installed
 // web apps don't get). The list shows underneath while the view follows the finger.
@@ -2340,6 +2429,11 @@ function pullToRefresh(list) {
 pullToRefresh($("conversation-list"));
 pullToRefresh($("sidebar-jobs-list"));
 $("composer").addEventListener("submit", submitMessage);
+$("jump-latest").append(icon("down"));
+$("jump-latest").addEventListener("click", () => {
+  $("transcript").scrollTop = $("transcript").scrollHeight; updateLatest();
+});
+$("transcript").addEventListener("scroll", () => updateLatest(), { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
@@ -2382,12 +2476,12 @@ setInterval(() => {
 }, 5000);
 setInterval(() => {
   if ($("app").classList.contains("hidden") || state.section !== "messages" || state.busy) return;
-  if (state.current) loadMessages().catch(() => {});
+  if (state.current) refreshConnection(() => loadMessages());
 }, 3000);
 setInterval(() => {
   if ($("app").classList.contains("hidden")) return;
-  if (state.section === "messages") loadConversations().catch(() => {});
-  else if (state.section === "jobs") loadJobs().catch(() => {});
+  if (state.section === "messages") refreshConnection(() => loadConversations());
+  else if (state.section === "jobs") refreshConnection(() => loadJobs());
 }, 20000);
 
 // Dictation stays in the composer for review. Sending that draft opts into a spoken reply.
@@ -2581,20 +2675,19 @@ async function start() {
   boot.done = true; show("connecting", false);
   applyAgentName(data.agent);
   state.passkeysAvailable = Boolean(data.passkeys);
-  return data.signed_in ? signedIn() : signedOut();
+  return data.signed_in ? signedIn() : signedOut(false);
 }
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopRecording(true);
   reportPresence();
-  if (document.visibilityState === "visible") { boot.delay = 2000; start(); }
+  if (document.visibilityState === "visible") { boot.delay = 2000; if (boot.done) refreshOnResume(); else start(); }
 });
 setInterval(reportPresence, 15000);
 // A notification tapped while Roost is already open.
 navigator.serviceWorker?.addEventListener("message", (event) => {
-  if ($("app").classList.contains("hidden")) return;
-  if (typeof event.data?.link === "string") openLink(event.data.link);
-  else if (typeof event.data?.open === "string") openLink("?c=" + encodeURIComponent(event.data.open));
+  if (typeof event.data?.link === "string") notificationLink(event.data.link);
+  else if (typeof event.data?.open === "string") notificationLink("?c=" + encodeURIComponent(event.data.open));
 });
 $("delivery-close").addEventListener("click", () => $("delivery-sheet").close());
-window.addEventListener("online", () => { boot.delay = 2000; start(); });
+window.addEventListener("online", () => { boot.delay = 2000; if (boot.done) refreshOnResume(); else start(); });
 start();

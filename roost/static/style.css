@@ -149,6 +149,8 @@ button:disabled { cursor: default; }
 .chat-actions { margin-left: auto; }
 .presence { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: calc(13px * var(--text-scale)); }
 .presence:not(:empty)::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.presence.reconnecting::before { background: var(--warn); }
+.jobs-header > .presence { margin-left: auto; }
 .chat-actions .icon-button { width: 40px; height: 40px; border-radius: 12px; color: var(--muted); }
 .chat-actions .icon-button svg { width: 20px; height: 20px; }
 .transcript { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 24px max(24px, calc((100% - 832px) / 2)); }
@@ -166,6 +168,9 @@ button:disabled { cursor: default; }
 .message-body code { font-family: var(--mono); font-size: .87em; padding: 1px 5px; border-radius: 5px; background: color-mix(in srgb, currentColor 10%, transparent); }
 .message-body pre code { padding: 0; background: none; }
 .message-body pre { margin: 8px 0; max-width: 100%; overflow-x: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--frame); color: var(--ink); font: calc(12px * var(--text-scale))/1.45 var(--mono); white-space: pre; }
+.code-block { min-width: 0; max-width: 100%; margin: 8px 0; }
+.code-block > .copy-button { margin-left: auto; }
+.code-block pre { margin-top: 0; }
 .message-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: calc(13px * var(--text-scale)); }
 .message-body th, .message-body td { padding: 5px 8px; border: 1px solid var(--line); white-space: nowrap; }
 .under { margin: -2px 6px 5px; color: var(--muted); font-size: calc(12px * var(--text-scale)); line-height: var(--under-line); font-variant-numeric: tabular-nums; }
@@ -216,6 +221,11 @@ button:disabled { cursor: default; }
 .play-reply { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
 .play-reply:hover, .play-reply.playing { color: var(--accent-text); background: var(--chip); }
 .play-reply svg { width: 15px; height: 15px; }
+.copy-button { width: max-content; min-width: 26px; padding: 0 5px; font-size: calc(12px * var(--text-scale)); white-space: nowrap; }
+.latest-anchor { position: relative; flex: 0 0 0; }
+.jump-latest { position: absolute; bottom: 12px; right: 24px; z-index: 2; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--accent-text); background: var(--frame); box-shadow: 0 2px 8px #0002; }
+.jump-latest svg { width: 20px; height: 20px; }
+.jump-latest.unread::after { content: ""; position: absolute; top: 2px; right: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .mic-button svg { width: 20px; height: 20px; }
 .send-button { display: none; font-size: calc(23px * var(--text-scale)); }
 /* A one-line message box is 40 px (20 px line + 18 px padding + 2 px border), level with the 40 px chip and buttons. */
@@ -342,6 +352,10 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 
 @media (max-width: 700px) {
   .desktop-only { display: none !important; }.mobile-only { display: flex; }
+  .presence.reconnecting { display: flex !important; font-size: calc(12px * var(--text-scale)); }
+  /* A 44 px touch target without making the reply's info row taller. */
+  .play-reply { position: relative; }
+  .play-reply::after { content: ""; position: absolute; inset: -11px -9px; }
   /* Sticky, not relative: since iOS 26 a Home Screen web app blurs its top edge (status bar and ~40pt below)
      unless a full-width fixed or sticky box with a plain background covers it. Nothing scrolls the shell, so it stays put. */
   .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: sticky; top: 0;
