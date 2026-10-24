@@ -23,7 +23,7 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
   const document = { getElementById: get, createElement: tag => Object.assign(node(), {tagName: String(tag).toUpperCase()}), createElementNS: node, createTextNode: text => ({textContent: text}),
     querySelectorAll: () => [], querySelector: () => get('main'), events: {}, addEventListener(name, fn) { this.events[name] = fn; } };
   const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
-    window: { roostTheme: { current: () => 'dark' }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
+    window: { roostTheme: { current: () => 'dark', collapseThinking: () => false }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
     fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, crypto: require('node:crypto').webcrypto, ...globals });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
   return {context, get, run: code => vm.runInContext(code, context)};
@@ -586,6 +586,42 @@ test("Appearance sets this device's text size", async () => {
   assert.equal(find(f.get('settings-detail'), n => n.textContent === 'Larger' && n.className.startsWith('segment')).className, 'segment active');
 });
 
+function loadTheme(f) {
+  f.context.document.documentElement = {dataset: {}, style: {removeProperty() {}, setProperty() {}}};
+  f.context.window.matchMedia = () => ({matches: false, addEventListener() {}});
+  f.context.window.dispatchEvent = () => {};
+  f.context.Event = class Event {};
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/theme.js'), 'utf8'), f.context);
+}
+
+test('Appearance keeps thinking collapsed on this device across reloads', async () => {
+  const stored = new Map(), localStorage = {getItem: key => stored.get(key),
+    setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key)};
+  const f = settingsFixture(undefined, {localStorage}); await tick(); loadTheme(f);
+  f.run(`state.settings = ${SETTINGS}; state.settingsGroup = 'appearance'; renderSettings()`);
+  const toggle = find(f.get('settings-detail'), n => n.className === 'job-toggle off');
+  assert.equal(f.context.window.roostTheme.collapseThinking(), false);
+  assert.match(text(f.get('settings-detail')), /Keep thinking collapsed/);
+  toggle.events.click();
+  assert.equal(toggle.className, 'job-toggle');
+  assert.equal(stored.get('roost-collapse-thinking'), 'true');
+  const reloaded = settingsFixture(undefined, {localStorage}); await tick(); loadTheme(reloaded);
+  assert.equal(reloaded.context.window.roostTheme.collapseThinking(), true);
+  reloaded.run(`state.settings = ${SETTINGS}; state.settingsGroup = 'appearance'; renderSettings()`);
+  find(reloaded.get('settings-detail'), n => n.className === 'job-toggle').events.click();
+  const reset = settingsFixture(undefined, {localStorage}); await tick(); loadTheme(reset);
+  assert.equal(reset.context.window.roostTheme.collapseThinking(), false);
+});
+
+test('thinking preference still works when device storage is unavailable', async () => {
+  const f = fixture(undefined, {localStorage: {getItem() { throw new Error('unavailable'); },
+    setItem() { throw new Error('unavailable'); }, removeItem() { throw new Error('unavailable'); }}});
+  await tick(); loadTheme(f);
+  assert.equal(f.context.window.roostTheme.collapseThinking(), false);
+  f.context.window.roostTheme.setCollapseThinking(true);
+  assert.equal(f.context.window.roostTheme.collapseThinking(), true);
+});
+
 test('Settings › Account signs this device out', async () => {
   const f = settingsFixture(); await tick();
   f.run(`globalThis.calls = []; api = async (path, options = {}) => { calls.push(path); return path === '/settings' ? ${SETTINGS} : {}; };`);
@@ -920,6 +956,30 @@ test('a reply streams its thoughts, then its text, in place of the steps Hermes 
   assert.equal(f.run('state.live'), null);
   assert.equal(kids().find(n => n.className === 'thoughts').open, false);
   assert.equal(find(f.get('transcript'), n => n.className === 'typing-row'), undefined);
+});
+
+test('collapsed live thoughts respect manual toggles through updates, rebuilds and reconnects, then reset next turn', async () => {
+  const {opened, globals} = eventSources();
+  const f = fixture(undefined, globals); await tick(); loadTheme(f);
+  f.context.window.roostTheme.setCollapseThinking(true);
+  f.run(`state.current = 'one'; openStream('one'); renderMessages([])`);
+  const block = () => f.get('transcript').children.find(n => n.className === 'thoughts');
+  opened[0].send({reset: true, user: 'hello', started: 1, thoughts: 'Thinking'});
+  f.run('renderLive()');
+  assert.equal(block().open, false);
+  block().open = true; block().events.toggle();
+  opened[0].send({thoughts: ' more', text: 'Reply'});
+  f.run('renderLive()');
+  assert.equal(block().open, true);
+  f.run(`state.messageSignature = null; renderMessages([])`);
+  assert.equal(block().open, true, 'a transcript rebuild preserves the manual choice');
+  opened[0].send({reset: true, user: 'hello', started: 1, thoughts: 'Thinking more'});
+  f.run('renderLive()');
+  assert.equal(block().open, true, 'reconnecting the same turn preserves the manual choice');
+  opened[0].send({reset: true, user: 'again', started: 2, thoughts: 'New thinking'});
+  f.run('renderLive()');
+  assert.equal(block().open, false, 'each new turn starts collapsed');
+  assert.equal(f.run(`thoughtsBlock(['Saved thinking'], 'saved').open`), false);
 });
 
 test('a reply being written shows the message it answers before Hermes has saved it', async () => {
