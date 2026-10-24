@@ -6,10 +6,11 @@ const $ = (id) => document.getElementById(id);
 // A test fails if app.js writes a field that is not declared here.
 const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
-                          search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false }),
+                          search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
   conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
                          composerDrafts: null, composerKey: undefined,
-                         lastRows: null, messageHistory: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
+                         lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
+                         shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
   approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
                       approvalFocusConversation: null, approvalLoading: null }),
@@ -344,6 +345,7 @@ async function refreshConnection(load) {
 
 function refreshOnResume() {
   if ($("app").classList.contains("hidden") || navigation.signingIn) return;
+  resetMessagePolling();
   return refreshConnection(() => Promise.all([loadConversations(),
     state.section === "jobs" ? loadJobs() : state.current ? loadMessages() : Promise.resolve()]));
 }
@@ -638,6 +640,10 @@ async function deleteConversation() {
 }
 
 function renderConversations() {
+  const signature = JSON.stringify([state.conversations, state.current, state.search, state.working, state.loadingMore,
+    state.swipeOpenId, state.approvals.length > 0, state.timeZone, agent(), dayKey(new Date())]);
+  if (signature === state.listSignature) return;
+  state.listSignature = signature;
   const list = $("conversation-list"); list.replaceChildren();
   const rows = state.conversations.filter((item) =>
     (sessionName(item) + " " + (withoutInstructions(item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
@@ -745,7 +751,7 @@ function finishLoadingConversations(data, rows, more) {
 }
 
 function renderWelcome() {
-  state.messageHistory = null; state.lastRows = null;
+  state.messageHistory = null; state.lastRows = null; state.messageSignature = null;
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -998,14 +1004,35 @@ function renderMessages(rows) {
   }
   state.selectionDeferred = false;
   const prepend = state.messageHistory?.prepend === true;
-  if (prepend) state.messageHistory.prepend = false;
-  // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
   const fresh = state.renderedConversation !== state.current;
+  if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
+  const view = conversationView({ rows: records(rows), sent: state.sentMessages, current: state.current,
+    live: state.live?.id === state.current ? state.live : null, server: state.turn?.id === state.current ? state.turn : {} });
+  state.sentMessages = view.sent;
+  if (state.live?.id === state.current && !view.live) state.live = null;
+  // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
+  if (view.live && view.after != null) view.live.after = view.after;
+  state.working = view.working;
+  readVoiceReply(view);
+  const all = view.rows, live = view.live, liveAfter = view.liveAfter;
+  const signature = JSON.stringify([state.current, state.viewEpoch,
+    all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.timestamp, row.roost_usage,
+        row.local_sent, row.local_failed, row.local_pending]),
+    live, view.working, view.after, state.turn?.after, state.turn?.started,
+    view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
+    state.messageHistory?.hasOlder, state.messageHistory?.loading,
+    [...state.shownTimes], [...state.openThoughts], state.liveThoughtsOpen !== false, state.playing,
+    state.approvals, state.reasoning, state.timeZone, agent(), dayKey(new Date())]);
+  // Reconciliation above still runs on every poll; Markdown and DOM work only follow a view change.
+  if (prepend) state.messageHistory.prepend = false;
+  if (signature === state.messageSignature) return;
+  state.messageSignature = signature;
+  // Follow new messages only when already at the bottom (or opening a conversation); otherwise keep the reader's place.
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   const keepScroll = transcript.scrollTop, keepHeight = transcript.scrollHeight;
   state.renderedConversation = state.current;
   show("chat-settings", Boolean(state.current));
-  if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   transcript.replaceChildren();
   state.liveNodes = null;
   if (state.messageHistory?.id === state.current && state.messageHistory.hasOlder) {
@@ -1015,14 +1042,6 @@ function renderMessages(rows) {
     button.addEventListener("click", loadEarlierMessages);
     transcript.append(button);
   }
-  const view = conversationView({ rows: records(rows), sent: state.sentMessages, current: state.current,
-    live: state.live?.id === state.current ? state.live : null, server: state.turn?.id === state.current ? state.turn : {} });
-  state.sentMessages = view.sent;
-  if (state.live?.id === state.current && !view.live) state.live = null;
-  // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
-  if (view.live && view.after != null) view.live.after = view.after;
-  state.working = view.working;
-  const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
   const content = JSON.stringify([visible.filter((row) => row.role === "assistant").map((row) => [row.id, messageText(row)]), live?.text || ""]);
   const changed = !fresh && !prepend && content !== state.latestContent;
@@ -1087,7 +1106,6 @@ function renderMessages(rows) {
     if (row === liveAfter) transcript.append(...liveNodes(live));
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
-  readVoiceReply(view);
   if (view.working) {
     const typing = el("div", "typing-row");
     const dots = el("span", "typing-dots"); dots.append(el("i"), el("i"), el("i"));
@@ -1110,6 +1128,7 @@ function updateLatest(changed = false) {
 async function selectConversation(id, source) {
   if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
+  resetMessagePolling();
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
@@ -1136,6 +1155,7 @@ async function selectConversation(id, source) {
 
 async function loadMessages(id = state.current) {
   if (!id) return;
+  state.lastMessagePoll = Date.now();
   const scope = viewScope(id);
   const serial = state.messageRequest = state.messageRequest + 1, at = Date.now();
   const data = await api(`/conversations/${encodeURIComponent(id)}`);
@@ -1146,11 +1166,15 @@ async function loadMessages(id = state.current) {
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, at };
     if (data.live === true) openStream(id);
+    else if (!state.turn.working && state.stream?.id === id && state.stream.healthy) {
+      state.stream.healthy = false; resetMessagePolling();
+    }
     let history = state.messageHistory;
     if (history?.id !== id) history = state.messageHistory = { id, rows: [], loaded: false, loading: false };
     history.rows = history.loaded ? mergeMessages(history.rows, data.messages) : data.messages;
     if (!history.loaded) history.hasOlder = data.has_older === true;
     renderMessages(history.rows);
+    messagePollDelay();
     loadApprovals(id);
   }
 }
@@ -1267,8 +1291,10 @@ function openStream(id) {
   if (typeof EventSource !== "function" || state.stream?.id === id) return;
   closeStream();
   const source = new EventSource(`/api/conversations/${encodeURIComponent(id)}/stream`);
+  state.lastMessagePoll = Date.now();
   const ours = () => state.stream?.source === source;
-  state.stream = { id, source };
+  state.stream = { id, source, healthy: false };
+  source.onopen = () => { if (ours()) { state.stream.healthy = true; state.idleSince = null; } };
   source.onmessage = (event) => {
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
@@ -1279,6 +1305,7 @@ function openStream(id) {
       state.live = { id, user: String(data.user ?? ""), started: data.started, thoughts: "", text: "", done: false };
     }
     if (state.live?.id !== id) return;
+    state.stream.healthy = true; state.idleSince = null;
     if (typeof data.thoughts === "string") state.live.thoughts += data.thoughts;
     if (typeof data.text === "string") state.live.text += data.text;
     if (Array.isArray(data.approvals)) setApprovals(data.approvals);
@@ -1286,7 +1313,11 @@ function openStream(id) {
     else scheduleLive();
   };
   // The browser retries a dropped connection by itself; a refused one (the turn is over) ends here.
-  source.onerror = () => { if (ours() && source.readyState === 2) endStream(id); };
+  source.onerror = () => {
+    if (!ours()) return;
+    state.stream.healthy = false; resetMessagePolling();
+    if (source.readyState === 2) endStream(id);
+  };
 }
 
 function endStream(id) {
@@ -1298,6 +1329,19 @@ function endStream(id) {
 function closeStream() {
   state.stream?.source.close();
   state.stream = null;
+  resetMessagePolling();
+}
+
+function resetMessagePolling() { state.lastMessagePoll = null; state.idleSince = null; }
+
+function messagePollDelay() {
+  const active = state.busy || state.working || (state.turn?.id === state.current && state.turn.working) ||
+    (state.live?.id === state.current && !state.live.done) ||
+    state.sentMessages.some((item) => item.id === state.current && (!item.failed || item.pending || item.retrying));
+  if (active) state.idleSince = null;
+  else state.idleSince ??= Date.now();
+  if (state.stream?.id === state.current && state.stream.healthy && state.stream.source.readyState === 1) return 15000;
+  return state.idleSince !== null && Date.now() - state.idleSince > 60000 ? 10000 : 3000;
 }
 
 // Another conversation is opening: nothing live or rendered here belongs to it.
@@ -1504,6 +1548,7 @@ function acceptMessage(item, id, here) {
 // Sends the composer or one failed row, without consuming a newer draft on Retry.
 async function sendText(text, { voice = false, retry = null } = {}) {
   if (state.busy) return;
+  resetMessagePolling();
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
@@ -2669,11 +2714,13 @@ setInterval(() => {
   if (!$("app").classList.contains("hidden") && state.section === "settings" && state.settingsGroup === "about") loadAbout();
 }, 5000);
 setInterval(() => {
-  if ($("app").classList.contains("hidden") || state.section !== "messages" || state.busy) return;
+  if (document.hidden || $("app").classList.contains("hidden") || state.section !== "messages" || state.busy) return;
+  const delay = messagePollDelay();
+  if (state.lastMessagePoll !== null && Date.now() - state.lastMessagePoll < delay) return;
   if (state.current) refreshConnection(() => loadMessages());
 }, 3000);
 setInterval(() => {
-  if ($("app").classList.contains("hidden")) return;
+  if (document.hidden || $("app").classList.contains("hidden")) return;
   if (state.section === "messages") refreshConnection(() => loadConversations());
   else if (state.section === "jobs") refreshConnection(() => loadJobs());
 }, 20000);

@@ -2076,3 +2076,146 @@ test('scrolling to the transcript top loads one history page at a time and can r
   f.get('transcript').events.scroll();
   assert.equal(f.run('historyCalls'), 2);
 });
+
+test('identical transcript polls keep the DOM and skip Markdown, while visible changes render', async () => {
+  const f = fixture(); await tick();
+  const transcript = f.get('transcript'), replace = transcript.replaceChildren.bind(transcript);
+  let renders = 0;
+  transcript.replaceChildren = (...rows) => { renders++; replace(...rows); };
+  f.run(`state.current = 'one'; globalThis.markdowns = 0; const markdown = addMarkdown;
+    addMarkdown = (...args) => {markdowns++; markdown(...args);};
+    globalThis.data = {messages:[{id:1,role:'assistant',content:'Reply',reasoning:'Thoughts',timestamp:1700000000}],has_older:true};
+    api = async path => path.endsWith('/approvals') ? {approvals:data.approvals || []} : JSON.parse(JSON.stringify(data));`);
+  await f.run('loadMessages()');
+  const body = transcript.children.find(n => n.className === 'message from-agent');
+  const markdowns = f.run('markdowns');
+  await f.run('loadMessages()'); await f.run('loadMessages()');
+  assert.equal(renders, 1); assert.equal(f.run('markdowns'), markdowns);
+  assert.ok(transcript.children.includes(body));
+  for (const change of [
+    `data.messages[0].content = 'Changed reply'`,
+    `data.messages[0].reasoning = 'Changed thoughts'`,
+    `data.messages[0].roost_usage = {input_tokens:10,output_tokens:20,model_seconds:2}`,
+    `data.has_older = false`,
+    `data.working = true; data.after = 1; data.started = 2`,
+    `state.reasoning = 'high'`,
+    `state.playing = {conversation:'one',id:1}`,
+    `data.approvals = state.approvals = [{request_id:'approval'}]`,
+  ]) {
+    const before = renders;
+    f.run(change); await f.run('loadMessages()');
+    assert.equal(renders, before + 1, change);
+    await f.run('loadMessages()'); assert.equal(renders, before + 1, 'the next identical poll is skipped');
+  }
+  f.run(`loadReasoning = () => {};`);
+  await f.run(`selectConversation('one')`);
+  assert.ok(transcript.children.some(n => n.className === 'message from-agent'), 'reselecting replaces the loading view');
+});
+
+test('Retry state and older-history prepend invalidate the transcript without rebuilding on the next poll', async () => {
+  const f = fixture(); await tick();
+  const transcript = f.get('transcript'), replace = transcript.replaceChildren.bind(transcript);
+  let renders = 0;
+  transcript.replaceChildren = (...rows) => { renders++; replace(...rows); };
+  f.run(`state.current = 'one';
+    state.sentMessages = [{id:'one',key:'failed',text:'Try again',since:Date.now(),after:2,failed:true}];
+    api = async path => path.endsWith('/approvals') ? {approvals:[]} : path.includes('?before=')
+      ? {messages:[{id:1,role:'user',content:'Earlier'}],has_older:false}
+      : {messages:[{id:2,role:'assistant',content:'Newest'}],has_older:true};`);
+  await f.run('loadMessages()'); await f.run('loadMessages()'); assert.equal(renders, 1);
+  const actions = () => transcript.children.flatMap(n => n.children).filter(n => n.className === 'send-action');
+  assert.equal(actions()[0].textContent, 'Retry');
+  f.run('state.sentMessages[0].retrying = true'); await f.run('loadMessages()');
+  assert.equal(renders, 2); assert.equal(actions()[0].textContent, 'Checking…'); assert.equal(actions()[0].disabled, true);
+  f.run('state.sentMessages[0].retrying = false; state.sentMessages[0].pending = true'); await f.run('loadMessages()');
+  assert.equal(renders, 3); assert.equal(actions()[0].textContent, 'Check again');
+  await f.run('loadMessages()'); assert.equal(renders, 3);
+  await f.run('loadEarlierMessages()'); assert.equal(renders, 4);
+  assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [1,2]);
+  await f.run('loadMessages()'); assert.equal(renders, 4);
+  f.run('state.messageHistory.loading = true'); await f.run('loadMessages()'); assert.equal(renders, 5);
+});
+
+test('identical conversation refreshes preserve rows and selection, search and loading changes render', async () => {
+  const f = fixture(); await tick();
+  const list = f.get('conversation-list'), replace = list.replaceChildren.bind(list);
+  let renders = 0;
+  list.replaceChildren = (...rows) => { renders++; replace(...rows); };
+  f.run(`state.current = 'one'; api = async () => ({sessions:[{id:'one',title:'One',preview:'Same'}],total:1});`);
+  await f.run('loadConversations()'); const row = list.children[1];
+  await f.run('loadConversations()'); assert.equal(renders, 1); assert.equal(list.children[1], row);
+  for (const change of [`state.current = 'two'`, `state.search = 'absent'`, `state.loadingMore = true`,
+    `state.conversations[0].preview = 'Changed'`, `state.working = true`, `state.timeZone = 'UTC'`]) {
+    const before = renders;
+    f.run(change + '; renderConversations()'); assert.equal(renders, before + 1, change);
+    f.run('renderConversations()'); assert.equal(renders, before + 1);
+  }
+});
+
+test('hidden pages skip transcript, conversation and job polls and still report presence', async () => {
+  const polls = new Map(), f = fixture(undefined, {setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
+  f.run(`show('app',true); state.current='one'; globalThis.loads=[];
+    loadMessages=async()=>loads.push('chat'); loadConversations=async()=>loads.push('list'); loadJobs=async()=>loads.push('jobs');
+    fetch=async path=>{if(path==='/api/presence') loads.push('presence'); return {};}; document.hidden=true;`);
+  polls.get(3000)(); polls.get(20000)();
+  f.run(`state.section='jobs'`); polls.get(20000)(); polls.get(15000)(); await tick();
+  assert.deepEqual(Array.from(f.run('loads')), ['presence']);
+  f.run(`document.hidden=false; state.section='messages'`); polls.get(3000)(); polls.get(20000)(); await tick();
+  assert.deepEqual(Array.from(f.run('loads')), ['presence','chat','list']);
+});
+
+test('healthy live streams poll every 15 seconds and errors, completion and finished turns restore fast polling', async () => {
+  const clock = pendingClock(), {opened, globals} = eventSources(), polls = new Map();
+  const f = fixture(undefined, {...clock.globals, ...globals, setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
+  f.run(`show('app',true); state.current='one'; globalThis.loads=0; globalThis.active=true;
+    api=async path=>path.endsWith('/approvals') ? {approvals:[]} :
+      (loads++, {messages:[],working:active,live:active,after:0,started:1});`);
+  const poll = async () => { await clock.advance(3000); polls.get(3000)(); await tick(); };
+  await f.run('loadMessages()');
+  await poll(); assert.equal(f.run('loads'), 2, 'an unopened stream keeps the fast poll');
+  opened[0].onopen();
+  opened[0].send({reset:true,started:1,user:'Question',text:'Live',thoughts:'Thinking'});
+  for (let i=0; i<4; i++) await poll();
+  assert.equal(f.run('loads'), 2);
+  await poll(); assert.equal(f.run('loads'), 3);
+  opened[0].readyState=0; opened[0].onerror(); await poll();
+  assert.equal(f.run('loads'), 4, 'a reconnecting stream restores fast polls');
+  opened[0].readyState=1; opened[0].onopen(); await poll(); assert.equal(f.run('loads'), 4);
+  f.run('active=false'); opened[0].send({done:true}); await tick();
+  assert.equal(f.run('loads'), 5, 'completion refreshes immediately');
+  await poll(); assert.equal(f.run('loads'), 6);
+  f.run(`active=true; openStream('one')`); opened[1].onopen();
+  await poll(); assert.equal(f.run('loads'), 6, 'a newly healthy stream slows polling immediately');
+  await f.run('loadMessages()');
+  f.run('active=false'); await clock.advance(15000); polls.get(3000)(); await tick();
+  const finished = f.run('loads'); await poll();
+  assert.equal(f.run('loads'), finished + 1, 'a finished server turn restores fast polls even without a done event');
+  f.run(`active=false; openStream('one')`);
+  opened[1].readyState=2; opened[1].onerror(); await tick();
+  assert.equal(f.run('state.stream'), null, 'a closed stream ends');
+});
+
+test('idle conversations slow after a minute and send, pending rows and visibility return restore fast polling', async () => {
+  const clock = pendingClock(), polls = new Map();
+  const f = fixture(undefined, {...clock.globals, setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
+  f.run(`show('app',true); state.current='one'; globalThis.loads=0;
+    loadConversations=async()=>{};
+    api=async (path,options)=>options?.method==='POST' ? {session_id:'one'} : path.endsWith('/approvals') ? {approvals:[]} :
+      (loads++, {messages:[],working:false,live:false});`);
+  const poll = async () => { await clock.advance(3000); polls.get(3000)(); await tick(); };
+  await f.run('loadMessages()');
+  for (let i=0; i<20; i++) await poll();
+  assert.equal(f.run('loads'), 21, 'polls stay fast through the first minute');
+  for (let i=0; i<3; i++) await poll();
+  assert.equal(f.run('loads'), 21);
+  await poll(); assert.equal(f.run('loads'), 22, 'the 3-second timer rounds the idle interval up to 12 seconds');
+  await f.run(`sendText('New question')`); await tick();
+  const sent = f.run('loads'); await poll(); assert.equal(f.run('loads'), sent + 1);
+  f.run(`state.sentMessages=[{id:'one',key:'pending',text:'Pending',since:Date.now(),after:0,failed:true,pending:true}]; state.idleSince=Date.now()-120000;`);
+  await poll(); assert.equal(f.run('loads'), sent + 2, 'an ambiguous pending send keeps fast polling');
+  f.run(`state.sentMessages=[]; state.idleSince=Date.now()-120000;`);
+  await poll(); assert.equal(f.run('loads'), sent + 2);
+  f.context.document.visibilityState='visible'; f.context.document.events.visibilitychange(); await tick();
+  assert.equal(f.run('loads'), sent + 3, 'visibility return refreshes immediately');
+  await poll(); assert.equal(f.run('loads'), sent + 4);
+});
