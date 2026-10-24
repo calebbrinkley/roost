@@ -153,6 +153,20 @@ class Hermes:
                    f"&limit={int(limit)}&offset={int(offset)}")
         return _messages(result)["messages"]
 
+    async def older_messages(self, sid: str, *, before: int, limit: int) -> dict:
+        """The page immediately before a durable row, using the export's whole-history pages."""
+        rows, offset = [], 0
+        while True:
+            page = await self.history(sid, offset=offset, limit=500)
+            for row in page:
+                if row["id"] >= before:
+                    return {"messages": rows[-limit:], "has_older": len(rows) > limit}
+                rows.append(row)
+                rows = rows[-(limit + 1):]
+            if len(page) < 500:
+                return {"messages": rows[-limit:], "has_older": len(rows) > limit}
+            offset += len(page)
+
     async def rename_session(self, sid: str, title: str) -> dict:
         return await self._request("PATCH", f"/api/sessions/{_segment(sid)}", {"title": title})
 

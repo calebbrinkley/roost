@@ -12,6 +12,7 @@ from roost.hermes import Hermes
 def fake_hermes() -> Hermes:
     hermes = create_autospec(Hermes, instance=True)
     for name, value in {"sessions": {"sessions": []}, "messages": {"messages": []}, "history": [],
+                        "older_messages": {"messages": [], "has_older": False},
                         "jobs": {"jobs": []}, "job": {}, "runs": {"runs": []}, "create_job": {}, "update_job": {},
                         "job_action": {}, "delete_job": {}, "rename_session": {}, "delete_session": {},
                         "profile": {"name": "default"}, "soul": "", "status": {}, "transcribe": "", "speak": "",

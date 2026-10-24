@@ -725,7 +725,20 @@ async def conversations(request: web.Request):
 
 async def conversation(request: web.Request):
     sid = item_id(request, "sid")
+    before, limit = request.query.get("before"), request.query.get("limit", "500")
+    if (len(request.query.getall("before", [])) > 1 or len(request.query.getall("limit", [])) > 1
+            or not re.fullmatch(r"[0-9]{1,3}", limit) or not 1 <= int(limit) <= 500
+            or (before is None and "limit" in request.query)
+            or (before is not None and (not re.fullmatch(r"[0-9]{1,16}", before)
+                                       or not 1 <= int(before) <= 9007199254740991))):
+        raise bad("Invalid history page.")
+    if before is not None:
+        result = await request.app["hermes"].older_messages(sid, before=int(before), limit=int(limit))
+        request.app["reply_usage"].attach(sid, result["messages"])
+        return web.json_response(result)
     result = await request.app["hermes"].messages(sid)
+    # Hermes reports no total. A full newest window may have older rows; a history page confirms it.
+    result["has_older"] = len(result["messages"]) == 500
     turn, watch = request.app["live"].get(sid), request.app["watches"].get(sid)
     # Says a reply is being written that /stream can show before Hermes saves it.
     result["live"] = turn is not None
