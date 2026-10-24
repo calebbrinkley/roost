@@ -2143,14 +2143,17 @@ function renderDataSettings(detail) {
     ["conversations", "Delete all conversations", `Removes every conversation in Messages, whatever started it, from ${agent()}’s history for good. Job run history stays with its jobs.`],
     ["jobs", "Delete all jobs", `Removes every scheduled job and stops it running. This can’t be undone.`]]) {
     const section = settingsSection(detail, heading, text);
-    const label = el("label", "", "Type DELETE to confirm"); label.htmlFor = "confirm-" + kind;
-    const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "characters";
+    // The operation's own name is the phrase to type, shown in the empty field; capitals and spacing don't matter.
+    const phrase = heading.toLowerCase(), prompt = `Type “${phrase}” to confirm`;
+    const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "off";
+    input.spellcheck = false; input.placeholder = prompt; input.setAttribute("aria-label", prompt);
+    const typed = () => input.value.trim().replace(/\s+/g, " ").toLowerCase() === phrase;
     const actions = el("div", "settings-actions");
-    const button = settingsButton("danger-button", heading, () => deleteEverything(kind, input));
+    const button = settingsButton("danger-button", heading, () => deleteEverything(kind, typed));
     button.disabled = true;
-    input.addEventListener("input", () => { button.disabled = state.settingsBusy || input.value.trim() !== "DELETE"; });
+    input.addEventListener("input", () => { button.disabled = state.settingsBusy || !typed(); });
     actions.append(button);
-    section.append(label, input, actions);
+    section.append(input, actions);
   }
 }
 
@@ -2482,8 +2485,8 @@ function saveSoul() {
   });
 }
 
-function deleteEverything(kind, input) {
-  if (input.value.trim() !== "DELETE") return;
+function deleteEverything(kind, typed) {
+  if (!typed()) return;
   return withSettingsBusy(async () => {
     const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
     if (kind === "conversations") {
