@@ -1423,3 +1423,14 @@ test('a failed thinking change puts the previous level back', async () => {
   assert.equal(f.get('reasoning').value, 'high');
   assert.equal(f.run('state.reasoning'), 'high');
 });
+
+test('a new conversation focuses the message field only without a touch screen', async () => {
+  for (const [coarse, expected] of [[false, 1], [true, 0]]) {
+    const window = { roostTheme: { current: () => 'dark' }, addEventListener() {}, getSelection: () => '',
+      matchMedia: query => ({matches: coarse && query === '(pointer: coarse)'}) };
+    const f = fixture(undefined, {window}); await tick();
+    let focused = 0; f.get('message').focus = () => focused++;
+    f.run(`loadConversations = async () => {}; newConversation();`);
+    assert.equal(focused, expected, coarse ? 'touch screen' : 'mouse');
+  }
+});
