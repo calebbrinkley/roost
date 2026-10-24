@@ -8,7 +8,7 @@ const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
   conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
-                         composerDrafts: null, composerKey: undefined,
+                         composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
@@ -876,6 +876,29 @@ function addMarkdown(parent, value) {
   addPlainMarkdown(parent, value.slice(last));
 }
 
+function textLines(text) { return text.split(/\r\n|\r|\n/); }
+function longText(text) { return text.length >= 800 || textLines(text).length >= 8; }
+
+function addUserMessage(body, text, key) {
+  if (!longText(text)) { addMarkdown(body, text); return; }
+  const content = el("div"), button = el("button", "paste-toggle");
+  button.type = "button";
+  const render = () => {
+    const expanded = state.expandedUserMessages.has(key);
+    content.replaceChildren();
+    addMarkdown(content, expanded ? text : textLines(text).slice(0, 3).join("\n").slice(0, 400) + "…");
+    button.textContent = expanded ? "Show less" : `Show all ${textLines(text).length} lines`;
+    button.setAttribute("aria-expanded", String(expanded));
+  };
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.expandedUserMessages.has(key)) state.expandedUserMessages.delete(key);
+    else state.expandedUserMessages.add(key);
+    render();
+  });
+  render(); body.append(content, button);
+}
+
 function copyButton(text, label) {
   const button = el("button", "play-reply copy-button");
   button.type = "button"; button.title = label; button.setAttribute("aria-label", label);
@@ -1005,6 +1028,7 @@ function renderMessages(rows) {
   state.selectionDeferred = false;
   const prepend = state.messageHistory?.prepend === true;
   const fresh = state.renderedConversation !== state.current;
+  if (fresh) state.expandedUserMessages.clear();
   if (fresh) { state.shownTimes = new Set(); state.openThoughts = new Set(); }
   const view = conversationView({ rows: records(rows), sent: state.sentMessages, current: state.current,
     live: state.live?.id === state.current ? state.live : null, server: state.turn?.id === state.current ? state.turn : {} });
@@ -1062,7 +1086,10 @@ function renderMessages(rows) {
     if (thoughtsBefore.has(row)) transcript.append(thoughtsBlock(...thoughtsBefore.get(row)));
     const key = String(row.id ?? index), time = messageTime(row.timestamp);
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-agent"));
-    const body = el("div", "message-body"); addMarkdown(body, messageText(row)); wrapper.append(body);
+    const body = el("div", "message-body");
+    if (row.role === "user") addUserMessage(body, messageText(row), key);
+    else addMarkdown(body, messageText(row));
+    wrapper.append(body);
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
@@ -1445,14 +1472,15 @@ function newConversation() {
 async function submitMessage(event) {
   event.preventDefault();
   if (state.busy || voice.take) return;
-  const text = $("message").value.trim();
+  const text = expandPastes($("message").value).trim();
+  if (text.length > 16000) { notice("The message is too long. Shorten the draft before sending."); return; }
   // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
   // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
   if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
 
-// Plain-text drafts survive page eviction; storage being blocked only loses persistence.
+// Drafts and their folded pastes survive page eviction; blocked storage only loses persistence.
 function composerDrafts() {
   if (state.composerDrafts === null) {
     let rows;
@@ -1463,10 +1491,43 @@ function composerDrafts() {
   return state.composerDrafts;
 }
 
-function saveComposer(text = $("message").value, id = state.current) {
+function draftPastes() {
+  const row = composerDrafts().find((row) => row.id === (state.current || "new"));
+  return Array.isArray(row?.pastes) ? row.pastes.filter((paste) => paste && typeof paste.token === "string" &&
+    typeof paste.text === "string" && paste.text.length <= 16000 && row.text.includes(paste.token)) : [];
+}
+
+function expandPastes(text, pastes = draftPastes()) {
+  const values = new Map(pastes.map((paste) => [paste.token, paste.text]));
+  return text.replace(/\[Pasted text #\d+ · \d+ lines\]/g, (token) => values.get(token) ?? token);
+}
+
+function pasteText(event) {
+  const text = event.clipboardData?.getData("text/plain") || "";
+  if (!longText(text)) return;
+  event.preventDefault();
+  const input = $("message"), start = input.selectionStart, end = input.selectionEnd;
+  const pastes = draftPastes();
+  let number = 1, token;
+  do { token = `[Pasted text #${number++} · ${textLines(text).length} lines]`; }
+  while (input.value.includes(`[Pasted text #${number - 1} ·`));
+  const value = input.value.slice(0, start) + token + input.value.slice(end);
+  pastes.push({ token, text });
+  if (value.length > 16000 || expandPastes(value, pastes).length > 16000) { notice("The paste won’t fit in this message. Shorten the draft and try again."); return; }
+  input.setRangeText(token, start, end, "end");
+  saveComposer(input.value, state.current, pastes);
+  $("composer").classList.add("has-text");
+}
+
+function saveComposer(text = $("message").value, id = state.current, pastes) {
   const key = id || "new";
+  pastes ??= composerDrafts().find((row) => row.id === key)?.pastes;
   state.composerDrafts = composerDrafts().filter((row) => row.id !== key);
-  if (text) state.composerDrafts.push({ id: key, text: text.slice(0, 16000) });
+  if (text) {
+    const row = { id: key, text: text.slice(0, 16000) };
+    if (Array.isArray(pastes)) row.pastes = pastes.filter((paste) => paste && typeof paste.token === "string" && row.text.includes(paste.token));
+    state.composerDrafts.push(row);
+  }
   state.composerDrafts = state.composerDrafts.slice(-50);
   try { localStorage.setItem("roost.composer-drafts", JSON.stringify(state.composerDrafts)); } catch { /* Use memory only. */ }
   if (id === state.current) state.composerKey = id || "new";
@@ -1524,9 +1585,9 @@ function acceptMessage(item, id, here) {
   stopSendCheck(item);
   const oldId = item.id;
   if (!oldId) {
-    const draft = composerDrafts().find((row) => row.id === "new")?.text || "";
+    const draft = composerDrafts().find((row) => row.id === "new");
     saveComposer("", null);
-    if (draft) saveComposer(draft, id);
+    if (draft) saveComposer(draft.text, id, draft.pastes);
     for (const sent of state.sentMessages) if (sent.id === null) sent.id = id;
   }
   if (here.alive()) {
@@ -2717,6 +2778,7 @@ $("conversation-sheet").addEventListener("click", (event) => {
   const box = $("conversation-sheet").getBoundingClientRect();
   if (event.target === $("conversation-sheet") && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) $("conversation-sheet").close();
 });
+$("message").addEventListener("paste", pasteText);
 $("message").addEventListener("input", () => {
   saveComposer();
   const hasText = Boolean($("message").value.trim());

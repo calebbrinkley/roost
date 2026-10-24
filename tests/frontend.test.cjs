@@ -2282,3 +2282,141 @@ test('idle conversations slow after a minute and send, pending rows and visibili
   assert.equal(f.run('loads'), sent + 3, 'visibility return refreshes immediately');
   await poll(); assert.equal(f.run('loads'), sent + 4);
 });
+
+function paste(f, text, start = f.get('message').value.length, end = start) {
+  const input = f.get('message');
+  input.selectionStart = start; input.selectionEnd = end;
+  input.setRangeText = (value, from, to) => {
+    input.value = input.value.slice(0, from) + value + input.value.slice(to);
+    input.selectionStart = input.selectionEnd = from + value.length;
+  };
+  let prevented = false;
+  input.events.paste({clipboardData: {getData: () => text}, preventDefault() {prevented = true;}});
+  return prevented;
+}
+
+test('long pastes fold at either threshold and replace the selection; short pastes stay native', async () => {
+  const f = fixture(); await tick();
+  assert.equal(paste(f, 'short\npaste'), false);
+  assert.equal(paste(f, 'x'.repeat(799)), false);
+  f.get('message').value = 'Before replace after';
+  const lines = Array.from({length:8}, (_, i) => `line ${i + 1}`).join('\r\n');
+  assert.equal(paste(f, lines, 7, 14), true);
+  assert.equal(f.get('message').value, 'Before [Pasted text #1 · 8 lines] after');
+  assert.equal(paste(f, 'x'.repeat(800)), true);
+  assert.match(f.get('message').value, /\[Pasted text #2 · 1 lines\]/);
+  assert.equal(f.run('draftPastes().length'), 2);
+});
+
+test('sending expands multiple tokens exactly once in the POST body', async () => {
+  const posts = [], f = fixture(async (url, options = {}) => {
+    if (options.method === 'POST') { posts.push(JSON.parse(options.body)); return {ok:true, json:async () => ({session_id:'one'})}; }
+    return {ok:true, json:async () => ({signed_in:false})};
+  }); await tick();
+  f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
+  const first = 'First\n'.repeat(8) + '[Pasted text #2 · 1 lines]', second = 'x'.repeat(800);
+  f.get('message').value = 'Review: ';
+  paste(f, first); paste(f, second);
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(posts[0].text, 'Review: ' + first + second);
+  assert.equal(f.run('state.sentMessages[0].text'), posts[0].text);
+  assert.equal(f.run('draftPastes().length'), 0);
+});
+
+test('deleting a token drops its content while keeping other folded pastes', async () => {
+  const f = fixture(); await tick();
+  paste(f, 'first\n'.repeat(8)); const token = f.get('message').value;
+  paste(f, 'second\n'.repeat(8));
+  f.get('message').value = f.get('message').value.replace(token, ''); f.get('message').events.input();
+  assert.equal(f.run('draftPastes().length'), 1);
+  assert.equal(f.run('state.composerDrafts[0].pastes.length'), 1);
+  f.get('message').value = ''; f.get('message').events.input();
+  assert.equal(f.run('state.composerDrafts.length'), 0);
+});
+
+test('folded pastes survive conversation switches and a stored draft reload', async () => {
+  const stored = new Map(), localStorage = {getItem: key => stored.get(key),
+    setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key)};
+  const f = fixture(undefined, {localStorage}); await tick();
+  f.run(`loadMessages = async () => {}; loadReasoning = () => {};`);
+  await f.run(`selectConversation('one')`);
+  const full = 'saved\n'.repeat(8); paste(f, full); const token = f.get('message').value;
+  await f.run(`selectConversation('two')`); assert.equal(f.run('draftPastes().length'), 0);
+  await f.run(`selectConversation('one')`); assert.equal(f.get('message').value, token);
+  const reloaded = fixture(() => new Promise(() => {}), {localStorage});
+  reloaded.run(`loadMessages = async () => {}; loadReasoning = () => {};`);
+  await reloaded.run(`selectConversation('one')`);
+  assert.equal(reloaded.get('message').value, token);
+  assert.equal(reloaded.run('expandPastes($("message").value)'), full);
+  reloaded.run(`globalThis.post = null; api = async (path, options) => {post = JSON.parse(options.body); return {session_id:'one'};}; loadConversations = async () => {};`);
+  await reloaded.run('submitMessage({preventDefault() {}})');
+  assert.equal(reloaded.run('post.text'), full.trim());
+});
+
+test('Retry resends expanded pasted text without consuming a newer folded draft', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.posts = []; api = async (path, options) => {
+    posts.push(JSON.parse(options.body).text); throw new Error('rejected'); };`);
+  const full = 'pasted\n'.repeat(8); paste(f, full);
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.match(text(f.get('transcript')), /Not sent/);
+  paste(f, 'next\n'.repeat(8)); const next = f.get('message').value;
+  f.run(`api = async (path, options) => {posts.push(JSON.parse(options.body).text); return {session_id:'one'};};
+    loadConversations = async () => {}; loadMessages = async () => {};`);
+  await f.run('retryMessage(state.sentMessages[0])');
+  assert.deepEqual(Array.from(f.run('posts')), [full.trim(), full.trim()]);
+  assert.equal(f.get('message').value, next);
+  assert.equal(f.run('draftPastes().length'), 1);
+});
+
+test('long user history folds, toggles accessibly and stays expanded through redraws', async () => {
+  const f = fixture(); await tick();
+  f.context.full = Array.from({length:10}, (_, i) => `Line ${i + 1}`).join('\n');
+  f.run(`state.current = 'one'; globalThis.rows = [{id:1, role:'user', content:full}]; renderMessages(rows);`);
+  const body = () => f.get('transcript').children.find(n => n.className === 'message from-you').children[0];
+  let button = body().children[1];
+  const attributes = {}; button.setAttribute = (key, value) => {attributes[key] = value;};
+  assert.equal(button.textContent, 'Show all 10 lines');
+  assert.doesNotMatch(text(body()), /Line 4/);
+  let stopped = false;
+  button.events.click({stopPropagation() {stopped = true;}});
+  assert.equal(stopped, true); assert.equal(attributes['aria-expanded'], 'true');
+  assert.match(text(body()), /Line 10/); assert.equal(button.textContent, 'Show less');
+  f.run(`rows.push({id:2,role:'assistant',content:'Reply'}); renderMessages(rows);`);
+  assert.equal(body().children[1].textContent, 'Show less');
+  button = body().children[1]; button.events.click({stopPropagation() {}});
+  assert.equal(button.textContent, 'Show all 10 lines'); assert.doesNotMatch(text(body()), /Line 4/);
+  f.run(`state.current = 'two'; renderMessages(rows)`);
+  assert.equal(body().children[1].textContent, 'Show all 10 lines');
+  f.run(`renderMessages([{id:1,role:'user',content:'x'.repeat(800)}])`);
+  assert.equal(body().children[1].textContent, 'Show all 1 lines');
+  assert.ok(text(body().children[0]).length < 450);
+});
+
+test('folding cannot bypass the expanded message length limit', async () => {
+  const f = fixture(); await tick();
+  paste(f, 'x'.repeat(16000)); const token = f.get('message').value;
+  assert.equal(paste(f, 'y'.repeat(800)), true);
+  assert.equal(f.get('message').value, token);
+  assert.equal(f.run('draftPastes().length'), 1);
+  f.get('message').value += 'extra';
+  f.run(`api = () => {throw new Error('must not send');};`);
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(f.get('message').value, token + 'extra');
+  assert.equal(f.run('state.sentMessages.length'), 0);
+});
+
+test('a new conversation migrates its folded follow-up draft after navigation', async () => {
+  const f = fixture(); await tick();
+  f.run(`api = () => new Promise(resolve => {globalThis.finish = resolve;});
+    loadMessages = async () => {}; loadConversations = async () => {}; loadReasoning = () => {};`);
+  f.get('message').value = 'First message';
+  const sending = f.run('submitMessage({preventDefault() {}})');
+  const full = 'follow-up\n'.repeat(8); paste(f, full); const token = f.get('message').value;
+  await f.run(`selectConversation('other')`);
+  f.run(`finish({session_id:'created'})`); await sending;
+  assert.equal(f.run('state.current'), 'other');
+  await f.run(`selectConversation('created')`);
+  assert.equal(f.get('message').value, token);
+  assert.equal(f.run('expandPastes($("message").value)'), full);
+});
