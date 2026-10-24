@@ -278,6 +278,7 @@ button:disabled { cursor: default; }
 /* Time zone: room between the list and the "Now:" example. */
 .settings-detail .job-detail-section select + p { margin-top: 16px; }
 .settings-detail label { display: block; margin: 0 0 7px; font-size: calc(13px * var(--text-scale)); font-weight: 600; }
+.settings-detail .job-enabled { display: flex; justify-content: space-between; gap: 12px; margin: 0; color: var(--ink); font-size: calc(15px * var(--text-scale)); font-weight: 400; }
 .settings-detail input, .settings-detail textarea { width: 100%; max-width: 520px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; outline: none; }
 .settings-detail textarea { max-width: 720px; min-height: 220px; resize: vertical; font: calc(14px * var(--text-scale))/1.5 var(--mono); }
 .settings-detail input:focus, .settings-detail textarea:focus { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
