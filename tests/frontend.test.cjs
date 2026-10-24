@@ -404,7 +404,7 @@ test('the custom accent previews while picking and saves the colour when the pic
   assert.ok(custom, 'the saved custom colour shows as chosen');
 });
 
-test('delete all stays disabled until DELETE is typed, then sends that confirmation', async () => {
+test('delete all stays disabled until its own phrase is typed, then sends the confirmation', async () => {
   const f = settingsFixture(); await tick();
   f.run(`globalThis.calls = []; api = async (path, options = {}) => {
     if (options.method === 'DELETE') { calls.push([path, JSON.parse(options.body)]); return {deleted: 3}; }
@@ -414,9 +414,12 @@ test('delete all stays disabled until DELETE is typed, then sends that confirmat
   const input = find(f.get('settings-detail'), n => n.id === 'confirm-conversations');
   const button = find(f.get('settings-detail'), n => n.textContent === 'Delete all conversations' && n.className === 'danger-button');
   assert.equal(button.disabled, true);
-  input.value = 'delete'; input.events.input();
-  assert.equal(button.disabled, true);
-  input.value = 'DELETE'; input.events.input();
+  assert.equal(input.placeholder, 'Type “delete all conversations” to confirm');
+  for (const wrong of ['DELETE', 'delete all jobs', 'delete all conversation']) {
+    input.value = wrong; input.events.input();
+    assert.equal(button.disabled, true, wrong);
+  }
+  input.value = '  Delete  all conversations '; input.events.input();
   assert.equal(button.disabled, false);
   await button.events.click(); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls'))), [['/conversations', {confirm:'DELETE'}]]);
