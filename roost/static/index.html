@@ -39,7 +39,7 @@
         </nav>
         <div class="mobile-list-heading mobile-only">
           <h1 id="mobile-list-title">Messages</h1>
-          <div class="mobile-list-actions">
+          <div id="mobile-list-actions" class="mobile-list-actions">
             <button id="top-action" class="icon-button filled" type="button" aria-label="New conversation" title="New conversation"></button>
           </div>
         </div>
@@ -65,15 +65,16 @@
           <button id="back-to-list" class="back-button mobile-only" type="button" aria-label="Back to Messages">‹</button>
           <span id="chat-avatar" class="chat-avatar"></span>
           <div class="chat-heading"><strong data-agent-text="{agent}">Agent</strong><small id="chat-title">Your conversation</small></div>
-          <div class="chat-actions">
+          <div id="chat-actions" class="chat-actions">
             <span id="origin-badge" class="source-tag hidden"></span>
-            <span id="presence" class="presence desktop-only"></span>
+            <span id="presence" class="presence desktop-only" role="status"></span>
             <button id="chat-settings" class="icon-button hidden" type="button" aria-label="Conversation menu" title="Conversation menu"></button>
           </div>
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <section id="approvals" class="approval-panel hidden" aria-label="Approval requests" aria-live="polite"></section>
         <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
+        <div class="latest-anchor"><button id="jump-latest" class="jump-latest hidden" type="button" aria-label="Jump to latest"></button></div>
         <form id="composer" class="composer">
           <label id="reasoning-chip" class="reasoning-chip" title="How hard the agent thinks in this conversation" data-agent-title="How hard {agent} thinks in this conversation">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>
@@ -94,7 +95,7 @@
       </section>
 
       <section id="jobs-view" class="jobs-view hidden">
-        <header class="jobs-header">
+        <header id="jobs-header" class="jobs-header">
           <button id="back-to-jobs" class="back-button mobile-only" type="button" aria-label="Back to Jobs">‹</button>
           <div class="jobs-heading"><strong id="job-detail-title">Jobs</strong><small id="job-detail-subtitle">Scheduled work</small></div>
         </header>
@@ -106,7 +107,7 @@
       </section>
 
       <section id="settings-view" class="jobs-view hidden">
-        <header class="jobs-header">
+        <header id="settings-header" class="jobs-header">
           <button id="back-to-settings" class="back-button mobile-only" type="button" aria-label="Back to Settings">‹</button>
           <div class="jobs-heading"><strong id="settings-title">Settings</strong><small id="settings-subtitle"></small></div>
         </header>

@@ -1434,3 +1434,147 @@ test('a new conversation focuses the message field only without a touch screen',
     assert.equal(focused, expected, coarse ? 'touch screen' : 'mouse');
   }
 });
+
+test('notification messages wait for sign-in, open once, and clear on sign-out', async () => {
+  let message;
+  const f = fixture(undefined, {navigator: {serviceWorker: {addEventListener(type, fn) { message = fn; }}}});
+  await tick();
+  f.run(`globalThis.opened = []; openLink = link => opened.push(link);
+    refreshIdentity = () => {}; loadConversations = () => new Promise(resolve => {globalThis.finishList = resolve;});`);
+  message({data: {link: '?c=one&a=approval'}});
+  const signingIn = f.run('signedIn()');
+  message({data: {link: '?c=two&a=approval'}});
+  assert.equal(f.run('opened.length'), 0);
+  f.run('finishList()'); await signingIn;
+  assert.deepEqual(Array.from(f.run('opened')), ['?c=two&a=approval']);
+  f.run('loadConversations = async () => {}'); await f.run('signedIn()');
+  assert.equal(f.run('opened.length'), 1);
+  f.run('signedOut()'); message({data: {open: 'old'}}); f.run('signedOut()');
+  await f.run('signedIn()'); assert.equal(f.run('opened.length'), 1);
+});
+
+test('cold notification URLs survive initial sign-out through password and passkey sign-in', async () => {
+  for (const method of ['password', 'passkey']) for (const link of ['?c=one&a=approval', '?j=job', '?d=delivery']) {
+    const f = passkeyFixture(); await tick();
+    f.context.location = {search: link};
+    f.context.history = {replaceState() { f.context.location.search = ''; }};
+    f.run(`signedOut(false); globalThis.opened = []; openLink = link => opened.push(link);
+      refreshIdentity = () => {}; loadConversations = async () => {};
+      api = async path => path === '/passkeys/login/options' ? {challenge:'AQID', rpId:'roost.example.invalid'} : {};`);
+    if (method === 'password') await f.get('login-form').events.submit({preventDefault() {}});
+    else await f.run('passkeySignIn()');
+    assert.deepEqual(Array.from(f.run('opened')), [link]);
+    await f.run('signedIn()'); assert.equal(f.run('opened.length'), 1);
+  }
+});
+
+test('resume refreshes the list and open view and shows reconnecting until success', async () => {
+  const f = fixture(); await tick();
+  f.run(`show('app', true); state.current = 'one'; globalThis.loads = [];
+    loadConversations = async () => {loads.push('list');}; loadMessages = async () => {loads.push('chat');};
+    loadJobs = async () => {loads.push('job');};`);
+  f.context.document.visibilityState = 'visible';
+  f.context.document.events.visibilitychange(); await tick();
+  assert.deepEqual(Array.from(f.run('loads')), ['list', 'chat']);
+  f.run(`state.section = 'jobs'; loadJobs = async () => {throw new Error('offline');};`);
+  f.context.document.events.visibilitychange(); await tick();
+  assert.equal(f.get('presence').textContent, 'Reconnecting…');
+  f.run(`loadJobs = async () => {loads.push('job');};`);
+  f.context.document.events.visibilitychange(); await tick();
+  assert.equal(f.get('presence').textContent, 'Online');
+  assert.equal(f.run('loads.at(-1)'), 'job');
+  f.run('signedOut(); loads = []'); f.context.document.events.visibilitychange(); await tick();
+  assert.equal(f.run('loads.length'), 0);
+});
+
+test('background poll failures show reconnecting and a successful poll clears it', async () => {
+  const polls = new Map();
+  const f = fixture(undefined, {setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
+  f.run(`show('app', true); state.current = 'one'; loadMessages = async () => {throw new Error('offline');};`);
+  polls.get(3000)(); await tick(); assert.equal(f.get('presence').textContent, 'Reconnecting…');
+  f.run('loadMessages = async () => {}'); polls.get(3000)(); await tick();
+  assert.equal(f.get('presence').textContent, 'Online');
+  f.run(`loadConversations = async () => {throw new Error('offline');};`);
+  polls.get(20000)(); await tick(); assert.equal(f.get('presence').textContent, 'Reconnecting…');
+});
+
+test('reply and code buttons copy literal text with local success and failure feedback', async () => {
+  const copied = [], timers = [];
+  const f = fixture(undefined, {navigator: {clipboard: {writeText: async value => copied.push(value)}},
+    setTimeout(fn) { timers.push(fn); return timers.length; }}); await tick();
+  f.context.reply = '**Hello**\n\n```js\nconst x = 1;\n```';
+  f.run(`state.current = 'one'; renderMessages([{id:1, role:'assistant', content:reply}]);`);
+  const find = (n, label) => n.title === label ? n : (n.children || []).map(c => find(c, label)).find(Boolean);
+  const reply = find(f.get('transcript'), 'Copy reply'), code = find(f.get('transcript'), 'Copy code');
+  assert.ok(reply); assert.ok(code);
+  const event = {stopPropagation() {}};
+  await reply.events.click(event); await code.events.click(event);
+  assert.deepEqual(copied, [f.context.reply, 'const x = 1;']);
+  assert.equal(reply.textContent, 'Copied'); assert.equal(code.textContent, 'Copied');
+  timers.splice(0).forEach(fn => fn()); assert.equal(reply.title, 'Copy reply');
+  f.context.navigator.clipboard.writeText = async () => {throw new Error('denied');};
+  await code.events.click(event); assert.equal(code.textContent, 'Copy failed');
+});
+
+test('jump to latest preserves scroll, marks changed replies and clears at the bottom', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; globalThis.rows = [{id:1,role:'assistant',content:'First'}]; renderMessages(rows);`);
+  const transcript = f.get('transcript'), jump = f.get('jump-latest');
+  transcript.scrollHeight = 1000; transcript.clientHeight = 200; transcript.scrollTop = 100;
+  transcript.events.scroll(); assert.equal(jump.classList.contains('hidden'), false);
+  f.run('renderMessages(rows)'); assert.equal(jump.classList.contains('unread'), false);
+  f.run(`rows.push({id:2,role:'assistant',content:'New reply'}); renderMessages(rows);`);
+  assert.equal(transcript.scrollTop, 100); assert.equal(jump.classList.contains('unread'), true);
+  jump.events.click(); assert.equal(transcript.scrollTop, 1000);
+  assert.equal(jump.classList.contains('hidden'), true); assert.equal(jump.classList.contains('unread'), false);
+  transcript.scrollTop = 750; transcript.events.scroll(); assert.equal(jump.classList.contains('hidden'), true);
+  f.run('signedOut()'); assert.equal(jump.classList.contains('hidden'), true);
+});
+
+test('job list poll failures reach the reconnecting status', async () => {
+  const f = fixture(); await tick();
+  f.run(`show('app', true); state.section = 'jobs'; state.selectedJob = 'one';
+    api = async () => { throw new Error('offline'); };
+    renderJobs = () => {}; renderJobDetail = () => {};`);
+  await f.run('refreshConnection(() => loadJobs())');
+  assert.equal(f.get('presence').textContent, 'Reconnecting…');
+  assert.ok(f.get('jobs-header').children.includes(f.get('presence')));
+  f.run(`api = async path => path === '/jobs' ? {jobs:[{id:'one'}]} : {runs:[]};`);
+  await f.run('refreshConnection(() => loadJobs())');
+  assert.equal(f.get('presence').textContent, 'Online');
+});
+
+test('phone reconnecting status follows the visible list and detail headers', async () => {
+  const f = fixture(); await tick();
+  f.run(`phoneWidth.matches = true; show('app', true); setConnection(false);`);
+  assert.ok(f.get('mobile-list-actions').children.includes(f.get('presence')));
+  f.run(`loadMessages = async () => {}; loadReasoning = () => {}; selectConversation('one');`);
+  assert.ok(f.get('chat-actions').children.includes(f.get('presence')));
+  f.get('back-to-list').events.click();
+  assert.equal(f.get('mobile-list-actions').children.at(-1), f.get('presence'));
+  f.run(`state.section = 'jobs'; renderJobs = () => {}; state.jobRuns.one = []; selectJob('one');`);
+  assert.equal(f.get('jobs-header').children.at(-1), f.get('presence'));
+  f.get('back-to-jobs').events.click();
+  assert.equal(f.get('mobile-list-actions').children.at(-1), f.get('presence'));
+});
+
+test('a notification received during boot survives the initial signed-out response', async () => {
+  let finish, message;
+  const f = fixture(() => new Promise(resolve => {finish = resolve;}),
+    {navigator: {serviceWorker: {addEventListener(type, fn) {message = fn;}}}});
+  message({data: {link: '?d=delivery'}});
+  finish({ok:true, json:async () => ({signed_in:false})}); await tick();
+  f.run(`globalThis.opened = ''; openLink = link => {opened = link;}; refreshIdentity = () => {}; loadConversations = async () => {};`);
+  await f.run('signedIn()'); assert.equal(f.run('opened'), '?d=delivery');
+});
+
+test('live reply chunks mark jump to latest without moving the reader', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one'; state.lastRows = []; state.live = {id:'one', text:'First chunk'};
+    state.liveNodes = {shownText:'First chunk'}; fillLive = live => {state.liveNodes.shownText = live.text;};`);
+  const transcript = f.get('transcript'), jump = f.get('jump-latest');
+  transcript.scrollHeight = 1000; transcript.clientHeight = 200; transcript.scrollTop = 100;
+  f.run('renderLive()'); assert.equal(jump.classList.contains('unread'), false);
+  f.run(`state.live.text += ' next chunk'; renderLive();`);
+  assert.equal(transcript.scrollTop, 100); assert.equal(jump.classList.contains('unread'), true);
+});
