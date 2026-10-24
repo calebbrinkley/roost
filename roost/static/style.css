@@ -296,6 +296,9 @@ button:disabled { cursor: default; }
 .swatch-rose i { background: #b8475f; }.swatch-amber i { background: #f2b544; }.swatch-slate i { background: #4b5563; }
 /* The colour input sits invisibly over the circle, so a tap opens the system picker on every platform. */
 .swatch-custom { position: relative; cursor: pointer; }
+/* Custom is a <label> (it wraps the colour picker); undo the settings form-label style so it lines up with the others. */
+.settings-detail .swatch-custom { display: grid; margin: 0; font-size: calc(12px * var(--text-scale)); font-weight: 400; }
+.settings-detail .swatch-custom.chosen { font-weight: 600; }
 .swatch-custom i { display: grid; place-items: center; color: var(--muted); background: var(--chip); font-size: calc(24px * var(--text-scale)); font-style: normal; line-height: 1; }
 .swatch-custom input { position: absolute; top: 0; left: 0; width: 44px; height: 44px; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
 .swatch-custom:focus-within { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: 12px; }
