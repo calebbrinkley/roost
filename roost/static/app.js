@@ -1328,7 +1328,10 @@ function openStream(id) {
     if (!ours() || !data || typeof data !== "object") return;
     // Every connection, reconnections included, starts with the turn so far.
     if (data.reset) {
-      if (state.live?.id !== id || state.live.started !== data.started) state.liveThoughtsOpen = true;
+      if (state.live?.id !== id || state.live.started !== data.started) {
+        state.liveThoughtsOpen = !window.roostTheme.collapseThinking();
+        state.liveNodes = null;
+      }
       state.live = { id, user: String(data.user ?? ""), started: data.started, thoughts: "", text: "", done: false };
     }
     if (state.live?.id !== id) return;
@@ -1385,7 +1388,7 @@ function scheduleLive() {
   state.liveFrame = frame(() => { state.liveFrame = 0; renderLive(); });
 }
 
-// Thoughts open while they are written (one closed stays closed for that turn), then the text.
+// Each turn starts with the device preference; a manual toggle lasts for that turn.
 function liveNodes(live) {
   const details = el("details", "thoughts");
   details.open = state.liveThoughtsOpen !== false;
@@ -2033,6 +2036,21 @@ function renderAppearance(detail) {
     sizes.append(button);
   }
   text.append(sizes);
+  const thinking = settingsSection(detail, "Thinking", "Applies to this device. New replies start with Thoughts collapsed; you can still open them while the reply is being written.");
+  const collapsed = window.roostTheme.collapseThinking();
+  const toggle = el("button", "job-toggle" + (collapsed ? "" : " off"));
+  toggle.type = "button"; toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", String(collapsed));
+  toggle.setAttribute("aria-label", "Keep thinking collapsed");
+  toggle.addEventListener("click", () => {
+    window.roostTheme.setCollapseThinking(!window.roostTheme.collapseThinking());
+    const chosen = window.roostTheme.collapseThinking();
+    toggle.className = "job-toggle" + (chosen ? "" : " off");
+    toggle.setAttribute("aria-checked", String(chosen));
+  });
+  const label = el("label", "job-enabled");
+  label.append(el("span", "", "Keep thinking collapsed"), toggle);
+  thinking.append(label);
   const accent = settingsSection(detail, "Accent colour", "Used for your messages, buttons and highlights on every device you sign in on.");
   const swatches = el("div", "swatches");
   swatches.setAttribute("role", "radiogroup"); swatches.setAttribute("aria-label", "Accent colour");

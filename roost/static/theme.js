@@ -1,12 +1,12 @@
 "use strict";
 
 (() => {
-  const key = "roost-theme", accentKey = "roost-accent", textKey = "roost-text-size";
+  const key = "roost-theme", accentKey = "roost-accent", textKey = "roost-text-size", thoughtsKey = "roost-collapse-thinking";
   const textSizes = ["small", "default", "large", "larger"];
   // The server says which presets exist; a name the stylesheet doesn't know shows the default colour.
   const preset = /^[a-z]{1,20}$/, custom = /^#[0-9a-f]{6}$/;
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
-  let choice, customAccent;
+  let choice, customAccent, collapseThinking = false;
   try {
     const saved = localStorage.getItem(key);
     if (saved === "light" || saved === "dark") choice = saved;
@@ -15,6 +15,7 @@
     if (preset.test(accent) || custom.test(accent)) setAccent(accent, false);
     const textSize = localStorage.getItem(textKey);
     if (textSizes.includes(textSize)) document.documentElement.dataset.textSize = textSize;
+    collapseThinking = localStorage.getItem(thoughtsKey) === "true";
   } catch { /* Keep the theme usable when storage is unavailable. */ }
 
   function current() { return choice || (systemDark.matches ? "dark" : "light"); }
@@ -75,6 +76,11 @@
       const size = textSizes.includes(name) ? name : "default";
       document.documentElement.dataset.textSize = size;
       remember(textKey, size === "default" ? undefined : size);
+    },
+    collapseThinking() { return collapseThinking; },
+    setCollapseThinking(collapsed) {
+      collapseThinking = collapsed;
+      remember(thoughtsKey, collapsed ? "true" : undefined);
     },
     setAccent,
   };
