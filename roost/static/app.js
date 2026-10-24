@@ -426,6 +426,8 @@ function holdToAct(node, act) {
 // in Hermes, so both the Delete button and a full swipe go through the confirmation sheet.
 const SWIPE_REVEAL = 88;
 const phoneWidth = window.matchMedia("(max-width: 700px)");
+// On touch screens, focusing the message field opens the on-screen keyboard; only the owner's tap should do that.
+const touchScreen = window.matchMedia("(pointer: coarse)");
 
 function setSwipeOpen(id) {
   state.swipeOpenId = id;
@@ -1199,7 +1201,7 @@ function newConversation() {
   showReasoning("default");
   $("app").classList.add("chat-open");
   renderConversations(); renderWelcome();
-  $("message").focus();
+  if (!touchScreen.matches) $("message").focus();
 }
 
 async function submitMessage(event) {
@@ -1258,7 +1260,7 @@ async function sendText(text, { voice = false } = {}) {
     sending.remove();
     if (scope.alive()) {
       state.busy = false; $("send").disabled = false;
-      if (view === state.viewEpoch && state.section === "messages") $("message").focus();
+      if (view === state.viewEpoch && state.section === "messages" && !touchScreen.matches) $("message").focus();
     }
   }
 }
