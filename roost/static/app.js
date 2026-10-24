@@ -8,6 +8,7 @@ const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false }),
   conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
+                         composerDrafts: null, composerKey: undefined,
                          lastRows: null, renderedConversation: null, shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
   approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
@@ -179,22 +180,47 @@ function viewScope(id = state.current) {
 // An error is news only while the step that met it is still current.
 function report(error, scope) { if (scope.alive()) notice(error.message); }
 
+const READ_TIMEOUT_MS = 15000, SEND_TIMEOUT_MS = 50000;
+const PENDING_CHECK_MS = 5000, PENDING_CHECK_LIMIT_MS = 120000;
+
 // Answers only the sign-in that asked: a response that arrives after a sign-out rejects instead.
 async function api(path, options = {}) {
   const scope = signInScope();
-  const response = await fetch("/api" + path, {
-    credentials: "same-origin",
-    headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
-    ...options,
-  });
-  let data;
-  try { data = await response.json(); } catch { data = {}; }
-  if (!scope.alive()) throw new Error("This request belongs to an earlier sign-in.");
-  if (!response.ok) {
-    if (response.status === 401 && path !== "/login" && path !== "/passkeys/login") { signedOut(); throw new Error("Please sign in again."); }
-    throw new Error(data.error || `Request failed (${response.status}).`);
+  const ms = !options.method || options.method === "GET" ? READ_TIMEOUT_MS
+    : options.method === "POST" && /^\/conversations(?:\/[^/]+\/messages)?$/.test(path) ? SEND_TIMEOUT_MS : 0;
+  let signal = options.signal, cleanup = () => {};
+  if (ms) {
+    const timer = AbortSignal.timeout(ms);
+    if (!signal) signal = timer;
+    else if (AbortSignal.any) signal = AbortSignal.any([signal, timer]);
+    else {
+      const controller = new AbortController(), caller = signal;
+      const abort = (event) => controller.abort(event.target.reason);
+      for (const source of [caller, timer]) {
+        if (source.aborted) controller.abort(source.reason);
+        else source.addEventListener("abort", abort, { once: true });
+      }
+      cleanup = () => { for (const source of [caller, timer]) source.removeEventListener("abort", abort); };
+      signal = controller.signal;
+    }
   }
-  return data;
+  try {
+    const response = await fetch("/api" + path, {
+      credentials: "same-origin",
+      headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
+      ...options,
+      signal,
+    });
+    let data;
+    try { data = await response.json(); } catch (error) { if (signal?.aborted) throw error; data = {}; }
+    if (!scope.alive()) throw new Error("This request belongs to an earlier sign-in.");
+    if (!response.ok) {
+      if (response.status === 401 && path !== "/login" && path !== "/passkeys/login") { signedOut(); throw new Error("Please sign in again."); }
+      const error = new Error(data.error || `Request failed (${response.status}).`);
+      error.status = response.status; error.pending = data.pending === true; throw error;
+    }
+    return data;
+  } finally { cleanup(); }
 }
 
 function signedOut(clearLink = true) {
@@ -207,6 +233,8 @@ function signedOut(clearLink = true) {
   $("presence").classList.remove("reconnecting");
   closeStream();
   stopRecording(true); state.voiceDraft = false; state.player?.pause();
+  state.sentMessages.forEach(stopSendCheck);
+  try { localStorage.removeItem("roost.composer-drafts"); } catch { /* Storage may be unavailable. */ }
   Object.assign(state, freshSlices());
   updateLatest();
   renderApprovals();
@@ -594,14 +622,16 @@ async function deleteConversation() {
   state.sheetBusy = true;
   try {
     await api(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    state.sentMessages.filter((sent) => sent.id === id).forEach(stopSendCheck);
     state.sentMessages = state.sentMessages.filter((sent) => sent.id !== id);
+    saveComposer("", id);
     // The server's rows shift down by one, so the next page starts one row earlier. A load
     // started before the deletion could bring the row back or reuse the old offset: drop it.
     if (state.conversations.some((row) => row.id === id)) state.conversationOffset = Math.max(0, state.conversationOffset - 1);
     state.conversationRequest = state.conversationRequest + 1;
     state.conversations = state.conversations.filter((row) => row.id !== id);
     if (state.swipeOpenId === id) state.swipeOpenId = null;
-    if (state.current === id) { stopRecording(true); state.voiceDraft = false; state.viewEpoch++; state.current = null; $("app").classList.remove("chat-open"); renderWelcome(); }
+    if (state.current === id) { stopRecording(true); state.voiceDraft = false; state.viewEpoch++; state.current = null; restoreComposer(); $("app").classList.remove("chat-open"); renderWelcome(); }
     $("conversation-sheet").close(); renderConversations(); notice("Conversation deleted.");
   } catch (error) { if (scope.alive()) $("sheet-confirm-error").textContent = error.message; }
   finally { if (scope.alive()) state.sheetBusy = false; }
@@ -715,6 +745,12 @@ function finishLoadingConversations(data, rows, more) {
 }
 
 function renderWelcome() {
+  if (state.composerKey === undefined) restoreComposer();
+  if (state.sentMessages.some((item) => item.id === null && item.failed)) {
+    $("chat-title").textContent = "New conversation";
+    show("origin-badge", false);
+    renderMessages([]); return;
+  }
   show("chat-settings", false);
   show("jump-latest", false); $("jump-latest").classList.remove("unread");
   const transcript = $("transcript"); transcript.replaceChildren();
@@ -728,6 +764,7 @@ function renderWelcome() {
     starter.append(el("b", "", title), el("span", "", hint));
     starter.addEventListener("click", () => {
       $("message").value = text;
+      saveComposer();
       $("composer").classList.add("has-text");
       $("message").focus();
     });
@@ -899,7 +936,7 @@ function withSentMessages(rows, sent, current) {
   const savedAs = {};
   for (const row of rows) {
     if (row.role !== "user" || typeof row.id !== "number") continue;
-    const candidates = pending.filter((item) => item.id === current && row.id > item.after);
+    const candidates = pending.filter((item) => (!item.failed || item.pending) && item.id === current && row.id > item.after);
     const saved = messageText(row);
     let combined = "";
     for (let index = 0; index < candidates.length; index++) {
@@ -907,16 +944,17 @@ function withSentMessages(rows, sent, current) {
       if (combined === saved) {
         // Hermes can merge a queued burst into one user row. Consume exactly that prefix once.
         const matched = new Set(candidates.slice(0, index + 1));
-        for (const item of matched) savedAs[item.key] = row.id;
-        pending = pending.filter((item) => !matched.has(item))
-          .map((item) => item.id === current ? { ...item, after: Math.max(item.after, row.id) } : item);
+        for (const item of matched) { savedAs[item.key] = row.id; stopSendCheck(item); }
+        pending = pending.filter((item) => !matched.has(item));
+        // Keep item identity: its check timer follows it until it is saved or discarded.
+        for (const item of pending) if ((!item.failed || item.pending) && item.id === current) item.after = Math.max(item.after, row.id);
         break;
       }
       if (!saved.startsWith(combined)) break;
     }
   }
   return { sent: pending, savedAs, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
-    role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: true,
+    role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
   }))] };
 }
 
@@ -945,7 +983,7 @@ function conversationView({ rows, sent, current, live, server }) {
       if (!liveAfter.local_sent) all = [...all, liveAfter];
     }
   }
-  const unsaved = added.sent.some((item) => item.id === current && item.since > (server.at ?? 0));
+  const unsaved = added.sent.some((item) => !item.failed && item.id === current && item.since > (server.at ?? 0));
   return { rows: all, sent: added.sent, savedAs: added.savedAs, live, liveAfter, after,
            working: Boolean(live && !live.done) || Boolean(server.working) || unsaved };
 }
@@ -999,8 +1037,23 @@ function renderMessages(rows) {
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
-      const status = row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
-      transcript.append(el("div", "under right", shown ? `${status} - ${time}` : status));
+      const status = row.local_pending ? "Sending…" : row.local_failed ? "Not sent" : row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
+      const under = el("div", "under right" + (row.local_failed ? " failed-send" : ""));
+      under.append(el("span", "", shown ? `${status} - ${time}` : status));
+      if (row.local_failed) {
+        const item = state.sentMessages.find((item) => item.key === row.id);
+        const retry = el("button", "send-action", item.retrying ? "Checking…" : item.pending ? "Check again" : "Retry");
+        const remove = el("button", "send-action", "Delete");
+        retry.type = remove.type = "button"; retry.disabled = remove.disabled = Boolean(item.retrying);
+        retry.addEventListener("click", () => retryMessage(item));
+        remove.addEventListener("click", () => {
+          stopSendCheck(item);
+          state.sentMessages = state.sentMessages.filter((sent) => sent !== item);
+          if (state.current) renderMessages(state.lastRows || []); else renderWelcome();
+        });
+        under.append(retry, remove);
+      }
+      transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
       if (row.id != null) under.append(playButton(row.id));
@@ -1045,10 +1098,12 @@ function updateLatest(changed = false) {
 }
 
 async function selectConversation(id, source) {
+  if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.current = id;
+  restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
   placePresence();
@@ -1062,7 +1117,10 @@ async function selectConversation(id, source) {
   $("transcript").replaceChildren(el("p", "empty-transcript", "Loading conversation…"));
   show("jump-latest", false);
   showReasoning("default"); loadReasoning(id);
-  try { await loadMessages(id); } catch (error) { notice(error.message); }
+  try { await loadMessages(id); } catch (error) {
+    if (state.current === id && state.sentMessages.some((item) => item.id === id && item.failed)) renderMessages([]);
+    notice(error.message);
+  }
 }
 
 async function loadMessages(id = state.current) {
@@ -1279,9 +1337,11 @@ async function changeReasoning() {
 }
 
 function newConversation() {
+  if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   leaveLive();
   state.current = null;
+  restoreComposer();
   state.draft = true;
   newDraftSeed();
   showReasoning("default");
@@ -1301,55 +1361,140 @@ async function submitMessage(event) {
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
 
-// Sends what was typed, or a voice message's transcript (`voice`), whose reply is then read aloud.
-async function sendText(text, { voice = false } = {}) {
-  if (state.busy) return;
-  const oldId = state.current, scope = signInScope(), here = viewScope(oldId), view = state.viewEpoch;
-  const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
-  let accepted = false;
-  state.voiceDraft = false;
-  state.busy = true; $("send").disabled = true; $("message").value = "";
-  $("composer").classList.remove("has-text");
-  const sending = el("p", "empty-transcript", "Sending…");
-  $("transcript").append(sending);
-  $("transcript").scrollTop = $("transcript").scrollHeight;
+// Plain-text drafts survive page eviction; storage being blocked only loses persistence.
+function composerDrafts() {
+  if (state.composerDrafts === null) {
+    let rows;
+    try { rows = JSON.parse(localStorage.getItem("roost.composer-drafts")); } catch { /* Use memory only. */ }
+    state.composerDrafts = Array.isArray(rows) ? rows.filter((row) => row && typeof row.id === "string" &&
+      typeof row.text === "string" && row.text.length <= 16000).slice(-50) : [];
+  }
+  return state.composerDrafts;
+}
+
+function saveComposer(text = $("message").value, id = state.current) {
+  const key = id || "new";
+  state.composerDrafts = composerDrafts().filter((row) => row.id !== key);
+  if (text) state.composerDrafts.push({ id: key, text: text.slice(0, 16000) });
+  state.composerDrafts = state.composerDrafts.slice(-50);
+  try { localStorage.setItem("roost.composer-drafts", JSON.stringify(state.composerDrafts)); } catch { /* Use memory only. */ }
+  if (id === state.current) state.composerKey = id || "new";
+}
+
+function restoreComposer() {
+  state.composerKey = state.current || "new";
+  $("message").value = composerDrafts().find((row) => row.id === state.composerKey)?.text || "";
+  $("composer").classList.toggle("has-text", Boolean($("message").value.trim()));
+}
+
+// One cryptographic identity per send, independent of its text and all later retries.
+function sendId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function stopSendCheck(item) { clearTimeout(item.checkTimer); item.checkTimer = null; }
+
+function checkSendLater(item) {
+  stopSendCheck(item);
+  const remaining = PENDING_CHECK_LIMIT_MS - (Date.now() - item.since), scope = signInScope();
+  if (!item.pending || !state.sentMessages.includes(item) || remaining <= 0) return;
+  item.checkTimer = setTimeout(async () => {
+    item.checkTimer = null;
+    if (!scope.alive() || !item.pending || !state.sentMessages.includes(item) || Date.now() - item.since >= PENDING_CHECK_LIMIT_MS) return;
+    try { await retryMessage(item, true); }
+    finally { if (scope.alive()) checkSendLater(item); }
+  }, Math.min(PENDING_CHECK_MS, remaining));
+}
+
+async function retryMessage(item, automatic = false) {
+  if (!item || item.retrying || state.busy || voice.take) return;
+  stopSendCheck(item);
+  const scope = signInScope();
+  item.retrying = true;
+  if (state.current === item.id) renderMessages(state.lastRows || []);
   try {
-    const result = oldId
-      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: state.reasoning || "default" }) });
-    accepted = true;
-    if (here.alive()) { state.current = result.session_id; state.draft = false; }
-    const key = `sent-${state.sentKey = state.sentKey + 1}`;
-    state.sentMessages.push({ id: result.session_id, text, since: Date.now(), after, key });
-    if (voice) state.voiceReply = { id: result.session_id, key, row: null, since: Date.now() };
-    if (state.current === result.session_id) {
-      closeStream(); state.live = null; state.liveNodes = null;
-      openStream(result.session_id);
+    if (!state.sentMessages.includes(item)) return;
+    if (item.voice && !automatic) unlockPlayer();
+    await sendText(item.text, { voice: item.voice, retry: item });
+  } catch (error) { report(error, scope); }
+  finally {
+    if (scope.alive()) {
+      item.retrying = false;
+      if (state.current === item.id) renderMessages(state.lastRows || []);
     }
-    nextWorkingVerb();
-    if (state.current === result.session_id) renderMessages(state.lastRows || []);
-    // A failed refresh must never turn an accepted message back into an unsent draft.
-    const updates = await Promise.allSettled([loadConversations(), loadMessages()]);
+  }
+}
+
+function acceptMessage(item, id, here) {
+  stopSendCheck(item);
+  const oldId = item.id;
+  if (!oldId) {
+    const draft = composerDrafts().find((row) => row.id === "new")?.text || "";
+    saveComposer("", null);
+    if (draft) saveComposer(draft, id);
+    for (const sent of state.sentMessages) if (sent.id === null) sent.id = id;
+  }
+  if (here.alive()) {
+    if (!oldId) { state.current = id; saveComposer(); }
+    state.draft = false;
+  }
+  item.id = id; item.failed = false; item.pending = false;
+  if (item.voice) state.voiceReply = { id, key: item.key, row: null, since: item.since };
+  if (state.current === id) {
+    closeStream(); state.live = null; state.liveNodes = null; openStream(id);
+    nextWorkingVerb(); renderMessages(state.lastRows || []);
+  }
+  const scope = signInScope();
+  // Refreshing can take its own timeout; the composer is already free for the next message.
+  Promise.allSettled([loadConversations(), loadMessages()]).then((updates) => {
     if (scope.alive() && updates.some((update) => update.status === "rejected")) {
       notice("Message sent. The conversation could not refresh; it will retry shortly.");
     }
-  } catch (error) {
-    if (!scope.alive()) return;
-    if (!accepted && here.alive() && !$("message").value) {
-      $("message").value = text; state.voiceDraft = voice;
-      $("composer").classList.add("has-text");
-    }
-    notice(error.message);
-    if (here.alive()) {
-      if (oldId) await loadMessages(oldId).catch(() => {}); else renderWelcome();
-    }
-  } finally {
-    sending.remove();
-    if (scope.alive()) {
-      state.busy = false; $("send").disabled = false;
-      if (view === state.viewEpoch && state.section === "messages" && !touchScreen.matches) $("message").focus();
-    }
+  });
+}
+
+// Sends the composer or one failed row, without consuming a newer draft on Retry.
+async function sendText(text, { voice = false, retry = null } = {}) {
+  if (state.busy) return;
+  const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
+  const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
+  const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
+    request_id: sendId(), reasoning: state.reasoning || "default", since: Date.now() };
+  if (!retry) {
+    state.voiceDraft = false; $("message").value = ""; saveComposer();
+    $("composer").classList.remove("has-text");
   }
+  state.busy = true; $("send").disabled = true;
+  const sending = el("p", "empty-transcript", "Sending…");
+  $("transcript").append(sending);
+  $("transcript").scrollTop = $("transcript").scrollHeight;
+  let result, failure;
+  try {
+    result = oldId
+      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id }) })
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id }) });
+  } catch (error) { failure = error; }
+  finally {
+    if (scope.alive()) { state.busy = false; $("send").disabled = false; }
+  }
+  try {
+    if (!scope.alive()) return;
+    if (retry && !state.sentMessages.includes(retry)) return;
+    if (!retry) state.sentMessages.push(item);
+    if (result) {
+      acceptMessage(item, result.session_id, here);
+    } else {
+      item.failed = true;
+      item.pending = Boolean(failure.pending || failure.status >= 500 || ["TimeoutError", "AbortError", "TypeError"].includes(failure.name));
+      report(failure, scope);
+      if (state.current === oldId) renderMessages(state.lastRows || []);
+      checkSendLater(item);
+    }
+  } finally { sending.remove(); }
 }
 
 function jobValue(job, key) { return job[key] == null ? "" : String(job[key]); }
@@ -2253,6 +2398,7 @@ function deleteEverything(kind, input) {
   return withSettingsBusy(async () => {
     const result = await api("/" + kind, { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
     if (kind === "conversations") {
+      state.sentMessages.forEach(stopSendCheck);
       Object.assign(state, { conversations: [], current: null, turn: null, working: false, sentMessages: [], conversationOffset: 0, conversationsMore: false });
       state.viewEpoch++; renderConversations(); renderWelcome();
     } else {
@@ -2459,6 +2605,7 @@ $("conversation-sheet").addEventListener("click", (event) => {
   if (event.target === $("conversation-sheet") && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) $("conversation-sheet").close();
 });
 $("message").addEventListener("input", () => {
+  saveComposer();
   const hasText = Boolean($("message").value.trim());
   $("composer").classList.toggle("has-text", hasText);
   if (!hasText) state.voiceDraft = false;
@@ -2576,7 +2723,7 @@ async function sendRecording(recording, take) {
     if (!text) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
     const draft = [$("message").value.trimEnd(), text].filter(Boolean).join("\n");
     if (draft.length > $("message").maxLength) { notice("The transcript won’t fit in this message. Shorten the draft and try a shorter recording."); return; }
-    $("message").value = draft; state.voiceDraft = true;
+    $("message").value = draft; state.voiceDraft = true; saveComposer();
     $("composer").classList.add("has-text");
   } catch (error) { if (currentTake(take)) notice(error.message); }
   finally { if (voice.take === take) { voice.take = null; recordingUI(); } }

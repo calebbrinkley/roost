@@ -179,6 +179,9 @@ button:disabled { cursor: default; }
 .transcript > .message.from-you:not(:first-child) { margin-top: calc(9px + var(--under-line)); }
 .transcript > .day + .message.from-you { margin-top: 0; }
 .under.right { align-self: flex-end; }
+.failed-send { display: flex; align-items: center; gap: 18px; }
+.send-action { min-width: 44px; padding: 0; border: 0; background: transparent; color: var(--accent-text); font: inherit; line-height: inherit; }
+.send-action:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .thoughts { align-self: flex-start; max-width: 88%; min-width: 0; padding: 6px 12px; border: 1px solid var(--line); border-radius: 14px; color: var(--muted); background: var(--frame); font-size: calc(13.5px * var(--text-scale)); }
 .thoughts summary { width: max-content; padding: 2px 0; cursor: pointer; list-style: none; color: var(--ink); font-weight: 600; font-size: calc(13px * var(--text-scale)); }
 .thoughts summary::-webkit-details-marker { display: none; }
@@ -356,6 +359,8 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   /* A 44 px touch target without making the reply's info row taller. */
   .play-reply { position: relative; }
   .play-reply::after { content: ""; position: absolute; inset: -11px -9px; }
+  .send-action { position: relative; }
+  .send-action::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 44px; transform: translateY(-50%); }
   /* Sticky, not relative: since iOS 26 a Home Screen web app blurs its top edge (status bar and ~40pt below)
      unless a full-width fixed or sticky box with a plain background covers it. Nothing scrolls the shell, so it stays put. */
   .shell { padding-top: env(safe-area-inset-top); height: 100dvh; min-height: 0; overflow: hidden; flex-direction: column; position: sticky; top: 0;

@@ -66,9 +66,10 @@ def _messages(result) -> dict:
 
 
 class HermesError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, not_accepted: bool = False):
         self.status = status
         self.message = message
+        self.not_accepted = not_accepted
         super().__init__(message)
 
 
@@ -289,8 +290,9 @@ class Hermes:
         Busy-session acknowledgements call follow(session_id, None): polling owns the overlapping turns.
         `reasoning` is a level to set for this conversation first ("default" restores Hermes's own);
         `applied(level)` is called once Hermes has accepted it."""
-        ws = await self._socket()
+        ws, submitting = None, False
         try:
+            ws = await self._socket()
             first_method = "session.resume" if stored_id else "session.create"
             first_params = ({"session_id": stored_id, "omit_messages": True,
                              "close_on_disconnect": False} if stored_id else
@@ -304,15 +306,23 @@ class Hermes:
                 applied(reasoning)
             # The turn may start streaming before prompt.submit answers; keep those frames.
             early = []
+            submitting = True
             submitted = await self._rpc_on_socket(ws, 2, "prompt.submit", {"session_id": runtime_id, "text": text}, early)
             session_id = first.get("stored_session_id") or stored_id or runtime_id
             if not isinstance(session_id, str) or not session_id:
                 raise HermesError(502, "Hermes returned an invalid conversation identifier.")
         except (ClientError, asyncio.TimeoutError, ValueError) as exc:
-            await ws.close()
-            raise HermesError(503, "Hermes chat is unavailable.") from exc
+            if ws is not None:
+                await ws.close()
+            raise HermesError(503, "Hermes chat is unavailable.", not_accepted=not submitting) from exc
+        except HermesError as exc:
+            exc.not_accepted = exc.not_accepted or not submitting
+            if ws is not None:
+                await ws.close()
+            raise
         except BaseException:
-            await ws.close()
+            if ws is not None:
+                await ws.close()
             raise
         if submitted.get("status") in {"queued", "steered", "redirected"}:
             # This socket can still receive the OLD turn's completion. Do not label it as the follow-up.
@@ -405,7 +415,9 @@ class Hermes:
                         await Hermes._unsupported(ws, frame)
                     continue
                 if "error" in frame:
-                    raise HermesError(502, "Hermes rejected the chat request.")
+                    code = frame["error"].get("code") if isinstance(frame["error"], dict) else None
+                    rejected = isinstance(code, int) and (400 <= code < 500 or 4000 <= code < 5000)
+                    raise HermesError(502, "Hermes rejected the chat request.", not_accepted=rejected)
                 result = frame.get("result")
                 if not isinstance(result, dict):
                     raise HermesError(502, "Hermes returned invalid chat data.")
