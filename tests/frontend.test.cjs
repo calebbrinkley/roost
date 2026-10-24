@@ -1578,3 +1578,94 @@ test('live reply chunks mark jump to latest without moving the reader', async ()
   f.run(`state.live.text += ' next chunk'; renderLive();`);
   assert.equal(transcript.scrollTop, 100); assert.equal(jump.classList.contains('unread'), true);
 });
+
+test('loading earlier messages prepends rows without moving the reader, and polls retain them', async () => {
+  const f = fixture(); await tick();
+  const transcript = f.get('transcript');
+  Object.defineProperty(transcript, 'scrollHeight', {get() { return this.children.length * 100; }});
+  transcript.clientHeight = 100;
+  f.run(`state.current = 'one'; globalThis.calls = [];
+    api = async path => {
+      calls.push(path);
+      if (path.endsWith('/approvals')) return {approvals:[]};
+      if (path.includes('?before=')) return {messages:[{id:1,role:'user',content:'earlier'}],has_older:false};
+      return {messages:[{id:2,role:'assistant',content:'newest'}],has_older:true};
+    };`);
+  await f.run('loadMessages()');
+  const button = transcript.children[0];
+  assert.equal(button.textContent, 'Load earlier messages');
+  transcript.scrollTop = 35;
+  const height = transcript.scrollHeight;
+  await f.run('loadEarlierMessages()');
+  assert.equal(transcript.scrollTop, 35 + transcript.scrollHeight - height);
+  assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [1,2]);
+  assert.ok(f.run(`calls.includes('/conversations/one?before=2&limit=500')`));
+  f.run(`api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+    {messages:[{id:2,role:'assistant',content:'updated'},{id:3,role:'user',content:'next'}],has_older:true};`);
+  const top = transcript.scrollTop;
+  await f.run('loadMessages()');
+  assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [1,2,3]);
+  assert.equal(f.run('state.lastRows[1].content'), 'updated');
+  assert.equal(transcript.scrollTop, top);
+  assert.equal(transcript.children.some(n => n.textContent === 'Load earlier messages'), false);
+  f.run('signedOut()');
+  assert.equal(f.run('state.messageHistory'), null);
+});
+
+test('an older history page cannot follow the reader to another conversation', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one';
+    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+      {messages:[{id:2,role:'user',content:'one'}],has_older:true};`);
+  await f.run('loadMessages()');
+  f.run(`api = () => new Promise(resolve => { globalThis.finishHistory = resolve; });`);
+  const pending = f.run('loadEarlierMessages()');
+  f.run(`api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+    path.endsWith('/settings') ? {} : {messages:[{id:5,role:'user',content:'two'}],has_older:false};`);
+  await f.run(`selectConversation('two')`);
+  f.run(`finishHistory({messages:[{id:1,role:'user',content:'private old'}],has_older:false})`);
+  await pending;
+  assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [5]);
+  assert.equal(f.run('state.messageHistory.id'), 'two');
+});
+
+test('a history page arriving during selection preserves position when selection clears', async () => {
+  const f = fixture(); await tick();
+  const transcript = f.get('transcript');
+  Object.defineProperty(transcript, 'scrollHeight', {get() { return this.children.length * 100; }});
+  transcript.clientHeight = 100;
+  f.run(`state.current = 'one'; globalThis.selected = false;
+    window.getSelection = () => ({isCollapsed:!selected,rangeCount:1,getRangeAt:() => ({intersectsNode:() => true})});
+    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+      {messages:[{id:2,role:'user',content:'newest'}],has_older:true};`);
+  await f.run('loadMessages()');
+  transcript.scrollTop = 25;
+  const height = transcript.scrollHeight;
+  f.run(`api = () => new Promise(resolve => { globalThis.finishHistory = resolve; });`);
+  const pending = f.run('loadEarlierMessages()');
+  f.run(`selected = true; finishHistory({messages:[{id:1,role:'user',content:'earlier'}],has_older:false})`);
+  await pending;
+  assert.equal(transcript.scrollHeight, height);
+  f.run('selected = false; document.events.selectionchange()');
+  assert.equal(transcript.scrollTop, 25 + transcript.scrollHeight - height);
+});
+
+test('scrolling to the transcript top loads one history page at a time and can retry', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.current = 'one';
+    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+      {messages:[{id:2,role:'user',content:'newest'}],has_older:true};`);
+  await f.run('loadMessages()');
+  f.run(`globalThis.historyCalls = 0;
+    api = () => { historyCalls++; return new Promise((resolve,reject) => { globalThis.finishHistory = resolve; globalThis.failHistory = reject; }); };`);
+  f.get('transcript').scrollTop = 0;
+  f.get('transcript').events.scroll(); f.get('transcript').events.scroll();
+  assert.equal(f.run('historyCalls'), 1);
+  f.run(`failHistory(new Error('offline'))`); await tick();
+  assert.equal(f.run('state.messageHistory.loading'), false);
+  f.get('transcript').events.scroll();
+  assert.equal(f.run('historyCalls'), 2);
+  f.run(`finishHistory({messages:[],has_older:false})`); await tick();
+  f.get('transcript').events.scroll();
+  assert.equal(f.run('historyCalls'), 2);
+});

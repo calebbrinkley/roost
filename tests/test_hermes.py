@@ -8,6 +8,7 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -86,6 +87,27 @@ class DemoHermesTests(Upstream):
                 await call()
             self.assertIn(caught.exception.status, {400, 404})
         self.assertEqual((await self.hermes.job("job_morning"))["state"], "scheduled")
+
+
+class HistoryTests(Upstream):
+    async def test_older_messages_reaches_beyond_the_newest_500_rows(self):
+        sessions, messages, jobs = demo.sample_data()
+        messages["roost_benchmark"] = [{"role": "user", "content": str(i)} for i in range(1001)]
+        with patch.object(demo, "sample_data", return_value=(sessions, messages, jobs)):
+            hermes = await self.connect(demo.mock_hermes())
+        newest = await hermes.messages("roost_benchmark")
+        self.assertEqual([row["id"] for row in newest["messages"]], list(range(502, 1002)))
+        page = await hermes.older_messages("roost_benchmark", before=502, limit=500)
+        self.assertEqual([row["id"] for row in page["messages"]], list(range(2, 502)))
+        self.assertTrue(page["has_older"])
+        exact = await hermes.older_messages("roost_benchmark", before=501, limit=500)
+        self.assertEqual([row["id"] for row in exact["messages"]], list(range(1, 501)))
+        self.assertFalse(exact["has_older"])
+        self.assertEqual(await hermes.older_messages("roost_benchmark", before=1, limit=500),
+                         {"messages": [], "has_older": False})
+        first = await hermes.older_messages("roost_benchmark", before=2, limit=500)
+        self.assertEqual([row["id"] for row in first["messages"]], [1])
+        self.assertFalse(first["has_older"])
 
 
 class ResponseVariantTests(Upstream):
