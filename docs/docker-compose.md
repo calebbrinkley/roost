@@ -25,6 +25,7 @@ Use a private text editor to put the dashboard password in `hermes-password` and
 | Setting | Value |
 | --- | --- |
 | `ROOST_PUBLIC_ORIGIN` | Your exact private **HTTPS** browser origin, with no path or trailing slash. |
+| `ROOST_PUSH_SUBJECT` | Optional Web Push subject: an **HTTPS** origin or **mailto:** address, used when your browser origin's host name is private (Apple's push service rejects it). |
 | `ROOST_HERMES_URL` | Hermes dashboard URL reachable **from the container**. |
 | `ROOST_HERMES_USERNAME` | Dashboard password-provider username. |
 | `ROOST_HERMES_PASSWORD_SOURCE` | Absolute host path to the private `hermes-password` file. |

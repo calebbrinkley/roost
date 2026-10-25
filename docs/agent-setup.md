@@ -23,6 +23,7 @@ For Compose, complete its guide and then continue at [verification](#4-verify-be
 | --- | --- |
 | `ROOST_STATE_DIR` | The same absolute state directory for password setup and every service start. |
 | `ROOST_PUBLIC_ORIGIN` | Exact browser origin: private HTTPS for other devices; `http://127.0.0.1:8787` is allowed for a local check. No path or trailing slash. |
+| `ROOST_PUSH_SUBJECT` | Optional: the Web Push subject (an HTTPS origin or mailto: address) when the origin's host name is private, so push services such as Apple's still accept Roost's signed tokens. |
 | `ROOST_HERMES_URL` | Reachable Hermes dashboard base URL, as seen from the Roost process. Loopback refers to that process's host or container. |
 | `ROOST_HERMES_USERNAME` | Existing dashboard password-provider username. |
 | `ROOST_HERMES_PASSWORD_FILE` | Absolute path to a private file outside the checkout containing the dashboard password. |

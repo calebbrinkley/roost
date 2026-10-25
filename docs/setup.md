@@ -86,6 +86,7 @@ Tap or click an assistant reply to show its timestamp and measurements. Input to
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `ROOST_PUBLIC_ORIGIN` | Exact browser origin; HTTPS required except for local HTTP previews. | Required |
+| `ROOST_PUSH_SUBJECT` | Optional Web Push (`sub`) subject: an `https://` origin or `mailto:` address. Set it when `ROOST_PUBLIC_ORIGIN` uses a private host name such as `.internal`, which Apple's push service rejects (`403 BadJwtToken`). | Unset (the origin) |
 | `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
 | `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
 | `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
