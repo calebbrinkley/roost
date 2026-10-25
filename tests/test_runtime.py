@@ -874,6 +874,33 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {**config, "ROOST_PUBLIC_ORIGIN": origin}), self.assertRaises(ValueError):
                 server.create_app()
 
+    async def test_push_subject_env_var(self):
+        config = {"ROOST_STATE_DIR": str(self.state), "ROOST_HERMES_URL": "http://127.0.0.1:1",
+                  "ROOST_HERMES_USERNAME": "demo", "ROOST_HERMES_PASSWORD_FILE": str(self.state / "password")}
+        # Unset and empty keep the current expression: the origin, or https://localhost for a local preview.
+        for subject in (None, ""):
+            env = dict(config)
+            if subject is not None:
+                env["ROOST_PUSH_SUBJECT"] = subject
+            with patch.dict(os.environ, {**env, "ROOST_PUBLIC_ORIGIN": "https://roost.example.invalid"}):
+                app = server.create_app()
+                self.assertEqual(app["push"].subject, "https://roost.example.invalid")
+                app["sessions"].close()
+        # A valid https: or mailto: value becomes the subject, overriding the origin.
+        for subject in ("https://roost.example.com", "mailto:roost@example.com"):
+            with patch.dict(os.environ, {**config, "ROOST_PUBLIC_ORIGIN": "https://roost.example.invalid",
+                                          "ROOST_PUSH_SUBJECT": subject}):
+                app = server.create_app()
+                self.assertEqual(app["push"].subject, subject)
+                app["sessions"].close()
+        # Invalid values fail at startup, naming the variable.
+        for subject in ("http://roost.example.com", "https://roost.example.com/path",
+                        "https://roost.example.com bad", "mailto:"):
+            with patch.dict(os.environ, {**config, "ROOST_PUBLIC_ORIGIN": "https://roost.example.invalid",
+                                          "ROOST_PUSH_SUBJECT": subject}), self.assertRaises(ValueError) as raised:
+                server.create_app()
+            self.assertIn("ROOST_PUSH_SUBJECT", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

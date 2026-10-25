@@ -13,6 +13,7 @@ services:
       ROOST_PUBLIC_ORIGIN: "${ROOST_PUBLIC_ORIGIN:?Set your private HTTPS browser origin}"
       ROOST_HERMES_URL: "${ROOST_HERMES_URL:?Set a dashboard URL reachable from the container}"
       ROOST_HERMES_USERNAME: "${ROOST_HERMES_USERNAME:?Set your dashboard username}"
+      ROOST_PUSH_SUBJECT: "${ROOST_PUSH_SUBJECT:-}"
       ROOST_HERMES_PASSWORD_FILE: /run/secrets/hermes_password
       ROOST_STATE_DIR: /var/lib/roost
       ROOST_REVISION: "${ROOST_REVISION:-}"

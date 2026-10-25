@@ -1056,6 +1056,20 @@ def create_app() -> web.Application:
         origin = str(URL(origin).origin())
     except ValueError:
         raise ValueError("ROOST_PUBLIC_ORIGIN has an invalid port.") from None
+    # An explicit VAPID subject overrides the origin (Apple's push service rejects private host names).
+    subject = os.environ.get("ROOST_PUSH_SUBJECT", "")
+    if subject:
+        if subject.startswith("mailto:"):
+            if not subject.removeprefix("mailto:") or any(char.isspace() for char in subject):
+                raise ValueError("ROOST_PUSH_SUBJECT must be an https URL or a mailto: address.")
+        else:
+            parsed = urlsplit(subject)
+            if parsed.scheme != "https" or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or not parsed.hostname or any(char.isspace() for char in subject):
+                raise ValueError("ROOST_PUSH_SUBJECT must be an https URL or a mailto: address.")
+            try:
+                subject = str(URL(subject).origin())
+            except ValueError:
+                raise ValueError("ROOST_PUSH_SUBJECT has an invalid port.") from None
     state = Path(os.environ.get("ROOST_STATE_DIR", "./.roost-state"))
     password_file = state / "password.hash"
     password_file.read_text(encoding="utf-8")  # fail at startup, not at first sign-in, if it is missing
@@ -1084,7 +1098,9 @@ def create_app() -> web.Application:
     app["chats"] = Chats(app["sessions"].db)
     app["reply_usage"] = reply_usage.ReplyUsage(app["sessions"].db)
     app["deliveries"] = Deliveries(app["sessions"].db, state / "delivery-token")
-    app["push"] = Push(app["sessions"].db, state / "vapid.pem", origin if origin.startswith("https://") else "https://localhost")
+    if not subject:
+        subject = origin if origin.startswith("https://") else "https://localhost"
+    app["push"] = Push(app["sessions"].db, state / "vapid.pem", subject)
     app["watches"], app["presence"], app["live"], app["speech"], app["speech_pending"] = {}, {}, {}, OrderedDict(), {}
     app["send_requests"] = OrderedDict()
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
