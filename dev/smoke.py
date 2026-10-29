@@ -3,6 +3,7 @@
 import asyncio
 import json
 import secrets
+import sys
 import os
 import socket
 import tempfile
@@ -304,4 +305,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from native_smoke import run as native_smoke
+    if "--native" not in sys.argv:
+        asyncio.run(main())
+    asyncio.run(native_smoke())

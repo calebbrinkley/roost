@@ -24,6 +24,7 @@ class OpenAIFake:
         self.models = ["example-model", "another-model"]
         self.requests = []
         self.delay = 0
+        self.chunk_delay = 0
         self.completion = {"choices": [{"message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
                            "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
         app = web.Application()
@@ -64,7 +65,7 @@ class OpenAIFake:
                 size = self.chunk_sizes[index % len(self.chunk_sizes)]
                 await stream.write(self.frames[offset:offset + size])
                 offset, index = offset + size, index + 1
-                await asyncio.sleep(0)
+                await asyncio.sleep(self.chunk_delay)
             await stream.write_eof()
         except ConnectionResetError:
             pass

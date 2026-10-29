@@ -57,13 +57,16 @@ def _models(models, default_model) -> list[dict]:
         raise ServerError("Choose at most 200 curated models.")
     cleaned, seen = [], set()
     for model in models:
-        if not isinstance(model, dict) or set(model) != {"id", "display_name", "enabled", "thinking_mode"}:
+        if not isinstance(model, dict) or (set(model) - {"context_tokens"}) != {"id", "display_name", "enabled", "thinking_mode"}:
             raise ServerError("Each model needs an id, display_name, enabled and thinking_mode.")
         mid, name = model["id"], model["display_name"]
         if (not isinstance(mid, str) or not mid.strip() or len(mid) > 256 or not mid.isprintable()
                 or not isinstance(name, str) or not name.strip() or len(name) > 80 or not name.isprintable()
                 or type(model["enabled"]) is not bool or model["thinking_mode"] not in THINKING_MODES):
             raise ServerError("Invalid curated model.")
+        context = model.get("context_tokens")
+        if "context_tokens" in model and (type(context) is not int or not 1 <= context <= 100000000):
+            raise ServerError("context_tokens must be an integer from 1 to 100000000.")
         if mid in seen:
             raise ServerError("Model IDs must be unique within a server.")
         seen.add(mid)

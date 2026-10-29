@@ -12,7 +12,7 @@ ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
 CUSTOM_ACCENT = re.compile(r"#[0-9a-f]{6}")
 # "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
 TIME_ZONE = re.compile(r"(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})")
-FIELDS = {"agent_name", "accent", "time_zone"}
+FIELDS = {"agent_name", "accent", "time_zone", "backend"}
 
 
 class SettingsError(ValueError):
@@ -42,7 +42,8 @@ def load(path: Path) -> dict:
         stored = {}
     return {"agent_name": clean_name(stored.get("agent_name")),
             "accent": _accent(stored.get("accent")) or ACCENTS[0],
-            "time_zone": _time_zone(stored.get("time_zone")) or ""}
+            "time_zone": _time_zone(stored.get("time_zone")) or "",
+            "backend": "native" if stored.get("backend") == "native" else "hermes"}
 
 
 def update(path: Path, changes: dict) -> dict:
@@ -65,6 +66,10 @@ def update(path: Path, changes: dict) -> dict:
         if zone is None:
             raise SettingsError("Choose a time zone from the list, or the device's own.")
         settings["time_zone"] = zone
+    if "backend" in changes:
+        if changes["backend"] not in ("hermes", "native"):
+            raise SettingsError("Choose Hermes or Native backend.")
+        settings["backend"] = changes["backend"]
     temporary = path.with_name(path.name + ".new")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:

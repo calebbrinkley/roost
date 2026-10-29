@@ -391,8 +391,12 @@ class Provider:
             raise MalformedFrame("Model stream ended before a finish reason.")
 
     async def complete(self, model: str, messages: list[dict], *, thinking: str = "off", mode: str = "unsupported",
-                       tools: list[dict] | None = None) -> Completion:
+                       tools: list[dict] | None = None, max_tokens: int | None = None) -> Completion:
         payload = self._payload(model, messages, thinking, mode, tools, False)
+        if max_tokens is not None:
+            if type(max_tokens) is not int or not 1 <= max_tokens <= 4096:
+                raise ValueError("Invalid completion token limit.")
+            payload["max_tokens"] = max_tokens
         async with self._request("POST", "/chat/completions", json=payload) as response:
             value = await self._json_response(response)
         choices = value.get("choices")

@@ -57,6 +57,7 @@ class Turn:
     error: str | None
     created_at: float
     updated_at: float
+    stats: dict
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,30 @@ def _chat_down(db: sqlite3.Connection) -> None:
         db.execute(f"DROP TABLE {table}")
 
 
-MIGRATIONS = ((_chat_up, _chat_down),)
+def _runtime_up(db: sqlite3.Connection) -> None:
+    db.execute("ALTER TABLE turns ADD COLUMN stats TEXT NOT NULL DEFAULT '{}'")
+    db.execute("CREATE VIRTUAL TABLE message_search USING fts5(content, content='messages', content_rowid='id')")
+    db.execute("INSERT INTO message_search(message_search) VALUES ('rebuild')")
+    db.execute("""CREATE TRIGGER message_search_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO message_search(rowid,content) VALUES (new.id,new.content); END""")
+    db.execute("""CREATE TRIGGER message_search_delete AFTER DELETE ON messages BEGIN
+        INSERT INTO message_search(message_search,rowid,content) VALUES ('delete',old.id,old.content); END""")
+    db.execute("""CREATE TRIGGER message_search_update AFTER UPDATE OF content ON messages BEGIN
+        INSERT INTO message_search(message_search,rowid,content) VALUES ('delete',old.id,old.content);
+        INSERT INTO message_search(rowid,content) VALUES (new.id,new.content); END""")
+
+
+def _runtime_down(db: sqlite3.Connection) -> None:
+    for name in ('insert', 'delete', 'update'):
+        db.execute(f"DROP TRIGGER message_search_{name}")
+    db.execute("DROP TABLE message_search")
+    # Preserve history and measurements until the owner explicitly removes them.
+    if db.execute("SELECT 1 FROM turns WHERE stats != '{}' LIMIT 1").fetchone():
+        raise StoreError("Cannot roll back reply measurements. Preserve their data first.")
+    db.execute("ALTER TABLE turns DROP COLUMN stats")
+
+
+MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down))
 
 
 class Store:
@@ -226,6 +250,16 @@ class Store:
         rows = self.db.execute("SELECT id FROM conversations ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (limit, offset))
         return [self.get_conversation(row[0]) for row in rows]
 
+    def conversation_ids(self) -> list[str]:
+        return [row[0] for row in self.db.execute("SELECT id FROM conversations")]
+
+    def count_conversations(self) -> int:
+        return self.db.execute("SELECT count(*) FROM conversations").fetchone()[0]
+
+    def messages_for_turn(self, turn_id: str) -> list[Message]:
+        return [Message(**dict(row)) for row in self.db.execute(
+            "SELECT * FROM messages WHERE turn_id=? ORDER BY role DESC", (turn_id,))]
+
     def delete_conversation(self, conversation_id: str) -> None:
         with self._write():
             self.db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
@@ -239,27 +273,30 @@ class Store:
                 or (settings is not None and not isinstance(settings, dict))):
             raise StoreError("Invalid turn payload.")
         with self._write():
-            conversation = self.get_conversation(conversation_id)
-            if not conversation:
-                raise StoreError("Conversation does not exist.")
-            snapshot = {"thinking": conversation.thinking, "instructions": conversation.instructions,
-                        "no_web": conversation.no_web, "keep_local": conversation.keep_local, **(settings or {})}
-            fingerprint = payload_fingerprint({"conversation_id": conversation_id, "content": content,
-                                               "model": model, "settings": snapshot})
-            previous = self.db.execute("SELECT id, fingerprint FROM turns WHERE request_id=?", (request_id,)).fetchone()
-            if previous:
-                if previous["fingerprint"] != fingerprint:
-                    raise RequestConflict("Request ID was already used for a different payload.")
-                return self._acceptance(previous["id"])
-            tid, now = str(uuid4()), time.time()
-            ordinal = self.db.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE conversation_id=?", (conversation_id,)).fetchone()[0]
-            self.db.execute("INSERT INTO turns VALUES (?,?,?,?,?,'queued',?,?,0,NULL,?,?)",
-                            (tid, conversation_id, ordinal, request_id, fingerprint, model, _json(snapshot), now, now))
-            for role, text, state in (("user", content, "completed"), ("assistant", "", "queued")):
-                self.db.execute("INSERT INTO messages (conversation_id,turn_id,role,content,reasoning,state,created_at,updated_at) VALUES (?,?,?,?,'',?,?,?)",
-                                (conversation_id, tid, role, text, state, now, now))
-            self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
-            return self._acceptance(tid)
+            return self._accept_turn(conversation_id, request_id, content, model=model, settings=settings)
+
+    def _accept_turn(self, conversation_id, request_id, content, *, model, settings):
+        conversation = self.get_conversation(conversation_id)
+        if not conversation:
+            raise StoreError("Conversation does not exist.")
+        snapshot = {"thinking": conversation.thinking, "instructions": conversation.instructions,
+                    "no_web": conversation.no_web, "keep_local": conversation.keep_local, **(settings or {})}
+        fingerprint = payload_fingerprint({"conversation_id": conversation_id, "content": content,
+                                           "model": model, "settings": snapshot})
+        previous = self.db.execute("SELECT id, fingerprint FROM turns WHERE request_id=?", (request_id,)).fetchone()
+        if previous:
+            if previous["fingerprint"] != fingerprint:
+                raise RequestConflict("Request ID was already used for a different payload.")
+            return self._acceptance(previous["id"])
+        tid, now = str(uuid4()), time.time()
+        ordinal = self.db.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE conversation_id=?", (conversation_id,)).fetchone()[0]
+        self.db.execute("INSERT INTO turns (id,conversation_id,ordinal,request_id,fingerprint,state,model,settings,revision,error,created_at,updated_at) VALUES (?,?,?,?,?,'queued',?,?,0,NULL,?,?)",
+                        (tid, conversation_id, ordinal, request_id, fingerprint, model, _json(snapshot), now, now))
+        for role, text, state in (("user", content, "completed"), ("assistant", "", "queued")):
+            self.db.execute("INSERT INTO messages (conversation_id,turn_id,role,content,reasoning,state,created_at,updated_at) VALUES (?,?,?,?,'',?,?,?)",
+                            (conversation_id, tid, role, text, state, now, now))
+        self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+        return self._acceptance(tid)
 
     def _acceptance(self, turn_id: str) -> Acceptance:
         messages = self.db.execute("SELECT id, conversation_id, role FROM messages WHERE turn_id=? ORDER BY id", (turn_id,)).fetchall()
@@ -267,7 +304,7 @@ class Store:
 
     def get_turn(self, turn_id: str) -> Turn | None:
         row = self.db.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone()
-        return Turn(**{**dict(row), "settings": json.loads(row["settings"])}) if row else None
+        return Turn(**{**dict(row), "settings": json.loads(row["settings"]), "stats": json.loads(row["stats"])}) if row else None
 
     def list_turns(self, conversation_id: str) -> list[Turn]:
         rows = self.db.execute("SELECT id FROM turns WHERE conversation_id=? ORDER BY ordinal", (conversation_id,))
@@ -281,7 +318,8 @@ class Store:
         if after < 0 or not 1 <= limit <= 500:
             raise StoreError("Invalid message page.")
         return [Message(**dict(row)) for row in self.db.execute(
-            "SELECT * FROM messages WHERE conversation_id=? AND id>? ORDER BY id LIMIT ?", (conversation_id, after, limit))]
+            """SELECT messages.* FROM messages JOIN turns ON turns.id=messages.turn_id
+            WHERE messages.conversation_id=? AND messages.id>? ORDER BY turns.ordinal, messages.role DESC LIMIT ?""", (conversation_id, after, limit))]
 
     def _current(self, turn_id: str, expected_revision: int | None) -> Turn:
         turn = self.get_turn(turn_id)
@@ -343,3 +381,131 @@ class Store:
         return [Step(**{**dict(row), "payload": json.loads(row["payload"]),
                         "usage": json.loads(row["usage"]) if row["usage"] is not None else None})
                 for row in self.db.execute("SELECT * FROM turn_steps WHERE turn_id=? ORDER BY ordinal", (turn_id,))]
+
+    def submit(self, request_id: str, content: str, *, conversation_id: str | None,
+               model: str, changes: dict, snapshot: dict, identity: dict) -> Acceptance:
+        """Accept a browser request, including first-chat creation, in one durable transaction."""
+        with self._write():
+            previous = self.request(request_id, identity)
+            if previous:
+                return previous
+            if conversation_id is None:
+                cid, now = str(uuid4()), time.time()
+                self.db.execute("INSERT INTO conversations VALUES (?,?, 'auto',?,?,?,?,0,?,?)",
+                                (cid, content.splitlines()[0][:60], changes.get('model'),
+                                 changes.get('thinking', 'off'), changes.get('instructions', ''), 0, now, now))
+                conversation_id = cid
+            return self._accept_turn(conversation_id, request_id, content, model=model,
+                                     settings={**snapshot, '_request': identity})
+
+    def request(self, request_id: str, identity: dict) -> Acceptance | None:
+        row = self.db.execute("SELECT id,settings FROM turns WHERE request_id=?", (request_id,)).fetchone()
+        if row:
+            if json.loads(row['settings']).get('_request') != identity:
+                raise RequestConflict("Request ID was already used for a different payload.")
+            return self._acceptance(row['id'])
+        return None
+
+    def update_conversation(self, cid: str, changes: dict, *, auto_title: bool = False) -> None:
+        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions'}
+        if not changes or set(changes) - allowed:
+            raise StoreError("Invalid conversation settings.")
+        with self._write():
+            conversation = self.get_conversation(cid)
+            if not conversation:
+                raise StoreError("Conversation does not exist.")
+            if auto_title and conversation.title_source != 'auto':
+                return
+            assignments = ','.join(f'{key}=?' for key in changes)
+            self.db.execute(f"UPDATE conversations SET {assignments},updated_at=? WHERE id=?",
+                            (*changes.values(), time.time(), cid))
+
+    def recover(self) -> None:
+        with self._write():
+            now = time.time()
+            self.db.execute("UPDATE messages SET state='interrupted',updated_at=? WHERE role='assistant' AND turn_id IN (SELECT id FROM turns WHERE state='running')", (now,))
+            self.db.execute("UPDATE turns SET state='interrupted',revision=revision+1,updated_at=? WHERE state='running'", (now,))
+
+    def queued(self) -> list[Turn]:
+        return [self.get_turn(row[0]) for row in self.db.execute(
+            "SELECT id FROM turns WHERE state='queued' ORDER BY created_at,conversation_id,ordinal")]
+
+    def finish(self, tid: str, stats: dict) -> None:
+        with self._write():
+            turn = self._current(tid, None)
+            if turn.state != 'running':
+                raise StoreError("Turn is not running.")
+            now = time.time()
+            self.db.execute("UPDATE turns SET stats=?,state='completed',revision=revision+1,updated_at=? WHERE id=?", (_json(stats), now, tid))
+            self.db.execute("UPDATE messages SET state='completed',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
+            self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, turn.conversation_id))
+
+    def cancel_queued(self, tid: str) -> None:
+        with self._write():
+            turn = self._current(tid, None)
+            if turn.state != 'queued':
+                raise StoreError("Only a queued turn can be cancelled.")
+            self.db.execute("DELETE FROM turns WHERE id=?", (tid,))
+
+    def send_now(self, tid: str) -> None:
+        with self._write():
+            turn = self._current(tid, None)
+            if turn.state != 'queued':
+                raise StoreError("Only a queued turn can be sent now.")
+            ordered = self.list_turns(turn.conversation_id)
+            settled = [t for t in ordered if t.state != 'queued']
+            queued = [turn] + [t for t in ordered if t.state == 'queued' and t.id != tid]
+            # Move out of the unique-ordinal range before assigning the execution order.
+            shift = max(t.ordinal for t in ordered) + len(ordered)
+            self.db.execute("UPDATE turns SET ordinal=ordinal+? WHERE conversation_id=?", (shift, turn.conversation_id))
+            for ordinal, item in enumerate(settled + queued, 1):
+                self.db.execute("UPDATE turns SET ordinal=?,revision=revision+1 WHERE id=?", (ordinal, item.id))
+
+    def edit_resend(self, tid: str, request_id: str, text: str, *, model: str, snapshot: dict, identity: dict) -> Acceptance:
+        with self._write():
+            turn = self._current(tid, None)
+            if turn.state not in TERMINAL:
+                raise StoreError("Only settled messages can be edited.")
+            self.db.execute("DELETE FROM turns WHERE conversation_id=? AND ordinal>=?", (turn.conversation_id, turn.ordinal))
+            return self._accept_turn(turn.conversation_id, request_id, text, model=model,
+                                     settings={**snapshot, '_request': identity})
+
+    def regenerate(self, tid: str) -> None:
+        with self._write():
+            turn = self._current(tid, None)
+            latest = self.list_turns(turn.conversation_id)[-1]
+            if latest.id != tid or turn.state not in TERMINAL:
+                raise StoreError("Only the latest settled reply can be regenerated.")
+            now = time.time()
+            self.db.execute("UPDATE turns SET state='queued',stats='{}',error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
+            self.db.execute("UPDATE messages SET content='',reasoning='',state='queued',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
+            self.db.execute("DELETE FROM turn_steps WHERE turn_id=?", (tid,))
+
+    def history(self, cid: str, *, before: int | None = None, limit: int = 500) -> tuple[list[Message], bool]:
+        # Cursor IDs stay stable, but their order follows turn ordinals after Send now.
+        cursor = self.get_message(before) if before is not None else None
+        if before is not None and (cursor is None or cursor.conversation_id != cid):
+            raise StoreError("History cursor does not belong to this conversation.")
+        position = self.get_turn(cursor.turn_id).ordinal if cursor else None
+        rows = self.db.execute("""SELECT messages.* FROM messages JOIN turns ON turns.id=messages.turn_id
+            WHERE messages.conversation_id=? AND (? IS NULL OR turns.ordinal<? OR (turns.ordinal=? AND messages.role>?))
+            ORDER BY turns.ordinal DESC,messages.role ASC LIMIT ?""", (cid, position, position, position, cursor.role if cursor else '', limit + 1)).fetchall()
+        return [Message(**dict(row)) for row in reversed(rows[:limit])], len(rows) > limit
+
+    def search(self, query: str) -> list[dict]:
+        if not isinstance(query, str) or not query.strip() or len(query) > 200 or "\0" in query:
+            raise StoreError("Search must be 1 to 200 characters without NUL characters.")
+        # Every term is a literal quoted FTS phrase, never FTS syntax or a column filter.
+        terms = ['"' + term.replace('"', '""') + '"' for term in query.split()]
+        rows = self.db.execute("""SELECT messages.conversation_id, snippet(message_search,0,'','', ' … ',24) AS snippet
+            FROM message_search JOIN messages ON messages.id=message_search.rowid
+            JOIN conversations ON conversations.id=messages.conversation_id
+            WHERE message_search MATCH ? ORDER BY conversations.updated_at DESC,messages.id DESC""", (' AND '.join(terms),))
+        results, seen = [], set()
+        for row in rows:
+            if row['conversation_id'] not in seen:
+                results.append(dict(row))
+                seen.add(row['conversation_id'])
+                if len(results) == 50:
+                    break
+        return results
