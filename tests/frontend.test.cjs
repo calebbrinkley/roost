@@ -9,12 +9,13 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
   function node() {
     const classes = new Set();
     return {
-      value: '', textContent: '', disabled: false, open: false, dataset: {}, style: {}, children: [], events: {},
+      value: '', textContent: '', disabled: false, open: false, dataset: {}, style: {}, children: [], events: {}, attributes: {},
+      get options() { return this.children; },
       scrollTop: 0, scrollHeight: 100, clientHeight: 100,
       classList: { add(...names) { names.forEach(n => classes.add(n)); }, remove(...names) { names.forEach(n => classes.delete(n)); },
         contains(n) { return classes.has(n); }, toggle(n, on = !classes.has(n)) { on ? classes.add(n) : classes.delete(n); } },
       append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
-      remove() {}, setAttribute() {}, addEventListener(type, fn) { this.events[type] = fn; }, focus() {}, close() { this.open = false; },
+      remove() {}, setAttribute(name, value) { this.attributes[name] = String(value); }, getAttribute(name) { return this.attributes[name] ?? null; }, addEventListener(type, fn) { this.events[type] = fn; }, focus() {}, close() { this.open = false; },
       showModal() { this.open = true; }, querySelectorAll() { return []; }, closest() { return null; },
     };
   }
@@ -2419,4 +2420,178 @@ test('a new conversation migrates its folded follow-up draft after navigation', 
   await f.run(`selectConversation('created')`);
   assert.equal(f.get('message').value, token);
   assert.equal(f.run('expandPastes($("message").value)'), full);
+});
+
+test('native history uses execution ordinals and user before assistant after send now', async () => {
+  const f = fixture(); await tick();
+  const order = f.run(`mergeMessages(
+    [{id:1,ordinal:1,role:'user'}, {id:2,ordinal:1,role:'assistant'}, {id:3,ordinal:2,role:'user'}, {id:4,ordinal:2,role:'assistant'}],
+    [{id:6,ordinal:2,role:'assistant'}, {id:5,ordinal:2,role:'user'}, {id:4,ordinal:3,role:'assistant'}, {id:3,ordinal:3,role:'user'}]
+  ).map(row => row.id)`);
+  assert.deepEqual(Array.from(order), [1,2,5,6,3,4]);
+});
+
+test('native authoritative tails remove cancelled and edited rows while retaining earlier pages', async () => {
+  const f = fixture(); await tick();
+  const order = f.run(`mergeMessages(
+    [{id:1,ordinal:1,role:'user'}, {id:2,ordinal:1,role:'assistant'}, {id:3,ordinal:2,role:'user'}, {id:4,ordinal:2,role:'assistant'}, {id:5,ordinal:3,role:'user'}],
+    [{id:7,ordinal:2,role:'user'}, {id:8,ordinal:2,role:'assistant'}], true).map(row => row.id)`);
+  assert.deepEqual(Array.from(order), [1,2,7,8]);
+  assert.equal(f.run('mergeMessages([{id:1,ordinal:1}], [], true).length'), 0);
+});
+
+test('native live overlay replaces only its turn regardless of allocated message IDs', async () => {
+  const f = fixture(); await tick();
+  const view = f.run(`conversationView({current:'one',sent:[],server:{working:true,after:2},
+    rows:[{id:1,role:'user',turn_id:'a',ordinal:1,content:'first'}, {id:2,role:'assistant',turn_id:'a',ordinal:1,content:'partial',state:'interrupted'},
+      {id:5,role:'user',turn_id:'c',ordinal:2,content:'now'}, {id:6,role:'assistant',turn_id:'c',ordinal:2,content:'old',state:'running',revision:1},
+      {id:3,role:'user',turn_id:'b',ordinal:3,content:'queued'}, {id:4,role:'assistant',turn_id:'b',ordinal:3,content:'',state:'queued'}],
+    live:{id:'one',turn_id:'c',revision:2,text:'new',done:false}})`);
+  assert.deepEqual(Array.from(view.rows, row => row.id), [1,2,5,3,4]);
+  assert.equal(view.liveAfter.id, 5);
+});
+
+test('native SSE full snapshots replace text, thoughts and turn identity', async () => {
+  const f = fixture(); await tick();
+  const live = f.run(`applyStreamFrame(applyStreamFrame(null,
+    {reset:true,turn_id:'first',revision:1,text:'A',thoughts:'thinking'},'one'),
+    {reset:true,turn_id:'second',revision:2,text:'AB',thoughts:'thought',done:true},'one')`);
+  assert.equal(live.text, 'AB'); assert.equal(live.thoughts, 'thought');
+  assert.equal(live.turn_id, 'second'); assert.equal(live.revision, 2); assert.equal(live.done, true);
+  assert.equal(f.run(`applyStreamFrame({text:'A',thoughts:''},{text:'B'},'one').text`), 'AB', 'Hermes deltas remain additive');
+});
+
+test('native controls follow turn state and latest reply', async () => {
+  const f = fixture(); await tick();
+  for (const state of ['queued','running','completed','interrupted','failed']) {
+    for (const role of ['user','assistant']) {
+      f.context.row = {turn_id:'turn',state,role};
+      const controls = f.run('turnControls(row, [row])');
+      const settled = ['completed','interrupted','failed'].includes(state);
+      assert.equal(controls.queue, role === 'user' && state === 'queued');
+      assert.equal(controls.edit, role === 'user' && settled);
+      assert.equal(controls.regenerate, role === 'assistant' && settled);
+      assert.equal(f.run(`turnControls(row, [row, {turn_id:'later'}]).regenerate`), false);
+    }
+  }
+});
+
+test('native surfaces hide Hermes features while Hermes keeps them', async () => {
+  const f = fixture(); await tick();
+  assert.ok(Object.values(f.run(`backendSurfaces('hermes')`)).every(Boolean));
+  assert.ok(Object.values(f.run(`backendSurfaces('native')`)).every(value => !value));
+  f.run(`state.backend='native'; state.settings={agent_name:''}; state.push={devices:[]}; state.about={
+    roost:{},runtime:{},stats:{},at:new Date(),hermes:{reachable:false}};
+    renderAgentSettings($('settings-detail')); renderServiceSettings($('settings-detail')); renderNotifications($('settings-detail')); renderAbout($('settings-detail'));`);
+  const texts = node => [node.textContent, ...(node.children || []).flatMap(texts)].join(' ');
+  const rendered = texts(f.get('settings-detail'));
+  assert.ok(!rendered.includes('SOUL.md')); assert.ok(!rendered.includes('Restart Agent'));
+  assert.ok(!rendered.includes('(Hermes)')); assert.ok(!rendered.includes('Download the plugin'));
+});
+
+test('thinking picker follows the selected model or server default', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.models=[{id:'plain',thinking_mode:'unsupported'},{id:'effort',thinking_mode:'reasoning_effort'},
+    {id:'flag',thinking_mode:'template_flag'}];`);
+  assert.equal(f.run(`thinkingVisible(state.models,null,'plain')`), false);
+  assert.equal(f.run(`thinkingVisible(state.models,'effort','plain')`), true);
+  assert.equal(f.run(`thinkingVisible(state.models,'flag','plain')`), true);
+  assert.equal(f.run(`thinkingVisible(state.models,null,'effort')`), true);
+  assert.equal(f.run(`thinkingVisible(state.models,'missing','effort')`), false);
+});
+
+test('native usage keeps provider TPS and time to first token instead of recomputing prefill rate', async () => {
+  const f = fixture(); await tick();
+  assert.equal(f.run(`replyUsage({turn_id:'one',roost_usage:{input_tokens:128,output_tokens:64,model_seconds:10,
+    tokens_per_second:32,time_to_first_token:1.25}})`), '128 in / 64 out · 32.0 TPS · 1.25 s to first token');
+});
+
+test('native composer offers Stop during a running reply and Queue for a typed message', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.lastRows=[{turn_id:'current',state:'running'}];updateNativeComposer()`);
+  assert.equal(f.get('send').textContent,'Stop'); assert.equal(f.get('send').type,'button');
+  assert.ok(f.get('queue-send').classList.contains('hidden'));
+  f.get('message').value='next message'; f.run('updateNativeComposer()');
+  assert.ok(!f.get('queue-send').classList.contains('hidden'));
+  // A new stream identity takes precedence over an older transcript poll.
+  f.run(`state.live={turn_id:'next',done:false};`);
+  assert.equal(f.run('runningTurn()'),'next');
+  f.run(`state.live=null;state.lastRows=[{turn_id:'current',state:'completed'}];updateNativeComposer()`);
+  assert.equal(f.get('send').type,'submit'); assert.equal(f.get('send').textContent,'↑');
+});
+
+test('native accepted sends reconcile by request identity even when IDs move backwards', async () => {
+  const f=fixture();await tick();
+  const view=f.run(`withSentMessages([{id:3,role:'user',content:'same',client_request_id:'request'}],
+    [{id:'chat',text:'same',request_id:'request',after:9,key:'local',since:0}], 'chat')`);
+  assert.equal(view.sent.length,0);assert.equal(view.savedAs.local,3);assert.equal(view.rows.length,1);
+});
+
+test('native composer states retain idle behavior and expose Stop with or without text', async () => {
+  const f = fixture(); await tick();
+  for (const turn of [null, 'running', 'queued']) for (const text of ['', 'next message']) {
+    f.context.turnState = turn; f.get('message').value = text;
+    f.get('composer').classList.toggle('has-text', Boolean(text));
+    f.run(`state.backend='native'; state.live=null; state.lastRows=turnState ? [{turn_id:'one',state:turnState}] : []; updateNativeComposer()`);
+    assert.equal(f.get('send').classList.contains('stopping'), turn !== null, `${turn}/${text}: Stop`);
+    assert.equal(f.get('send').type, turn ? 'button' : 'submit');
+    assert.equal(f.get('queue-send').classList.contains('hidden'), !(turn && text), `${turn}/${text}: Queue`);
+    assert.equal(f.get('send').textContent, turn ? 'Stop' : '↑');
+  }
+  // The original failure lived in CSS: an aria-label and a Stop class alone did not make the button visible.
+  const css = fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8');
+  assert.match(css, /\.composer\s+\.send-button\.stopping\s*\{[^}]*display:\s*grid/s);
+  f.run(`state.backend='hermes'; state.lastRows=[];`);
+  f.get('send').textContent='Hermes send'; f.run('updateNativeComposer()');
+  assert.equal(f.get('send').textContent,'Hermes send');
+});
+
+test('Stop targets a running turn, or cancels the first queued turn while waiting for admission', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.actions=[]; nativeControl=async (action,id)=>actions.push([action,id]);
+    state.lastRows=[{turn_id:'first',state:'queued'},{turn_id:'second',state:'queued'}];`);
+  await f.run('stopNativeReply()');
+  f.run(`state.live={turn_id:'first',state:'queued',done:false}`);
+  assert.equal(f.run('runningTurn()'), undefined);
+  await f.run('stopNativeReply()');
+  f.run(`state.lastRows.unshift({turn_id:'active',state:'running'});`);
+  await f.run('stopNativeReply()');
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(actions)')), [['cancel','first'],['cancel','first'],['stop','active']]);
+});
+
+test('model rows share switches, expose one detail panel, and keep the default enabled', async () => {
+  const f = fixture(); await tick();
+  const walk = node => [node, ...(node.children || []).flatMap(walk)];
+  const nodes = () => walk(f.get('settings-detail'));
+  const byClass = name => nodes().filter(node => (node.className || '').split(' ').includes(name));
+  f.run(`state.backend='native';state.settings={};state.settingsGroup='models';state.primary={base_url:'',has_key:false,
+    default_model:'one',models:[{id:'one',display_name:'First',enabled:true,thinking_mode:'reasoning_effort'},
+      {id:'two',display_name:'',enabled:false,thinking_mode:'unsupported'}]};renderSettings()`);
+  assert.equal(byClass('model-row').length,2);
+  assert.equal(byClass('model-expand')[0].getAttribute('aria-expanded'),'false');
+  assert.equal(nodes().filter(node => node.type === 'checkbox' || node.type === 'radio').length,0);
+  assert.deepEqual(byClass('model-name').map(node => node.textContent), ['First','two']);
+  assert.deepEqual(byClass('model-id').map(node => node.className), ['model-id','model-id hidden']);
+  const picker = () => nodes().find(node => node.id === 'settings-default-model');
+  assert.deepEqual(picker().children.map(node => node.value),['one']);
+  const toggles = () => nodes().filter(node => node.getAttribute?.('role') === 'switch');
+  assert.equal(toggles().length,2);assert.equal(toggles()[0].className,'job-toggle');
+  toggles()[1].events.click();
+  assert.deepEqual(picker().children.map(node => node.value),['one','two']);
+  byClass('model-expand')[0].events.click();
+  assert.equal(f.run('state.openModel'),'one');
+  assert.equal(byClass('model-expand')[0].getAttribute('aria-expanded'),'true');
+  byClass('model-expand')[1].events.click();
+  assert.equal(f.run('state.openModel'),'two');
+  assert.equal(byClass('model-details').filter(node => !node.className.includes('hidden')).length,1);
+  assert.equal(byClass('model-expand')[0].getAttribute('aria-expanded'),'false');
+  const name = byClass('model-details')[1].children[0].children[0];
+  name.value='Second';name.events.input();
+  assert.equal(byClass('model-name')[1].textContent,'Second');
+  assert.equal(picker().children[1].textContent,'Second');
+  toggles()[0].events.click();
+  assert.equal(f.run('state.primary.default_model'),'two');
+  assert.deepEqual(picker().children.map(node => node.value),['two']);
+  toggles()[1].events.click();
+  assert.equal(f.run('state.primary.default_model'),null);assert.equal(picker().disabled,true);
 });

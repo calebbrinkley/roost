@@ -475,3 +475,38 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   .swatch-custom input { width: 100%; height: 100%; }
 }
 @media (max-width: 700px) { .approval-panel { padding: 0 12px 10px; } .approval-actions button { flex: 1; } }
+
+/* Native model configuration and durable turn controls use the existing settings and message tokens. */
+.model-row { max-width: 520px; border-bottom: 1px solid var(--line); }
+.model-row-heading { display: flex; align-items: center; gap: 12px; min-height: 64px; }
+.model-expand { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 10px 0; border: 0; background: transparent; color: var(--ink); text-align: left; }
+.model-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.model-name, .model-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-name { font-size: calc(15px * var(--text-scale)); font-weight: 600; }
+.model-id, .model-enabled { color: var(--muted); font-size: calc(12px * var(--text-scale)); }
+.model-enabled { display: flex; align-items: center; gap: 8px; }
+.model-chevron { color: var(--muted); font-size: 24px; }
+.model-expand[aria-expanded="true"] .model-chevron { transform: rotate(90deg); }
+.model-expand:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: 8px; }
+.model-enabled .job-toggle::before { content: ""; position: absolute; inset: -7px 0; }
+.model-details { padding: 0 0 14px; }
+.settings-detail .model-field { margin-top: 12px; }
+.model-field input, .model-field select { display: block; margin-top: 6px; }
+.native-action { min-height: 32px; padding: 4px 8px; }
+@media (pointer: coarse) { .native-action { min-width: 44px; min-height: 44px; } }
+.native .reply-under { flex-wrap: wrap; }
+.native .reply-usage { flex-basis: 100%; font-size: 11px; }
+.composer .send-button.stopping { display: grid; width: auto; flex-basis: auto; padding: 0 12px; font-size: 14px; }
+.queue-send { padding: 0 10px; }
+.context-meter { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 4px 16px; color: var(--muted); font-size: 11px; }
+.context-meter meter { width: 64px; height: 8px; accent-color: var(--accent-text); }
+.inline-edit textarea, .sheet select { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: var(--frame); font: inherit; font-size: max(16px, calc(16px * var(--text-scale))); }
+.inline-edit .sheet-note { font-size: 13px; margin-top: 8px; }
+.inline-edit button { min-height: 44px; padding: 8px 12px; }
+@media (max-width: 700px) {
+  .native .mobile-tabbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-detail select { font-size: max(16px, calc(16px * var(--text-scale))); }
+}
+.native .from-agent .message-body:empty { display: none; }
+.message:has(.inline-edit) { width: min(520px, 88%); }
+.message-body.editing { color: var(--ink); background: var(--sheet); border: 1px solid var(--line); }
