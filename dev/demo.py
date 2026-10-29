@@ -5,6 +5,7 @@ import base64
 import os
 import re
 import secrets
+import sys
 import time
 from pathlib import Path
 
@@ -446,11 +447,23 @@ async def main():
         "ROOST_HERMES_PASSWORD_FILE": str(hermes_password),
         "ROOST_DEMO": "1",
     })
-    mock = web.AppRunner(mock_hermes(), access_log=None)
+    native = "--native" in sys.argv
+    fake = None
+    if not native:
+        from roost import settings
+        settings.update(STATE / "settings.json", {"backend": "hermes"})
+    if native:
+        from native_smoke import OpenAIFake, configure
+        fake = await OpenAIFake().start()
+        fake.delay = .5
+        configure(STATE, fake.url)
+    mock = web.AppRunner(mock_hermes(), access_log=None) if not native else None
     roost = web.AppRunner(create_app(), access_log=None)
-    await mock.setup()
+    if mock:
+        await mock.setup()
     try:
-        await web.TCPSite(mock, "127.0.0.1", HERMES_PORT).start()
+        if mock:
+            await web.TCPSite(mock, "127.0.0.1", HERMES_PORT).start()
         await roost.setup()
         await web.TCPSite(roost, "127.0.0.1", ROOST_PORT).start()
         print(f"Roost demo: http://127.0.0.1:{ROOST_PORT}", flush=True)
@@ -458,7 +471,10 @@ async def main():
         await asyncio.Event().wait()
     finally:
         await roost.cleanup()
-        await mock.cleanup()
+        if mock:
+            await mock.cleanup()
+        if fake:
+            await fake.close()
 
 
 if __name__ == "__main__":

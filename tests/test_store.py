@@ -9,7 +9,7 @@ from pathlib import Path
 from roost.auth import Sessions
 from roost.passkeys import Passkeys
 from roost.push import Push
-from roost.store import RequestConflict, RevisionConflict, Store, StoreError
+from roost.store import RequestConflict, RevisionConflict, Store, StoreError, MIGRATIONS
 
 
 class StoreTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.store.migrate()
-        self.assertEqual(self.store.db.execute("SELECT version FROM schema_version").fetchone()[0], 1)
+        self.assertEqual(self.store.db.execute("SELECT version FROM schema_version").fetchone()[0], len(MIGRATIONS))
         self.store.migrate(0)
         self.assertFalse(self.store.db.execute("SELECT name FROM sqlite_master WHERE name='conversations'").fetchone())
         self.store.migrate()

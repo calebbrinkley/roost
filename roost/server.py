@@ -19,7 +19,8 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__, live, provider, servers, settings, turns
+from . import __version__, live, native, provider, servers, settings, turns
+from .runner import Runner
 
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
@@ -28,7 +29,7 @@ from .hermes import ID, Hermes, HermesError, plain_id
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
 from .settings import clean_name
-from .store import Store
+from .store import Store, StoreError, RequestConflict
 from . import reply_usage
 
 STATIC = Path(__file__).with_name("static")
@@ -116,9 +117,12 @@ async def guard(request: web.Request, handler):
             if request.path not in {"/api/login", "/api/me", "/api/health", "/api/passkeys/login/options", "/api/passkeys/login", *PLUGIN_PATHS}:
                 if not request.app["sessions"].valid(request.cookies.get(COOKIE, "")):
                     raise web.HTTPUnauthorized(text="Sign in to Roost.")
-        response = await handler(request)
+        selected = native.HANDLERS.get(handler.__name__, handler) if native.enabled(request.app) else handler
+        response = await selected(request)
     except HermesError as exc:
         response = web.json_response({"error": exc.message}, status=exc.status)
+    except StoreError as exc:
+        response = web.json_response({"error": str(exc)}, status=409 if isinstance(exc, RequestConflict) else 400)
     except servers.ServerError as exc:
         response = web.json_response({"error": str(exc)}, status=503 if isinstance(exc, servers.ServerStorageError) else 400)
     except provider.ProviderError as exc:
@@ -280,12 +284,15 @@ async def me(request: web.Request):
     return web.json_response({"signed_in": signed_in, "demo": request.app["demo"], "agent": agent,
                               "accent": saved["accent"] if signed_in else settings.ACCENTS[0],
                               "time_zone": saved["time_zone"] if signed_in else "",
+                              "backend": saved["backend"] if signed_in else "hermes",
                               # Whether the sign-in page offers passkeys; not which ones exist.
                               "passkeys": request.app["passkeys"].count() > 0})
 
 
 async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
     """The name Hermes shows for its profile ("" when it has none), cached for a few minutes."""
+    if native.enabled(app):
+        return ""
     cached, fetched = app["hermes_agent_name"]
     # `fetched` is None until the first lookup: monotonic time can be small just after boot.
     if ask and (fetched is None or time.monotonic() - fetched > AGENT_NAME_CACHE_SECONDS):
@@ -340,7 +347,10 @@ async def discover_server_models(request: web.Request):
 
 async def update_settings(request: web.Request):
     try:
-        settings.update(request.app["settings_file"], await json_body(request))
+        saved = settings.update(request.app["settings_file"], await json_body(request))
+        if saved["backend"] == "hermes" and not request.app["hermes_started"]:
+            await request.app["hermes"].start()
+            request.app["hermes_started"] = True
     except settings.SettingsError as exc:
         raise bad(str(exc)) from None
     return web.json_response(await settings_view(request.app))
@@ -448,6 +458,8 @@ async def about(request: web.Request):
     app = request.app
     started = time.monotonic()
     try:
+        if native.enabled(app):
+            raise HermesError(503, "Hermes is disabled.")
         status = await app["hermes"].status()
         hermes = {key: status.get(key) for key in HERMES_STATUS_FIELDS}
         hermes.update(reachable=True, latency_ms=round((time.monotonic() - started) * 1000))
@@ -542,6 +554,8 @@ async def watch_replies(app: web.Application) -> None:
     while True:
         await asyncio.sleep(WATCH_INTERVAL)
         try:
+            if native.enabled(app):
+                continue
             await check_replies(app)
         except Exception:  # one bad pass must not end reply notifications until a restart
             pass
@@ -1061,19 +1075,37 @@ async def static(request: web.Request):
 
 async def native_store(app: web.Application):
     app["store"] = Store(app["state_dir"] / "native.sqlite3")
+    app["provider_http"] = aiohttp.ClientSession()
+    async def completed(cid, tid, text):
+        if not looking_at(app, cid):
+            await notify(app, {"title": await agent_name(app, ask_hermes=False), "body": preview(text),
+                               "url": "/?c=" + quote(cid, safe=""), "tag": "reply-" + tid})
+    app["runner"] = Runner(app["store"], app["servers"], app["provider_http"], completed=completed,
+                           limit=int(os.environ.get("ROOST_NATIVE_ADMISSION", "1")))
+    app["runner"].start()
     try:
         yield
     finally:
+        await app["runner"].close()
+        await app["provider_http"].close()
         app["store"].close()
 
 
 async def startup(app: web.Application):
-    await app["hermes"].start()
+    app["hermes_started"] = False
+    if not native.enabled(app):
+        await app["hermes"].start()
+        app["hermes_started"] = True
     app["push_http"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     app["watcher"] = asyncio.create_task(watch_replies(app))
 
 
 async def shutdown(app: web.Application):
+    streams = list(app["native_streams"])
+    for task in streams:
+        task.cancel()
+    await asyncio.gather(*streams, return_exceptions=True)
+    await app["runner"].close()
     # Ends open event streams, which would otherwise hold up a restart until their turns finish.
     for turn in list(app["live"].values()):
         turn.task.cancel()
@@ -1144,12 +1176,16 @@ def create_app() -> web.Application:
     app["push"] = Push(app["sessions"].db, state / "vapid.pem", subject)
     app["watches"], app["presence"], app["live"], app["speech"], app["speech_pending"] = {}, {}, {}, OrderedDict(), {}
     app["send_requests"] = OrderedDict()
-    app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
-                            Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
+    app["native_streams"] = set()
+    app["hermes"] = Hermes(os.environ.get("ROOST_HERMES_URL", "http://127.0.0.1:1"), os.environ.get("ROOST_HERMES_USERNAME", ""),
+                            Path(os.environ.get("ROOST_HERMES_PASSWORD_FILE", str(state / "hermes-password"))))
     app.cleanup_ctx.append(native_store)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
     app.on_cleanup.append(cleanup)
+    app.router.add_get("/api/models", native.models)
+    app.router.add_get("/api/search", native.search)
+    app.router.add_post("/api/conversations/{sid}/turns/{action}", native.control)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/me", me)
     app.router.add_post("/api/login", login)
