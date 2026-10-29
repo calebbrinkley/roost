@@ -6,8 +6,8 @@ const $ = (id) => document.getElementById(id);
 // A test fails if app.js writes a field that is not declared here.
 const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
-                          search: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
-  conversation: () => ({ current: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
+                          search: "", searchResults: null, searchLoading: false, searchError: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
+  conversation: () => ({ current: null, model: null, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
                          composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
@@ -18,7 +18,7 @@ const SLICES = {
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
   settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
-                     soulDraft: undefined, soulLoading: false, about: null }),
+                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
                     push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
 };
@@ -308,7 +308,9 @@ async function signedIn() {
   $("password").value = "";
   $("login-error").textContent = "";
   setSection("messages");
-  refreshIdentity();
+  const identity = refreshIdentity();
+  if (identity) await identity;
+  if (!scope.alive()) return;
   try { await loadConversations(); if (scope.alive()) setConnection(true); } catch (error) { if (scope.alive()) { setConnection(false); notice(error.message); } }
   if (!scope.alive()) return;
   navigation.signingIn = false;
@@ -355,8 +357,8 @@ function openLink(search) {
   const conversation = link.get("c"), job = link.get("j"), delivery = link.get("d");
   state.approvalFocusConversation = conversation;
   if (conversation) { setSection("messages"); selectConversation(conversation); }
-  else if (job) showJob(job);
-  else if (delivery) openDelivery(delivery);
+  else if (job && !isNative()) showJob(job);
+  else if (delivery && !isNative()) openDelivery(delivery);
 }
 
 async function showJob(id) {
@@ -388,7 +390,22 @@ async function refreshIdentity() {
 }
 
 // /me, /settings and a saved change all answer with the name shown, the accent and the time zone.
+function isNative() { return state.backend === "native"; }
+
+function backendSurfaces(backend) {
+  return { jobs: backend !== "native", soul: backend !== "native", voice: backend !== "native",
+    approvals: backend !== "native", hermes: backend !== "native" };
+}
+
 function applyServerSettings(data) {
+  state.backend = data.backend || "hermes";
+  const surfaces = backendSurfaces(state.backend);
+  for (const id of ["nav-jobs", "mobile-nav-jobs"]) show(id, surfaces.jobs);
+  show("voice-button", surfaces.voice);
+  $("search").maxLength = isNative() ? 200 : 524288;
+  $("app").classList.toggle("native", isNative());
+  if (isNative()) loadModels().catch(error => notice(error.message));
+  state.agentName = data.agent || "";
   applyAgentName(data.agent);
   window.roostTheme.setAccent(data.accent);
   applyTimeZone(data.time_zone);
@@ -403,6 +420,7 @@ function applyTimeZone(name) {
 }
 
 function setSection(section) {
+  if (isNative() && section === "jobs") section = "messages";
   if (section !== "messages") stopRecording(true);
   state.section = section;
   $("app").classList.toggle("section-jobs", section === "jobs");
@@ -564,6 +582,7 @@ function openConversationSheet(item) {
   if (state.sheetBusy) return;
   state.sheetItem = item;
   $("sheet-title").textContent = sessionName(item);
+  $("sheet-instructions").textContent = isNative() ? "Chat settings" : "Instructions";
   $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = ""; $("sheet-instructions-error").textContent = "";
   $("sheet-export").href = `/api/conversations/${encodeURIComponent(item.id)}/export`;
   sheetView("sheet-actions");
@@ -594,10 +613,18 @@ async function openInstructions() {
   const scope = signInScope(), field = $("sheet-instructions-text");
   field.value = ""; field.disabled = true;
   sheetView("sheet-instructions-form");
+  show("sheet-native-settings", isNative());
+  show("sheet-hermes-note", !isNative());
   try {
+    if (isNative()) await loadModels();
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
     if (state.sheetItem !== item) return;
     field.value = typeof data.instructions === "string" ? data.instructions : "";
+    if (isNative()) {
+      fillModelPicker($("sheet-model"), data.model);
+      $("sheet-reasoning").value = data.reasoning || "none";
+      updateSheetThinking();
+    }
     field.disabled = false; field.focus();
   } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
 }
@@ -609,7 +636,8 @@ async function saveInstructions(event) {
   const scope = signInScope();
   state.sheetBusy = true;
   try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value }) });
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value} : {}) }) });
+    if (isNative() && state.current === id) { state.model = data.model; showReasoning(data.reasoning); }
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
   } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
@@ -641,13 +669,16 @@ async function deleteConversation() {
 
 function renderConversations() {
   const signature = JSON.stringify([state.conversations, state.current, state.search, state.working, state.loadingMore,
-    state.swipeOpenId, state.approvals.length > 0, state.timeZone, agent(), dayKey(new Date())]);
+    state.searchResults, state.searchLoading, state.searchError, state.swipeOpenId, state.approvals.length > 0, state.timeZone, agent(), dayKey(new Date())]);
   if (signature === state.listSignature) return;
   state.listSignature = signature;
   const list = $("conversation-list"); list.replaceChildren();
-  const rows = state.conversations.filter((item) =>
+  const searching = isNative() && Boolean(state.search);
+  const rows = searching ? state.searchResults || [] : state.conversations.filter((item) =>
     (sessionName(item) + " " + (withoutInstructions(item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
-  if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
+  if (searching && state.searchLoading) list.append(el("p", "empty-list", "Searching…"));
+  else if (searching && state.searchError) { const error = el("p", "empty-list", state.searchError); error.setAttribute("role", "alert"); list.append(error); }
+  else if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
   const today = dayKey(new Date());
   let group = null;
   for (const item of rows) {
@@ -665,7 +696,7 @@ function renderConversations() {
     // The server marks conversations it is following; the open one also knows what this device just sent.
     const working = item.working === true || (id === state.current && state.working);
     const preview = el("span", "row-preview" + (working ? " live" : ""));
-    preview.append(working ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
+    preview.append(searching ? item.snippet || item.preview || "" : working ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
@@ -733,7 +764,7 @@ async function loadConversations(more = false) {
 // Older conversations load as the list nears its end, or at once when the loaded ones don't fill it.
 function loadMoreIfNearEnd() {
   const list = $("conversation-list");
-  if (state.section !== "messages" || !state.conversationsMore || state.loadingMore) return;
+  if ((isNative() && state.search) || state.section !== "messages" || !state.conversationsMore || state.loadingMore) return;
   if (list.scrollTop + list.clientHeight < list.scrollHeight - 400) return;
   loadConversations(true).catch((error) => notice(error.message));
 }
@@ -746,12 +777,16 @@ function finishLoadingConversations(data, rows, more) {
     $("app").classList.remove("chat-open");
     reportPresence();
   }
+  // A native chat's automatic title can arrive after the chat was opened.
+  const open = isNative() && state.current ? rows.find((row) => row.id === state.current) : null;
+  if (open) $("chat-title").textContent = sessionName(open);
   renderConversations();
   if (!state.current && !more) renderWelcome();
 }
 
 function renderWelcome() {
   state.messageHistory = null; state.lastRows = null; state.messageSignature = null;
+  if (isNative()) { state.live = null; state.turn = null; state.model = null; state.context = null; updateNativeComposer(); renderContext(); }
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -765,7 +800,7 @@ function renderWelcome() {
   setChatAvatar(state.draftSeed);
   const card = el("div", "welcome-card");
   const starters = el("div", "starters");
-  for (const [title, hint, text] of STARTERS) {
+  for (const [title, hint, text] of (isNative() ? NATIVE_STARTERS : STARTERS)) {
     const starter = el("button", "starter");
     starter.type = "button";
     starter.append(el("b", "", title), el("span", "", hint));
@@ -784,6 +819,10 @@ function renderWelcome() {
 }
 
 // Suggestions on a new conversation's welcome screen: a tap puts the message in the box to edit or send.
+const NATIVE_STARTERS = [
+  ["Think it through", "A fresh perspective", "Help me think through a decision. Ask me what I’m weighing up."],
+  ["Make a plan", "One step at a time", "Help me break a project into a practical plan."],
+];
 const STARTERS = [
   ["Plan my week", "From your calendar and notes", "Help me plan my week, using my calendar and notes if you can see them."],
   ["Set up a job", "A briefing every weekday at 8", "Set up a job that sends me a short briefing every weekday at 8."],
@@ -939,6 +978,12 @@ function replyUsage(row) {
   const count = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const input = count(usage.input_tokens) ? usage.input_tokens.toLocaleString() : "—";
   const output = count(usage.output_tokens) ? usage.output_tokens.toLocaleString() : "—";
+  if (row.turn_id != null) {
+    const measured = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
+    const rate = measured(usage.tokens_per_second) ? usage.tokens_per_second.toFixed(1) : "—";
+    const first = measured(usage.time_to_first_token) ? usage.time_to_first_token.toFixed(2) + " s" : "—";
+    return `${input} in / ${output} out · ${rate} TPS · ${first} to first token`;
+  }
   const duration = usage.model_seconds;
   const rate = count(usage.output_tokens) && typeof duration === "number" && Number.isFinite(duration) && duration > 0
     ? usage.output_tokens / duration : null;
@@ -966,6 +1011,11 @@ function withSentMessages(rows, sent, current) {
   const savedAs = {};
   for (const row of rows) {
     if (row.role !== "user" || typeof row.id !== "number") continue;
+    if (row.client_request_id) {
+      const matched = pending.find(item => item.id === current && item.request_id === row.client_request_id);
+      if (matched) { savedAs[matched.key] = row.id; stopSendCheck(matched); pending = pending.filter(item => item !== matched); }
+      continue;
+    }
     const candidates = pending.filter((item) => (!item.failed || item.pending) && item.id === current && row.id > item.after);
     const saved = messageText(row);
     let combined = "";
@@ -997,7 +1047,15 @@ function conversationView({ rows, sent, current, live, server }) {
   const added = withSentMessages(rows, sent, current);
   let all = added.rows, liveAfter = null;
   const after = live ? live.after ?? (server.started != null && server.started === live.started ? server.after : null) : null;
-  if (live) {
+  if (live?.turn_id != null) {
+    const own = all.find(row => row.role === "user" && row.turn_id === live.turn_id);
+    const saved = all.find(row => row.role === "assistant" && row.turn_id === live.turn_id);
+    if (!own || live.done || (saved && (saved.revision > live.revision || ["completed", "failed", "interrupted"].includes(saved.state)))) live = null;
+    else {
+      liveAfter = own;
+      all = all.filter(row => row.role !== "assistant" || row.turn_id !== live.turn_id);
+    }
+  } else if (live) {
     const own = after == null ? -1 : all.findIndex((row) => row.role === "user" && typeof row.id === "number" && row.id > after);
     const nextUser = own >= 0 ? all.findIndex((row, index) => index > own && row.role === "user") : -1;
     const last = own >= 0 ? all.slice(own + 1, nextUser >= 0 ? nextUser : undefined).at(-1) : null;
@@ -1021,6 +1079,7 @@ function conversationView({ rows, sent, current, live, server }) {
 function renderMessages(rows) {
   const transcript = $("transcript");
   state.lastRows = rows;
+  if (state.editTurn) { updateNativeComposer(); return; }
   if (state.renderedConversation === state.current && selectingTranscript()) {
     state.selectionDeferred = true;
     return;
@@ -1037,11 +1096,13 @@ function renderMessages(rows) {
   // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
   if (view.live && view.after != null) view.live.after = view.after;
   state.working = view.working;
-  readVoiceReply(view);
+  if (!isNative()) readVoiceReply(view);
+  updateNativeComposer();
+  renderContext();
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.timestamp, row.roost_usage,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.timestamp, row.roost_usage, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -1066,7 +1127,7 @@ function renderMessages(rows) {
     button.addEventListener("click", loadEarlierMessages);
     transcript.append(button);
   }
-  const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && messageText(row));
+  const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && (messageText(row) || (isNative() && ["failed", "interrupted"].includes(row.state))));
   const content = JSON.stringify([visible.filter((row) => row.role === "assistant").map((row) => [row.id, messageText(row)]), live?.text || ""]);
   const changed = !fresh && !prepend && content !== state.latestContent;
   state.latestContent = content;
@@ -1093,7 +1154,7 @@ function renderMessages(rows) {
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
-      const status = row.local_pending ? "Sending…" : row.local_failed ? "Not sent" : row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
+      const status = isNative() && row.state === "queued" ? "Queued" : row.local_pending ? "Sending…" : row.local_failed ? "Not sent" : row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
       const under = el("div", "under right" + (row.local_failed ? " failed-send" : ""));
       under.append(el("span", "", shown ? `${status} - ${time}` : status));
       if (row.local_failed) {
@@ -1109,14 +1170,17 @@ function renderMessages(rows) {
         });
         under.append(retry, remove);
       }
+      if (isNative()) appendTurnControls(under, row, all, body);
       transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
-      if (row.id != null) under.append(playButton(row.id));
+      if (!isNative() && row.id != null) under.append(playButton(row.id));
       under.append(copyButton(messageText(row), "Copy reply"));
-      if (shown) {
-        const details = el("span", "reply-usage", `${time} · ${replyUsage(row)}`);
-        details.title = "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
+      if (isNative() && ["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
+      if (isNative()) appendTurnControls(under, row, all, body);
+      if (shown || (isNative() && row.state === "completed")) {
+        const details = el("span", "reply-usage", `${shown ? time + " · " : ""}${replyUsage(row)}`);
+        details.title = isNative() ? "Measured output tokens per second and time to first token. — means no recorded measurement." : "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
         under.append(details);
       }
       if (under.children.length) transcript.append(under);
@@ -1159,13 +1223,13 @@ async function selectConversation(id, source) {
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
-  state.current = id;
+  state.current = id; state.model = null; state.editTurn = null; state.controlBusy = false; state.context = null;
   restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
   placePresence();
   reportPresence();
-  const item = state.conversations.find((row) => row.id === id);
+  const item = [...state.conversations, ...(state.searchResults || [])].find((row) => row.id === id);
   $("chat-title").textContent = item ? sessionName(item) : "Conversation";
   setChatAvatar(id);
   $("origin-badge").textContent = source && source !== "roost" ? source : "";
@@ -1176,6 +1240,12 @@ async function selectConversation(id, source) {
   showReasoning("default"); loadReasoning(id);
   try { await loadMessages(id); } catch (error) {
     if (state.current === id && state.sentMessages.some((item) => item.id === id && item.failed)) renderMessages([]);
+    else if (isNative() && state.current === id) {
+      const retry = el("button", "secondary", "Try again"); retry.type = "button";
+      retry.addEventListener("click", () => selectConversation(id, source));
+      const message = el("p", "empty-transcript", "Couldn’t load this conversation."); message.setAttribute("role", "alert");
+      $("transcript").replaceChildren(message, retry);
+    }
     notice(error.message);
   }
 }
@@ -1191,25 +1261,35 @@ async function loadMessages(id = state.current) {
   if (scope.alive() && serial > state.messageApplied) {
     state.messageApplied = serial;
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
-                   started: typeof data.started === "number" ? data.started : null, at };
+                   started: typeof data.started === "number" ? data.started : null, turn_id: data.turn_id, at };
+    if (isNative()) state.context = data.context;
     if (data.live === true) openStream(id);
     else if (!state.turn.working && state.stream?.id === id && state.stream.healthy) {
       state.stream.healthy = false; resetMessagePolling();
     }
     let history = state.messageHistory;
     if (history?.id !== id) history = state.messageHistory = { id, rows: [], loaded: false, loading: false };
-    history.rows = history.loaded ? mergeMessages(history.rows, data.messages) : data.messages;
+    history.rows = history.loaded && (!isNative() || data.has_older) ? mergeMessages(history.rows, data.messages, isNative()) : data.messages;
     if (!history.loaded) history.hasOlder = data.has_older === true;
     renderMessages(history.rows);
     messagePollDelay();
-    loadApprovals(id);
+    if (!isNative()) loadApprovals(id);
   }
 }
 
-function mergeMessages(older, newer) {
+function messageOrder(a, b) {
+  return a.ordinal != null && b.ordinal != null
+    ? a.ordinal - b.ordinal || (a.role === b.role ? a.id - b.id : a.role === "user" ? -1 : 1)
+    : a.id - b.id;
+}
+
+function mergeMessages(older, newer, snapshot = false) {
   const rows = new Map();
-  for (const row of records([...older, ...newer])) rows.set(String(row.id), row);
-  return [...rows.values()].sort((a, b) => a.id - b.id);
+  // A native tail is authoritative: cancelled or edited rows must disappear, even after paging.
+  const boundary = newer[0];
+  const retained = snapshot ? older.filter(row => boundary && (row.ordinal < boundary.ordinal || (row.turn_id != null && row.turn_id === boundary.turn_id && messageOrder(row, boundary) < 0)) && !newer.some(next => next.id === row.id)) : older;
+  for (const row of records([...retained, ...newer])) rows.set(String(row.id), row);
+  return [...rows.values()].sort(messageOrder);
 }
 
 async function loadEarlierMessages() {
@@ -1246,7 +1326,7 @@ function setApprovals(items) {
 }
 
 async function loadApprovals(id = state.current) {
-  if (!id || state.approvalLoading?.id === id) return;
+  if (isNative() || !id || state.approvalLoading?.id === id) return;
   const scope = viewScope(id), revision = state.approvalRevision;
   const loading = {id}; state.approvalLoading = loading;
   try {
@@ -1260,7 +1340,7 @@ async function loadApprovals(id = state.current) {
 }
 
 function renderApprovals() {
-  const panel = $("approvals"), items = state.approvals || [];
+  const panel = $("approvals"), items = isNative() ? [] : state.approvals || [];
   const signature = JSON.stringify([items, state.approvalBusy, state.approvalReady, state.approvalNotice, state.approvalFocus]);
   if (panel.dataset.content === signature) return;
   panel.dataset.content = signature; panel.replaceChildren();
@@ -1326,20 +1406,21 @@ function openStream(id) {
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
     if (!ours() || !data || typeof data !== "object") return;
+    if (isNative() && data.reset && data.turn_id !== state.live?.turn_id) loadMessages(id).catch(() => {});
     // Every connection, reconnections included, starts with the turn so far.
     if (data.reset) {
-      if (state.live?.id !== id || state.live.started !== data.started) {
+      if (state.live?.id !== id || state.live.started !== data.started || state.live.turn_id !== data.turn_id) {
         state.liveThoughtsOpen = !window.roostTheme.collapseThinking();
         state.liveNodes = null;
       }
-      state.live = { id, user: String(data.user ?? ""), started: data.started, thoughts: "", text: "", done: false };
+      state.live = applyStreamFrame(null, data, id);
     }
     if (state.live?.id !== id) return;
     state.stream.healthy = true; state.idleSince = null;
-    if (typeof data.thoughts === "string") state.live.thoughts += data.thoughts;
-    if (typeof data.text === "string") state.live.text += data.text;
-    if (Array.isArray(data.approvals)) setApprovals(data.approvals);
+    state.live = applyStreamFrame(state.live, data, id);
+    if (!isNative() && Array.isArray(data.approvals)) setApprovals(data.approvals);
     if (data.done) endStream(id);
+    else if (isNative()) renderMessages(state.lastRows || []);
     else scheduleLive();
   };
   // The browser retries a dropped connection by itself; a refused one (the turn is over) ends here.
@@ -1348,6 +1429,15 @@ function openStream(id) {
     state.stream.healthy = false; resetMessagePolling();
     if (source.readyState === 2) endStream(id);
   };
+}
+
+function applyStreamFrame(previous, data, id) {
+  const live = data.reset || !previous ? {id, user: String(data.user ?? ""), started: data.started,
+    turn_id: data.turn_id, revision: data.revision, state: data.state, thoughts: "", text: "", done: false} : {...previous};
+  if (typeof data.thoughts === "string") live.thoughts += data.thoughts;
+  if (typeof data.text === "string") live.text += data.text;
+  live.done = Boolean(data.done);
+  return live;
 }
 
 function endStream(id) {
@@ -1428,13 +1518,14 @@ function showReasoning(level) {
   state.reasoning = level;
   $("reasoning").value = level;
   $("reasoning-chip").classList.toggle("chosen", level !== "default");
+  if (isNative()) updateThinking();
 }
 
 async function loadReasoning(id) {
   const scope = viewScope(id);
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
-    if (scope.alive() && typeof data.reasoning === "string") showReasoning(data.reasoning);
+    if (scope.alive() && typeof data.reasoning === "string") { state.model = data.model || null; showReasoning(data.reasoning); }
   } catch { /* The chip keeps Default; the next send still uses what Roost stored. */ }
 }
 
@@ -1458,11 +1549,12 @@ function newConversation() {
   if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   leaveLive();
-  state.current = null;
+  state.current = null; state.model = null; state.editTurn = null; state.controlBusy = false; state.context = null;
   restoreComposer();
   state.draft = true;
   newDraftSeed();
-  showReasoning("default");
+  showReasoning(isNative() ? "none" : "default");
+  updateNativeComposer(); renderContext();
   $("app").classList.add("chat-open");
   placePresence();
   renderConversations(); renderWelcome();
@@ -1476,6 +1568,7 @@ async function submitMessage(event) {
   if (text.length > 16000) { notice("The message is too long. Shorten the draft before sending."); return; }
   // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
   // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
+  if (isNative() && !text && (runningTurn() || queuedTurn())) { await stopNativeReply(); return; }
   if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
@@ -1616,7 +1709,7 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
-    request_id: sendId(), reasoning: state.reasoning || "default", since: Date.now() };
+    request_id: sendId(), model: state.model, reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
   if (!retry) {
     state.voiceDraft = false; $("message").value = ""; saveComposer();
     $("composer").classList.remove("has-text");
@@ -1629,7 +1722,7 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   try {
     result = oldId
       ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id }) });
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null} : {}) }) });
   } catch (error) { failure = error; }
   finally {
     if (scope.alive()) { state.busy = false; $("send").disabled = false; }
@@ -1938,15 +2031,304 @@ async function saveJob(event) {
 }
 
 // Settings: a list of groups in the sidebar and the selected group in the main pane, like Jobs.
+function thinkingVisible(models, selected, defaultModel) {
+  const model = models.find(model => model.id === (selected || defaultModel));
+  return Boolean(model && model.thinking_mode !== "unsupported");
+}
+
+async function loadModels() {
+  const data = await api("/models");
+  state.models = data.models || []; state.defaultModel = data.default_model;
+  if (isNative()) updateThinking();
+}
+
+function updateThinking() {
+  show("reasoning-chip", thinkingVisible(state.models, state.model, state.defaultModel));
+  $("reasoning").querySelectorAll('option[value="default"]').forEach(option => { option.hidden = true; });
+}
+
+function fillModelPicker(select, selected) {
+  select.replaceChildren();
+  const option = el("option", "", "Server default"); option.value = ""; select.append(option);
+  for (const model of state.models) {
+    const item = el("option", "", model.display_name); item.value = model.id; select.append(item);
+  }
+  // Keep a disabled model override visible until the owner chooses a replacement.
+  if (selected && !state.models.some(model => model.id === selected)) {
+    const item = el("option", "", selected + " (unavailable)"); item.value = selected; item.disabled = true; select.append(item);
+  }
+  select.value = selected || "";
+}
+
+function updateSheetThinking() {
+  show("sheet-thinking", thinkingVisible(state.models, $("sheet-model").value, state.defaultModel));
+}
+
+function turnControls(row, rows) {
+  const settled = ["completed", "interrupted", "failed"].includes(row.state);
+  return { queue: row.role === "user" && row.state === "queued", edit: row.role === "user" && settled,
+    regenerate: row.role === "assistant" && settled && rows.at(-1)?.turn_id === row.turn_id };
+}
+
+function runningTurn() {
+  return (state.live && !state.live.done && state.live.state !== "queued" ? state.live.turn_id : null) ||
+    state.lastRows?.find(row => row.state === "running")?.turn_id;
+}
+
+function queuedTurn() {
+  return state.lastRows?.find(row => row.state === "queued")?.turn_id ||
+    (state.live?.state === "queued" && !state.live.done ? state.live.turn_id : null);
+}
+
+function stopNativeReply() {
+  const running = runningTurn(), queued = queuedTurn();
+  if (running || queued) return nativeControl(running ? "stop" : "cancel", running || queued);
+}
+
+function updateNativeComposer() {
+  if (!isNative()) return;
+  const running = Boolean(runningTurn() || queuedTurn()), send = $("send");
+  send.type = running ? "button" : "submit";
+  send.textContent = running ? "Stop" : "↑";
+  send.setAttribute("aria-label", running ? "Stop reply" : "Send message");
+  send.classList.toggle("stopping", running);
+  send.disabled = state.busy || state.controlBusy;
+  show("queue-send", running && Boolean($("message").value.trim()));
+  $("queue-send").disabled = state.busy;
+}
+
+async function nativeControl(action, turnId, extra = {}) {
+  if (state.controlBusy) return;
+  const id = state.current, scope = viewScope(id);
+  state.controlBusy = true; updateNativeComposer();
+  try {
+    await api(`/conversations/${encodeURIComponent(id)}/turns/${action}`, {
+      method: "POST", body: JSON.stringify({turn_id: turnId, ...extra})});
+    if (scope.alive()) {
+      state.editTurn = null; state.live = null; closeStream(); state.messageHistory = null;
+      await loadMessages(id);
+    }
+  } catch (error) {
+    report(error, scope);
+    // Reconcile an uncertain result before the owner attempts another control.
+    if (scope.alive()) { state.editTurn = null; await loadMessages(id).catch(() => {}); }
+  } finally {
+    if (scope.alive()) { state.controlBusy = false; state.messageSignature = null; renderMessages(state.lastRows || []); }
+  }
+}
+
+function appendTurnControls(under, row, rows, body) {
+  const controls = turnControls(row, rows);
+  const button = (text, label, action) => {
+    const node = el("button", "send-action native-action", text);
+    node.type = "button"; node.disabled = state.controlBusy; node.setAttribute("aria-label", label);
+    node.addEventListener("click", event => { event.stopPropagation(); action(); }); under.append(node);
+  };
+  if (controls.queue) {
+    button("×", "Cancel queued message", () => nativeControl("cancel", row.turn_id));
+    button("↑", "Send queued message now", () => nativeControl("send-now", row.turn_id));
+  }
+  if (controls.edit) button("Edit", "Edit message", () => {
+    state.editTurn = row.turn_id; body.classList.add("editing");
+    const form = el("form", "inline-edit"), input = el("textarea");
+    input.value = messageText(row); input.maxLength = 16000; input.required = true; input.rows = 4;
+    input.setAttribute("aria-label", "Edit message");
+    const later = rows.some(next => next.turn_id !== row.turn_id && next.ordinal > row.ordinal);
+    const warning = el("p", "sheet-note", later ? "Saving drops all later messages, including the queue." : "Saving sends this message again.");
+    const actions = el("div", "settings-actions"), cancel = el("button", "secondary", "Cancel"), save = el("button", "primary", "Save and resend");
+    cancel.type = "button"; save.type = "submit";
+    cancel.addEventListener("click", () => { state.editTurn = null; state.messageSignature = null; renderMessages(state.lastRows || []); });
+    form.addEventListener("click", event => event.stopPropagation());
+    form.addEventListener("submit", event => {
+      event.preventDefault(); const text = input.value.trim(); if (!text) return;
+      save.disabled = cancel.disabled = true;
+      nativeControl("edit", row.turn_id, {text, request_id: sendId()});
+    });
+    actions.append(cancel, save); form.append(input, warning, actions); body.replaceChildren(form); input.focus();
+  });
+  if (controls.regenerate) button(row.state === "failed" ? "Retry" : "Regenerate", row.state === "failed" ? "Retry reply" : "Regenerate reply", () => nativeControl("regenerate", row.turn_id));
+}
+
+function renderContext() {
+  const context = state.context, meter = $("context-meter");
+  const visible = isNative() && context?.prompt_tokens != null && context?.context_tokens != null;
+  show("context-meter", visible);
+  if (!visible) return;
+  meter.replaceChildren();
+  const label = `${context.prompt_tokens.toLocaleString()} / ${context.context_tokens.toLocaleString()} tokens`;
+  const progress = el("meter"); progress.min = 0; progress.max = context.context_tokens; progress.value = context.prompt_tokens;
+  progress.setAttribute("aria-label", "Context: " + label);
+  meter.append(el("span", "", "Context · " + label), progress);
+}
+
+let searchTimer;
+function queueSearch() {
+  clearTimeout(searchTimer);
+  state.searchResults = null; state.searchError = ""; state.searchLoading = Boolean(state.search);
+  const query = state.search, scope = signInScope();
+  if (!query) return;
+  searchTimer = setTimeout(async () => {
+    try {
+      const data = await api("/search?q=" + encodeURIComponent(query));
+      if (scope.alive() && state.search === query) state.searchResults = data.sessions;
+    } catch (error) { if (scope.alive() && state.search === query) state.searchError = error.message; }
+    finally { if (scope.alive() && state.search === query) { state.searchLoading = false; renderConversations(); } }
+  }, 250);
+}
+
+async function loadPrimary() {
+  state.modelsLoading = true; state.modelsError = ""; renderSettings();
+  const scope = signInScope();
+  try {
+    const data = await api("/settings/servers");
+    state.primary = data.servers.find(server => server.id === "primary") || {base_url: "", models: [], default_model: null, has_key: false};
+  } catch (error) { if (scope.alive()) state.modelsError = error.message; }
+  finally { if (scope.alive()) { state.modelsLoading = false; renderSettings(); } }
+}
+
+function modelField(parent, label, input) {
+  const wrapper = el("label", "model-field", label); wrapper.append(input); parent.append(wrapper); return input;
+}
+
+function modelInput(value, type = "text") {
+  const input = el("input"); input.type = type; input.value = value; return input;
+}
+
+function renderModelList(parent, server) {
+  const redraw = focus => { parent.replaceChildren(); renderModelList(parent, server); $(focus).focus(); };
+  const defaultModel = el("select"); defaultModel.id = "settings-default-model";
+  const enabledModels = server.models.filter(model => model.enabled);
+  if (!enabledModels.length) {
+    const option = el("option", "", "No enabled models"); option.value = ""; defaultModel.append(option);
+  }
+  for (const model of enabledModels) {
+    const option = el("option", "", model.display_name || model.id); option.value = model.id; defaultModel.append(option);
+  }
+  defaultModel.value = server.default_model || "";
+  defaultModel.disabled = state.settingsBusy || !enabledModels.length;
+  defaultModel.addEventListener("change", () => { server.default_model = defaultModel.value || null; });
+  modelField(parent, "Default model", defaultModel);
+  if (!server.models.length) parent.append(el("p", "", "No models yet. Discover models or add one by name."));
+  for (const [index, model] of server.models.entries()) {
+    const row = el("div", "model-row"), heading = el("div", "model-row-heading");
+    const expanded = state.openModel === model.id, label = model.display_name || model.id;
+    const expand = el("button", "model-expand"); expand.type = "button"; expand.id = `settings-model-${index}`;
+    expand.setAttribute("aria-expanded", String(expanded)); expand.setAttribute("aria-controls", `settings-model-details-${index}`);
+    expand.setAttribute("aria-label", `Model settings for ${label}`);
+    const copy = el("span", "model-copy"), title = el("span", "model-name", label);
+    const id = el("small", "model-id" + (label === model.id ? " hidden" : ""), model.id);
+    copy.append(title, id);
+    const chevron = el("span", "model-chevron", "›"); chevron.setAttribute("aria-hidden", "true");
+    expand.append(copy, chevron);
+    expand.addEventListener("click", () => {
+      state.openModel = expanded ? null : model.id; redraw(expand.id);
+    });
+    const enabled = el("button", "job-toggle" + (model.enabled ? "" : " off"));
+    enabled.type = "button"; enabled.id = `settings-model-enabled-${index}`; enabled.disabled = state.settingsBusy;
+    enabled.setAttribute("role", "switch"); enabled.setAttribute("aria-checked", String(model.enabled));
+    enabled.setAttribute("aria-label", `${label} enabled`);
+    enabled.addEventListener("click", () => {
+      model.enabled = !model.enabled;
+      if (!server.models.some(item => item.enabled && item.id === server.default_model)) {
+        server.default_model = server.models.find(item => item.enabled)?.id || null;
+      }
+      redraw(enabled.id);
+    });
+    const toggle = el("span", "model-enabled"); toggle.append(el("span", "", "Enabled"), enabled);
+    heading.append(expand, toggle); row.append(heading);
+    const fields = el("div", "model-details" + (expanded ? "" : " hidden")); fields.id = `settings-model-details-${index}`;
+    if (expanded) {
+      const name = modelField(fields, "Display name", modelInput(model.display_name)); name.maxLength = 80;
+      name.addEventListener("input", () => {
+        model.display_name = name.value.trim() ? name.value : model.id;
+        title.textContent = model.display_name; id.classList.toggle("hidden", model.display_name === model.id);
+        expand.setAttribute("aria-label", `Model settings for ${model.display_name}`);
+        enabled.setAttribute("aria-label", `${model.display_name} enabled`);
+        const option = [...defaultModel.options].find(option => option.value === model.id);
+        if (option) option.textContent = model.display_name;
+      });
+      const thinking = el("select");
+      for (const [value, text] of [["reasoning_effort", "reasoning_effort"], ["template_flag", "Template flag"], ["unsupported", "Unsupported"]]) {
+        const option = el("option", "", text); option.value = value; thinking.append(option);
+      }
+      thinking.value = model.thinking_mode;
+      thinking.addEventListener("change", () => { model.thinking_mode = thinking.value; });
+      modelField(fields, "Thinking mode", thinking);
+      const context = modelField(fields, "Context size (optional)", modelInput(model.context_tokens ?? "", "number"));
+      context.min = 1; context.max = 100000000; context.step = 1;
+      context.addEventListener("input", () => { if (context.value) model.context_tokens = Number(context.value); else delete model.context_tokens; });
+    }
+    row.append(fields); parent.append(row);
+  }
+}
+
+function renderModels(detail) {
+  const backend = settingsSection(detail, "Backend", "Choose which conversations Roost shows.");
+  const select = el("select");
+  for (const value of ["hermes", "native"]) { const option = el("option", "", value === "native" ? "Native" : "Hermes"); option.value = value; select.append(option); }
+  select.value = state.backend; select.disabled = state.settingsBusy;
+  modelField(backend, "Backend", select);
+  select.addEventListener("change", async () => {
+    if (await saveSettings({backend: select.value}, "Backend saved.")) location.reload();
+  });
+  if (!isNative()) return;
+  const section = settingsSection(detail, "Primary server", "An OpenAI-compatible model server. Keys stay on the server.");
+  if (state.modelsError) { const error = el("p", "error", state.modelsError); error.setAttribute("role", "alert"); section.append(error); }
+  if (state.modelsLoading) { section.append(el("p", "", "Loading models…")); return; }
+  const server = state.primary;
+  if (!server) { section.append(settingsButton("secondary", "Load server", loadPrimary)); return; }
+  const url = modelField(section, "Base URL", modelInput(server.base_url, "url"));
+  url.placeholder = "https://models.example.com/v1"; url.spellcheck = false; url.autocapitalize = "off"; url.autocomplete = "off";
+  url.addEventListener("input", () => { server.base_url = url.value; });
+  const key = modelField(section, "API key", modelInput("", "password"));
+  key.maxLength = 4096;
+  key.autocomplete = "new-password"; key.placeholder = server.has_key ? "Key saved" : "Optional";
+  section.append(el("p", "", server.has_key ? "Key saved. Enter a new key to replace it." : "No key saved."));
+  const actions = el("div", "settings-actions");
+  const saveServer = async clear => {
+    const changes = {base_url: url.value, ...(clear ? {clear_key: true} : key.value ? {key: key.value} : {})};
+    key.value = "";
+    return withSettingsBusy(async () => {
+      const saved = await api("/settings/servers/primary", {method: "PUT", body: JSON.stringify(changes)});
+      state.primary = {...server, base_url: saved.base_url, has_key: saved.has_key}; notice(clear ? "Key cleared." : "Server saved.");
+    });
+  };
+  actions.append(settingsButton("primary", "Save server", () => saveServer(false)));
+  if (server.has_key) actions.append(settingsButton("secondary", "Clear key", () => saveServer(true)));
+  actions.append(settingsButton("secondary", "Discover", async () => {
+    if (!await saveServer(false)) return;
+    await withSettingsBusy(async () => {
+      const data = await api("/settings/servers/primary/discover", {method: "POST"});
+      const drafts = new Map(server.models.map(model => [model.id, model]));
+      state.primary.models = data.models.map(model => drafts.get(model.id) || model); notice("Models discovered. Choose which to enable, then save models.");
+    });
+  }));
+  section.append(actions);
+  const curated = settingsSection(detail, "Models", "Enable models for the chat picker and choose a default. Save models when you’re done.");
+  const list = el("div", "model-list"); renderModelList(list, server); curated.append(list);
+  const add = modelField(curated, "Add model by name", modelInput("")); add.autocapitalize = "off"; add.spellcheck = false; add.placeholder = "model-id";
+  const buttons = el("div", "settings-actions");
+  buttons.append(settingsButton("secondary", "Add model", () => {
+    const id = add.value.trim(); if (!id) return;
+    if (server.models.some(model => model.id === id)) { notice("That model is already listed."); return; }
+    server.models.push({id, display_name: id, enabled: false, thinking_mode: "unsupported"});
+    list.replaceChildren(); renderModelList(list, server); add.value = "";
+  }), settingsButton("primary", "Save models", () => withSettingsBusy(async () => {
+    await api("/settings/servers/primary/models", {method: "PUT", body: JSON.stringify({models: server.models, default_model: server.default_model})});
+    await loadModels(); notice("Models saved.");
+  })));
+  curated.append(buttons);
+}
+
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["agent", agent(), "Name and instructions"], ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Replies and job reports on your devices"],
+          ["models", "Models", "Backend and model server"], ["agent", agent(), isNative() ? "Name" : "Name and instructions"], ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
+          ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", isNative() ? "Replies on your devices" : "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
-const SETTINGS_ICONS = { appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+const SETTINGS_ICONS = { models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
   const scope = signInScope();
@@ -1958,7 +2340,7 @@ async function loadSettings() {
     applyServerSettings(data);
     renderSettings();
   } catch (error) { report(error, scope); }
-  if (state.settingsGroup === "agent") loadSoul();
+  if (state.settingsGroup === "agent" && !isNative()) loadSoul();
 }
 
 function selectSettingsGroup(id) {
@@ -1967,10 +2349,11 @@ function selectSettingsGroup(id) {
   placePresence();
   renderSettings();
   $("settings-detail").scrollTop = 0;
-  if (id === "agent") loadSoul();
+  if (id === "models") loadPrimary();
+  if (id === "agent" && !isNative()) loadSoul();
   if (id === "about") loadAbout();
   if (id === "account") loadPasskeys();
-  if (id === "notifications") { loadPush(); loadHermesLink(); }
+  if (id === "notifications") { loadPush(); if (!isNative()) loadHermesLink(); }
 }
 
 function renderSettings() {
@@ -1993,7 +2376,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -2166,13 +2549,15 @@ function renderAbout(detail) {
      "app " + formatBytes(stats.app_bytes) + " · data " + formatBytes(stats.state_bytes)],
     ["Free space", formatBytes(stats.disk_free_bytes), "of " + formatBytes(stats.disk_total_bytes) + " on the shared drive"]]));
   live.append(el("p", "", "Updated " + clockTime(about.at)));
-  const hermes = about.hermes;
-  const hermesSection = settingsSection(detail, agent() + " (Hermes)", null);
-  hermesSection.append(statList(hermes.reachable ? [
-    ["Status", hermes.gateway_running ? "Running" : (hermes.gateway_state || "Stopped")],
-    ["Response time", hermes.latency_ms + " ms"],
-    ["Hermes version", String(hermes.version || "Unknown"), hermes.release_date ? String(hermes.release_date) : ""],
-    ["Active sessions", String(hermes.active_sessions ?? "Unknown")]] : [["Status", "Unreachable", "Roost can’t reach the Hermes dashboard"]]));
+  if (!isNative()) {
+    const hermes = about.hermes;
+    const hermesSection = settingsSection(detail, agent() + " (Hermes)", null);
+    hermesSection.append(statList(hermes.reachable ? [
+      ["Status", hermes.gateway_running ? "Running" : (hermes.gateway_state || "Stopped")],
+      ["Response time", hermes.latency_ms + " ms"],
+      ["Hermes version", String(hermes.version || "Unknown"), hermes.release_date ? String(hermes.release_date) : ""],
+      ["Active sessions", String(hermes.active_sessions ?? "Unknown")]] : [["Status", "Unreachable", "Roost can’t reach the Hermes dashboard"]]));
+  }
   const credits = settingsSection(detail, "Credits", null);
   const list = el("ul", "credits");
   for (const [text, href] of [
@@ -2180,6 +2565,7 @@ function renderAbout(detail) {
     ["Hermes Agent by Nous Research", "https://github.com/NousResearch/hermes-agent"],
     ["Space Grotesk typeface by the Space Grotesk Project Authors, SIL Open Font License 1.1", "https://github.com/floriankarsten/space-grotesk"],
     ["aiohttp by the aio-libs contributors, Apache License 2.0", "https://github.com/aio-libs/aiohttp"]]) {
+    if (isNative() && text.startsWith("Hermes Agent")) continue;
     const item = el("li"), link = el("a", "", text);
     link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
     item.append(link); list.append(item);
@@ -2191,7 +2577,7 @@ function renderAgentSettings(detail) {
   const hermesName = state.settings.hermes_agent_name;
   const name = settingsSection(detail, "Name", hermesName ?
     `Leave empty to use the name Hermes gives it: ${hermesName}.` :
-    "Hermes has no name for it, so Roost shows “Agent” when this is empty.");
+    (isNative() ? "Roost shows “Agent” when this is empty." : "Hermes has no name for it, so Roost shows “Agent” when this is empty."));
   const label = el("label", "", "Name shown in Roost"); label.htmlFor = "settings-agent-name";
   const input = el("input"); input.id = "settings-agent-name"; input.maxLength = 40; input.autocomplete = "off";
   input.value = state.nameDraft ?? state.settings.agent_name; input.placeholder = hermesName || "Agent";
@@ -2202,6 +2588,7 @@ function renderAgentSettings(detail) {
   }));
   name.append(label, input, actions);
 
+  if (isNative()) return;
   const soul = settingsSection(detail, "Instructions",
     `What ${agent()} should know and how it should behave, everywhere it works: Roost, the desktop app and scheduled jobs. Hermes keeps these in its SOUL.md file.`);
   const soulLabel = el("label", "", "Instructions"); soulLabel.htmlFor = "settings-soul";
@@ -2221,7 +2608,8 @@ function renderDataSettings(detail) {
   for (const [kind, heading, text] of [
     ["conversations", "Delete all conversations", `Removes every conversation in Messages, whatever started it, from ${agent()}’s history for good. Job run history stays with its jobs.`],
     ["jobs", "Delete all jobs", `Removes every scheduled job and stops it running. This can’t be undone.`]]) {
-    const section = settingsSection(detail, heading, text);
+    if (isNative() && kind === "jobs") continue;
+    const section = settingsSection(detail, heading, isNative() ? "Removes all native conversations for good." : text);
     // The operation's own name is the phrase to type, shown in the empty field; capitals and spacing don't matter.
     const phrase = heading.toLowerCase(), prompt = `Type “${phrase}” to confirm`;
     const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "off";
@@ -2350,12 +2738,14 @@ async function signOut() {
 }
 
 function renderServiceSettings(detail) {
-  const agentSection = settingsSection(detail, `Restart ${agent()}`,
-    `Restarts the Hermes gateway: its messaging platforms and the job scheduler. A reply that is being written may stop.`);
-  const agentActions = el("div", "settings-actions");
-  agentActions.append(settingsButton("secondary", `Restart ${agent()}`, () =>
-    serviceAction("/service/restart-agent", `${agent()} is restarting. Replies may take a minute.`)));
-  agentSection.append(agentActions);
+  if (!isNative()) {
+    const agentSection = settingsSection(detail, `Restart ${agent()}`,
+      `Restarts the Hermes gateway: its messaging platforms and the job scheduler. A reply that is being written may stop.`);
+    const agentActions = el("div", "settings-actions");
+    agentActions.append(settingsButton("secondary", `Restart ${agent()}`, () =>
+      serviceAction("/service/restart-agent", `${agent()} is restarting. Replies may take a minute.`)));
+    agentSection.append(agentActions);
+  }
   const roostSection = settingsSection(detail, "Restart Roost", "Restarts this web app. You stay signed in.");
   const roostActions = el("div", "settings-actions");
   roostActions.append(settingsButton("secondary", "Restart Roost", restartRoost));
@@ -2405,7 +2795,7 @@ function renderNotifications(detail) {
     else actions.append(settingsButton("primary", "Turn on", enablePush));
     section.append(actions);
   }
-  renderHermesLink(detail);
+  if (!isNative()) renderHermesLink(detail);
   if (!state.push.devices.length) return;
   const devices = settingsSection(detail, "Devices", "Every device that gets Roost’s notifications.");
   const list = el("ul", "passkey-list");
@@ -2683,7 +3073,7 @@ $("run-selected-job").addEventListener("click", () => state.selectedJob && jobAc
 $("edit-selected-job").addEventListener("click", () => currentJob() && openJob(currentJob()));
 $("search").addEventListener("input", () => {
   const query = $("search").value.trim().toLowerCase();
-  if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = query; renderConversations(); }
+  if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = isNative() ? query.slice(0, 200) : query; if (isNative()) queueSearch(); renderConversations(); }
 });
 $("conversation-list").addEventListener("scroll", loadMoreIfNearEnd, { passive: true });
 
@@ -2755,6 +3145,11 @@ $("transcript").addEventListener("scroll", () => {
   if ($("transcript").scrollTop <= 0) loadEarlierMessages();
 }, { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
+$("sheet-model").addEventListener("change", updateSheetThinking);
+$("message").addEventListener("input", updateNativeComposer);
+$("send").addEventListener("click", event => {
+  if (isNative() && (runningTurn() || queuedTurn())) { event.preventDefault(); stopNativeReply(); }
+});
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
   sheetView("sheet-rename-form"); $("sheet-name").focus();
@@ -2997,6 +3392,7 @@ async function start() {
     return;
   } finally { boot.running = false; }
   boot.done = true; show("connecting", false);
+  state.backend = data.backend || "hermes";
   applyAgentName(data.agent);
   state.passkeysAvailable = Boolean(data.passkeys);
   return data.signed_in ? signedIn() : signedOut(false);

@@ -75,6 +75,7 @@
         <section id="approvals" class="approval-panel hidden" aria-label="Approval requests" aria-live="polite"></section>
         <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
         <div class="latest-anchor"><button id="jump-latest" class="jump-latest hidden" type="button" aria-label="Jump to latest"></button></div>
+        <div id="context-meter" class="context-meter hidden"></div>
         <form id="composer" class="composer">
           <label id="reasoning-chip" class="reasoning-chip" title="How hard the agent thinks in this conversation" data-agent-title="How hard {agent} thinks in this conversation">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>
@@ -90,6 +91,7 @@
           <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
           <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
           <button id="voice-button" class="mic-button" type="button" aria-label="Start recording" title="Start recording" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+          <button id="queue-send" class="secondary queue-send hidden" type="submit">Queue</button>
           <button id="send" class="send-button" type="submit" aria-label="Send message">↑</button>
         </form>
       </section>
@@ -153,7 +155,12 @@
     <form id="sheet-instructions-form" class="sheet-view hidden">
       <label class="sheet-title" for="sheet-instructions-text">Instructions for this conversation</label>
       <textarea id="sheet-instructions-text" maxlength="4000" rows="6" placeholder="How the agent should work in this conversation" data-agent-placeholder="How {agent} should work in this conversation"></textarea>
-      <p class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
+      <p id="sheet-hermes-note" class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
+      <div id="sheet-native-settings" class="sheet-view hidden">
+        <label for="sheet-model">Model</label><select id="sheet-model"></select>
+        <div id="sheet-thinking"><label for="sheet-reasoning">Thinking</label><select id="sheet-reasoning">
+          <option value="none">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+        </select></div></div>
       <p id="sheet-instructions-error" class="error" role="alert"></p>
       <div class="dialog-actions"><button id="sheet-instructions-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>

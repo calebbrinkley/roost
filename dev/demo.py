@@ -15,9 +15,9 @@ from roost.auth import make_password_hash
 from roost.server import SILENCE, create_app
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE = ROOT / ".roost-demo-state"
-ROOST_PORT = 8787
-HERMES_PORT = 18719
+STATE = Path(os.environ.get("ROOST_DEMO_STATE_DIR", ROOT / ".roost-demo-state"))
+ROOST_PORT = int(os.environ.get("ROOST_DEMO_PORT", "8787"))
+HERMES_PORT = int(os.environ.get("ROOST_DEMO_HERMES_PORT", "18719"))
 DEMO_PASSWORD = "roost-demo-only"
 HERMES_PASSWORD = "example-demo-hermes-password"
 
@@ -456,6 +456,21 @@ async def main():
         from native_smoke import OpenAIFake, configure
         fake = await OpenAIFake().start()
         fake.delay = .5
+        if "--capture" in sys.argv:
+            from native_smoke import frame
+            # Deterministic measurements and enough streaming time to photograph a queue.
+            chunks = [
+                frame({'reasoning_content': 'Leave room to rest, with a little time outside.'}),
+                frame({'content': 'Start with a slow morning and a walk. '}),
+                frame({'content': 'Keep the afternoon open for reading.\n\n'}),
+                frame({'content': 'Choose one small project, then leave the rest of the day free.'}),
+                frame({}, finish='stop', usage={'prompt_tokens': 128, 'completion_tokens': 64}),
+                b'data: [DONE]\n\n',
+            ]
+            fake.frames = b''.join(chunks)
+            fake.chunk_sizes = tuple(len(chunk) for chunk in chunks)
+            fake.chunk_delay = float(os.environ.get("ROOST_DEMO_CHUNK_DELAY", "3"))
+            fake.completion['choices'][0]['message']['content'] = 'A quieter weekend'
         configure(STATE, fake.url)
     mock = web.AppRunner(mock_hermes(), access_log=None) if not native else None
     roost = web.AppRunner(create_app(), access_log=None)
