@@ -19,7 +19,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__, live, settings, turns
+from . import __version__, live, provider, servers, settings, turns
 
 from .auth import Sessions, verify_password
 from .chats import INSTRUCTIONS_LIMIT, REASONING, Chats, with_instructions
@@ -28,6 +28,7 @@ from .hermes import ID, Hermes, HermesError, plain_id
 from .passkeys import PasskeyError, Passkeys
 from .push import Push, PushError
 from .settings import clean_name
+from .store import Store
 from . import reply_usage
 
 STATIC = Path(__file__).with_name("static")
@@ -118,6 +119,11 @@ async def guard(request: web.Request, handler):
         response = await handler(request)
     except HermesError as exc:
         response = web.json_response({"error": exc.message}, status=exc.status)
+    except servers.ServerError as exc:
+        response = web.json_response({"error": str(exc)}, status=503 if isinstance(exc, servers.ServerStorageError) else 400)
+    except provider.ProviderError as exc:
+        status = 503 if isinstance(exc, provider.ProviderBusy) else 504 if isinstance(exc, provider.ProviderTimeout) else 502
+        response = web.json_response({"error": str(exc)}, status=status)
     except web.HTTPException as exc:
         response = web.json_response({"error": exc.text or exc.reason}, status=exc.status)
     if not response.prepared:  # an event stream sent its headers already
@@ -305,6 +311,31 @@ async def settings_view(app: web.Application) -> dict:
 
 async def get_settings(request: web.Request):
     return web.json_response(await settings_view(request.app))
+
+
+async def get_servers(request: web.Request):
+    return web.json_response({"servers": request.app["servers"].list()})
+
+
+async def update_server(request: web.Request):
+    return web.json_response(request.app["servers"].update(request.match_info["server_id"], await json_body(request)))
+
+
+async def update_server_models(request: web.Request):
+    return web.json_response(request.app["servers"].set_models(request.match_info["server_id"], await json_body(request)))
+
+
+async def discover_server_models(request: web.Request):
+    configured = request.app["servers"]
+    sid = request.match_info["server_id"]
+    saved = configured.get(sid)
+    if not saved["base_url"]:
+        raise servers.ServerError("Set a model base URL first.")
+    async with aiohttp.ClientSession() as session:
+        client = provider.Provider(session, saved["base_url"], configured.key(sid),
+                                   timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=15))
+        discovered = await client.list_models()
+    return web.json_response({"models": servers.merge_models(saved["models"], discovered)})
 
 
 async def update_settings(request: web.Request):
@@ -1028,6 +1059,14 @@ async def static(request: web.Request):
     return web.FileResponse(STATIC / name, headers={"Cache-Control": "no-store"})
 
 
+async def native_store(app: web.Application):
+    app["store"] = Store(app["state_dir"] / "native.sqlite3")
+    try:
+        yield
+    finally:
+        app["store"].close()
+
+
 async def startup(app: web.Application):
     await app["hermes"].start()
     app["push_http"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
@@ -1073,6 +1112,7 @@ def create_app() -> web.Application:
     state = Path(os.environ.get("ROOST_STATE_DIR", "./.roost-state"))
     password_file = state / "password.hash"
     password_file.read_text(encoding="utf-8")  # fail at startup, not at first sign-in, if it is missing
+    model_servers = servers.Servers(state)
     app = web.Application(middlewares=[guard], client_max_size=64 * 1024)
     app["origin"] = origin
     app["demo"] = os.environ.get("ROOST_DEMO") == "1"
@@ -1092,6 +1132,7 @@ def create_app() -> web.Application:
     app["login_attempts"] = {}
     app["login_inflight"] = {}
     app["sessions"] = Sessions(state / "sessions.sqlite3")
+    app["servers"] = model_servers
     # Passkeys are bound to the browser origin's host name (the WebAuthn relying party ID).
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
@@ -1105,6 +1146,7 @@ def create_app() -> web.Application:
     app["send_requests"] = OrderedDict()
     app["hermes"] = Hermes(os.environ["ROOST_HERMES_URL"], os.environ["ROOST_HERMES_USERNAME"],
                             Path(os.environ["ROOST_HERMES_PASSWORD_FILE"]))
+    app.cleanup_ctx.append(native_store)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
     app.on_cleanup.append(cleanup)
@@ -1155,6 +1197,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/conversations/{sid}/speech/{mid}", speech)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
+    app.router.add_get("/api/settings/servers", get_servers)
+    app.router.add_put("/api/settings/servers/{server_id}", update_server)
+    app.router.add_post("/api/settings/servers/{server_id}/discover", discover_server_models)
+    app.router.add_put("/api/settings/servers/{server_id}/models", update_server_models)
     app.router.add_get("/api/settings/soul", get_soul)
     app.router.add_put("/api/settings/soul", update_soul)
     app.router.add_get("/api/about", about)
