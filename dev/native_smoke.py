@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from aiohttp import ClientSession, CookieJar
+from aiohttp import ClientSession, CookieJar, FormData
 from aiohttp.test_utils import TestServer
 
 from roost.auth import make_password_hash
@@ -152,6 +152,21 @@ async def run():
                 no_web = await request('POST', path + '/messages', {'text': 'No web for this chat', 'request_id': str(uuid4())})
                 await settled(no_web['turn_id'])
                 assert not app['store'].get_turn(no_web['turn_id']).settings['tools_offered']
+                # An uploaded file is extracted on the server and reaches the model before the typed text.
+                fake.scenario = None
+                form = FormData()
+                form.add_field('file', b'Synthetic attachment line.\n', filename='notes.txt')
+                async with client.post(roost.make_url('/api/attachments/extract'), headers=headers, data=form) as response:
+                    extracted = await response.json()
+                assert response.status == 200 and extracted['kind'] == 'text' and extracted['tokens'] == 7, extracted
+                attached = await request('POST', '/api/conversations', {'text': 'Summarize the file', 'request_id': str(uuid4()),
+                                         'attachments': [{'name': extracted['name'], 'text': extracted['text']}]}, 201)
+                await settled(attached['turn_id'])
+                prompt = [r[2] for r in fake.requests if r[2] and r[2]['stream']][-1]['messages'][-1]
+                assert prompt == {'role': 'user', 'content': '<attachment name="notes.txt">\nSynthetic attachment line.\n\n</attachment>\n\nSummarize the file'}, prompt
+                shown = (await request('GET', '/api/conversations/' + attached['session_id']))['messages'][0]
+                assert shown['content'] == 'Summarize the file' and shown['attachments'][0]['name'] == 'notes.txt'
+                await request('DELETE', '/api/conversations/' + attached['session_id'], {'confirm': True})
                 # A small context makes the fourth message of a fresh chat fold its first turn into a summary.
                 from roost.servers import Servers
                 Servers(state, environ={}).set_models('primary', {'models': [{'id': 'example-model', 'display_name': 'Example', 'enabled': True,
@@ -176,7 +191,7 @@ async def run():
                 await request('DELETE', path, {'confirm': True})
                 assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, attachment extraction and prompt layout, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()

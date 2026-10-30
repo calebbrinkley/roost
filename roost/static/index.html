@@ -76,6 +76,7 @@
         <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
         <div class="latest-anchor"><button id="jump-latest" class="jump-latest hidden" type="button" aria-label="Jump to latest"></button></div>
         <div id="context-meter" class="context-meter hidden"></div>
+        <div id="attach-tray" class="attach-tray hidden"></div>
         <form id="composer" class="composer">
           <label id="reasoning-chip" class="reasoning-chip" title="How hard the agent thinks in this conversation" data-agent-title="How hard {agent} thinks in this conversation">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>
@@ -88,6 +89,8 @@
               <option value="high">High</option>
             </select>
           </label>
+          <button id="attach-button" class="attach-button hidden" type="button" aria-label="Attach files" title="Attach text files or PDFs"></button>
+          <input id="attach-input" type="file" multiple hidden accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.xml,.html,.htm,.log,.ini,.cfg,.conf,.env,.rst,.tex,.srt,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.css,.scss,.sass,.less,.sh,.bash,.zsh,.fish,.ps1,.bat,.sql,.graphql,.proto,.c,.h,.cc,.cpp,.cxx,.hpp,.hh,.cs,.java,.kt,.kts,.swift,.m,.mm,.go,.rs,.rb,.php,.pl,.lua,.r,.scala,.dart,.zig,.nim,.ex,.exs,.erl,.hs,.ml,.clj,.vue,.svelte,.gradle,.make,.cmake,.diff,.patch,.pdf,text/*,application/pdf">
           <button id="web-toggle" class="web-toggle hidden" type="button" aria-label="Search the web for this message" title="Search the web for this message" aria-pressed="false"></button>
           <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
           <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
@@ -197,6 +200,15 @@
       <div id="summary-text" class="summary-text"></div>
       <p class="sheet-note">This is what the model sees in place of those messages. The originals stay in the chat.</p>
       <div class="dialog-actions"><button id="summary-close" class="secondary" type="button">Close</button></div>
+    </div>
+  </dialog>
+  <dialog id="attachment-sheet" class="sheet" aria-labelledby="attachment-title">
+    <div class="sheet-view">
+      <h2 id="attachment-title" class="sheet-title" tabindex="-1"></h2>
+      <p id="attachment-meta" class="sheet-note"></p>
+      <div id="attachment-text" class="summary-text"></div>
+      <p class="sheet-note">This is the text Roost sent to the model. The original file is not kept.</p>
+      <div class="dialog-actions"><button id="attachment-close" class="secondary" type="button">Close</button></div>
     </div>
   </dialog>
   <script src="/app.js" defer></script>

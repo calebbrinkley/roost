@@ -1,5 +1,7 @@
 # Native chat API (Phases 2–3)
 
+[Attachments](native-attachments.md) add text and PDF context to a message (a send field, one extract route, and a message column).
+
 Phase 4a adds [personas and memory](native-phase4.md), including new routes, prompt ordering, and turn snapshots. That contract supersedes the Phase 2–3 details below where extended.
 
 Hermes remains the default. Select Native with `PATCH /api/settings` and `{"backend":"native"}`. Existing native history and Hermes history remain separate. Switching the view does not cancel accepted native turns. Native starts without Hermes configuration or connectivity.

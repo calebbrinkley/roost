@@ -8,7 +8,7 @@ const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", searchResults: null, searchLoading: false, searchError: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
   conversation: () => ({ current: null, currentPersona: null, rememberSource: null, rememberBusy: false, model: null, noWeb: false, webForce: false, webAvailable: false, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
-                         composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
+                         composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(), attachments: [],
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
@@ -107,6 +107,7 @@ const ICONS = {
   info: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 11v6M12 7.5v.01" }]],
   persona: [["circle", { cx: 12, cy: 8, r: 4 }], ["path", { d: "M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" }]],
   memory: [["path", { d: "M6 3h12v18l-6-4.5L6 21z" }]],
+  paperclip: [["path", { d: "m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" }]],
 };
 
 function svgShapes(svg, shapes) {
@@ -215,7 +216,7 @@ async function api(path, options = {}) {
   try {
     const response = await fetch("/api" + path, {
       credentials: "same-origin",
-      headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
+      headers: { "X-Roost-Request": "1", ...(typeof options.body === "string" ? { "Content-Type": "application/json" } : {}) },
       ...options,
       signal,
     });
@@ -249,8 +250,8 @@ function signedOut(clearLink = true) {
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
-  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail", "attach-tray"]) $(id).replaceChildren();
+  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet", "attachment-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -1171,7 +1172,7 @@ function withSentMessages(rows, sent, current) {
     }
   }
   return { sent: pending, savedAs, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
-    role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
+    role: "user", content: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}), timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
   }))] };
 }
 
@@ -1219,6 +1220,84 @@ function openSummary(summary) {
   const written = messageTime(summary.created_at);
   $("summary-written").textContent = written ? `Written ${written}` : "";
   $("summary-sheet").showModal(); $("summary-title").focus();
+}
+
+// Attachments (native only). The server reads a file and returns its text; only that text travels with the
+// message, and it stays readable from the message's chips. Chips use one shape for the composer, sent
+// messages and the edit form.
+const ATTACH_CAP_TOKENS = 30000, ATTACH_MAX_FILES = 10, ATTACH_MAX_BYTES = 20 * 1024 * 1024;
+
+function attachmentTokens(file) { return Math.ceil((file.chars || 0) / 4); }
+function attachmentTotal(list = state.attachments) { return Math.ceil(list.filter((file) => file.status === "ready").reduce((sum, file) => sum + file.chars, 0) / 4); }
+function attachmentsBlocked() { return state.attachments.some((file) => file.status === "loading") || attachmentTotal() > ATTACH_CAP_TOKENS; }
+
+function attachmentChip(file, { open, remove } = {}) {
+  const status = file.status || "ready";
+  const chip = el("span", "attach-chip" + (status === "ready" ? "" : " " + status));
+  const label = open ? el("button", "attach-chip-main") : el("span", "attach-chip-main");
+  if (open) { label.type = "button"; label.setAttribute("aria-label", `Read ${file.name}`); label.addEventListener("click", (event) => { event.stopPropagation(); open(file); }); }
+  label.append(status === "loading" ? el("span", "attach-spinner") : icon("paperclip"), el("span", "attach-chip-name", file.name));
+  if (status !== "error") label.append(el("small", "attach-chip-meta", status === "loading" ? "Reading…" : `~${attachmentTokens(file).toLocaleString()} tokens`));
+  chip.append(label);
+  if (remove) {
+    const button = el("button", "attach-chip-remove", "×");
+    button.type = "button"; button.setAttribute("aria-label", `Remove ${file.name}`);
+    button.addEventListener("click", (event) => { event.stopPropagation(); remove(file); });
+    chip.append(button);
+  }
+  if (status === "error") chip.append(el("small", "attach-chip-error", file.error));
+  return chip;
+}
+
+function attachmentChips(list, options) {
+  const row = el("div", "attach-chips");
+  for (const file of list) row.append(attachmentChip(file, options));
+  return row;
+}
+
+function openAttachment(file) {
+  $("attachment-title").textContent = file.name;
+  $("attachment-meta").textContent = `${file.kind === "pdf" ? "PDF" : "Text"} · ~${attachmentTokens(file).toLocaleString()} tokens`;
+  $("attachment-text").textContent = file.text || "";
+  $("attachment-sheet").showModal(); $("attachment-title").focus();
+}
+
+function drawAttachments() {
+  const list = state.attachments, tray = $("attach-tray"), total = attachmentTotal(), over = total > ATTACH_CAP_TOKENS;
+  show("attach-button", isNative());
+  $("attach-button").disabled = list.length >= ATTACH_MAX_FILES;
+  show("attach-tray", isNative() && list.length > 0);
+  tray.replaceChildren();
+  if (isNative() && list.length) {
+    const removeFile = (file) => { state.attachments = state.attachments.filter((item) => item !== file); updateNativeComposer(); };
+    tray.append(attachmentChips(list, { open: (file) => file.status === "ready" && openAttachment(file), remove: removeFile }));
+    const near = total >= ATTACH_CAP_TOKENS * 0.8;
+    const note = el("p", "attach-total" + (over ? " over" : ""), over
+      ? `About ${total.toLocaleString()} tokens of files. The limit is ${ATTACH_CAP_TOKENS.toLocaleString()}. Remove one to send.`
+      : `About ${total.toLocaleString()} of ${ATTACH_CAP_TOKENS.toLocaleString()} tokens`);
+    note.setAttribute("role", "status");
+    if (near) tray.append(note);
+  }
+}
+
+async function attachFiles(files) {
+  if (!isNative()) return;
+  const scope = signInScope();
+  await Promise.all(files.map(async (file) => {
+    if (state.attachments.length >= ATTACH_MAX_FILES) { notice(`Attach at most ${ATTACH_MAX_FILES} files to a message.`); return; }
+    const entry = { name: file.name, status: "loading" };
+    state.attachments.push(entry); updateNativeComposer();
+    try {
+      if (file.size > ATTACH_MAX_BYTES) throw new Error("That file is larger than 20 MB.");
+      const form = new FormData(); form.append("file", file, file.name);
+      const data = await api("/attachments/extract", { method: "POST", body: form });
+      Object.assign(entry, { status: "ready", name: data.name, kind: data.kind, chars: data.chars, text: data.text });
+    } catch (error) {
+      if (!scope.alive()) return;
+      Object.assign(entry, { status: "error", error: error.message });
+    }
+    if (scope.alive() && state.attachments.includes(entry)) updateNativeComposer();
+  }));
 }
 
 function summaryDivider(summary) {
@@ -1273,7 +1352,7 @@ function renderMessages(rows) {
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.timestamp, row.roost_usage, row.state, row.revision,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.attachments?.map((file) => file.name), row.timestamp, row.roost_usage, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -1321,7 +1400,10 @@ function renderMessages(rows) {
     const key = String(row.id ?? index), time = messageTime(row.timestamp);
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-agent"));
     const body = el("div", "message-body");
-    if (row.role === "user") addUserMessage(body, messageText(row), key);
+    if (row.role === "user") {
+      if (row.attachments?.length) body.append(attachmentChips(row.attachments, { open: openAttachment }));
+      addUserMessage(body, messageText(row), key);
+    }
     else addReply(body, messageText(row), isNative() ? row.sources || [] : []);
     if (isNative() && row.role === "assistant") wrapper.append(el("div", "persona-label", replyName(row)));
     wrapper.append(body);
@@ -1398,7 +1480,7 @@ async function selectConversation(id, source) {
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
-  state.current = id; state.currentPersona = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = id; state.currentPersona = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null; state.attachments = [];
   restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -1732,7 +1814,7 @@ function newConversation() {
   if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   leaveLive();
-  state.current = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null; state.attachments = [];
   restoreComposer();
   state.draft = true;
   newDraftSeed();
@@ -1752,6 +1834,7 @@ async function submitMessage(event) {
   // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
   // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
   if (isNative() && !text && (runningTurn() || queuedTurn())) { await stopNativeReply(); return; }
+  if (text && attachmentsBlocked()) { notice(state.attachments.some((file) => file.status === "loading") ? "Wait for the files to finish reading." : "The attached files are over the limit. Remove one to send."); return; }
   if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
@@ -1885,6 +1968,8 @@ function acceptMessage(item, id, here) {
   });
 }
 
+function sentFiles(item) { return isNative() && item.attachments?.length ? { attachments: item.attachments.map(({ name, text }) => ({ name, text })) } : {}; }
+
 // Sends the composer or one failed row, without consuming a newer draft on Retry.
 async function sendText(text, { voice = false, retry = null } = {}) {
   if (state.busy) return;
@@ -1892,9 +1977,11 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
-    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined, reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
+    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined,
+    attachments: state.attachments.filter((file) => file.status === "ready").map(({ name, kind, chars, text }) => ({ name, kind, chars, text })), reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
   if (!retry) {
     state.webForce = false; updateWebToggle();
+    state.attachments = []; updateNativeComposer();
     state.voiceDraft = false; $("message").value = ""; saveComposer();
     $("composer").classList.remove("has-text");
   }
@@ -1905,8 +1992,8 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   let result, failure;
   try {
     result = oldId
-      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}) }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}) }) });
+      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}), ...sentFiles(item) }) })
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}), ...sentFiles(item) }) });
   } catch (error) { failure = error; }
   finally {
     if (scope.alive()) { state.busy = false; $("send").disabled = false; }
@@ -2280,15 +2367,16 @@ function stopNativeReply() {
 
 function updateNativeComposer() {
   updateWebToggle();
+  drawAttachments();
   if (!isNative()) return;
   const running = Boolean(runningTurn() || queuedTurn()), send = $("send");
   send.type = running ? "button" : "submit";
   send.textContent = running ? "Stop" : "↑";
   send.setAttribute("aria-label", running ? "Stop reply" : "Send message");
   send.classList.toggle("stopping", running);
-  send.disabled = state.busy || state.controlBusy;
+  send.disabled = state.busy || state.controlBusy || (!running && attachmentsBlocked());
   show("queue-send", running && Boolean($("message").value.trim()));
-  $("queue-send").disabled = state.busy;
+  $("queue-send").disabled = state.busy || attachmentsBlocked();
 }
 
 async function nativeControl(action, turnId, extra = {}) {
@@ -2327,6 +2415,14 @@ function appendTurnControls(under, row, rows, body) {
     const form = el("form", "inline-edit"), input = el("textarea");
     input.value = messageText(row); input.maxLength = 16000; input.required = true; input.rows = 4;
     input.setAttribute("aria-label", "Edit message");
+    const original = row.attachments || [];
+    let kept = [...original];
+    const files = el("div", "inline-edit-files");
+    const drawFiles = () => {
+      files.replaceChildren(); files.classList.toggle("hidden", !kept.length);
+      if (kept.length) files.append(attachmentChips(kept, { open: openAttachment, remove: file => { kept = kept.filter(item => item !== file); drawFiles(); } }));
+    };
+    drawFiles();
     const later = rows.some(next => next.turn_id !== row.turn_id && next.ordinal > row.ordinal);
     const warning = el("p", "sheet-note", later ? "Saving drops all later messages, including the queue." : "Saving sends this message again.");
     const actions = el("div", "settings-actions"), cancel = el("button", "secondary", "Cancel"), save = el("button", "primary", "Save and resend");
@@ -2336,9 +2432,9 @@ function appendTurnControls(under, row, rows, body) {
     form.addEventListener("submit", event => {
       event.preventDefault(); const text = input.value.trim(); if (!text) return;
       save.disabled = cancel.disabled = true;
-      nativeControl("edit", row.turn_id, {text, request_id: sendId()});
+      nativeControl("edit", row.turn_id, {text, request_id: sendId(), ...(kept.length !== original.length ? {attachments: kept.map(({name, text}) => ({name, text}))} : {})});
     });
-    actions.append(cancel, save); form.append(input, warning, actions); body.replaceChildren(form); input.focus();
+    actions.append(cancel, save); form.append(files, input, warning, actions); body.replaceChildren(form); input.focus();
   });
   if (controls.regenerate) button(row.state === "failed" ? "Retry" : "Regenerate", row.state === "failed" ? "Retry reply" : "Regenerate reply", () => nativeControl("regenerate", row.turn_id));
 }
@@ -3472,6 +3568,13 @@ $("transcript").addEventListener("scroll", () => {
   if ($("transcript").scrollTop <= 0) loadEarlierMessages();
 }, { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
+$("attach-button").append(icon("paperclip"));
+$("attach-button").addEventListener("click", () => $("attach-input").click());
+$("attach-input").addEventListener("change", () => {
+  const files = [...$("attach-input").files]; $("attach-input").value = "";
+  attachFiles(files);
+});
+$("attachment-close").addEventListener("click", () => $("attachment-sheet").close());
 $("web-toggle").append(icon("globe"));
 $("web-toggle").addEventListener("click", () => { state.webForce = !state.webForce; updateWebToggle(); });
 $("sheet-model").addEventListener("change", updateSheetThinking);

@@ -2863,3 +2863,172 @@ test('summarize trace items use plain sentences for running, completed and error
   });
   assert.deepEqual(labels, ['Summarizing earlier messages…', 'Summarized earlier messages', "Couldn't summarize earlier messages"]);
 });
+
+// Attachments: chips, the token cap, the read-only sheet, sending and editing.
+const walk = (node, visit) => { visit(node); (node.children || []).forEach(child => walk(child, visit)); };
+const findAll = (root, test) => { const found = []; walk(root, node => { if (test(node)) found.push(node); }); return found; };
+const textOf = node => { let out = ''; walk(node, n => { if (typeof n.textContent === 'string') out += n.textContent + ' '; }); return out; };
+const plain = value => JSON.parse(JSON.stringify(value));
+const chipsIn = root => findAll(root, node => /^attach-chip( |$)/.test(node.className || ''));
+const attachRows = `globalThis.rows=[
+  {id:1,turn_id:'a',role:'user',ordinal:1,state:'completed',content:'Summarize these',attachments:[
+    {name:'notes.md',kind:'text',chars:40,text:'Line one\\nLine two'},{name:'paper.pdf',kind:'pdf',chars:4000,text:'Page text'}]},
+  {id:2,turn_id:'a',role:'assistant',ordinal:1,state:'completed',content:'Done'}]`;
+
+test('attaching shows a spinner chip, then name and tokens, and an inline error for a rejected file; x removes', async () => {
+  const f = fixture(undefined, {FormData, File}); await tick();
+  f.run(`state.backend='native'; globalThis.calls=[]; globalThis.release=null;
+    api = (path, options) => { calls.push([path, options.method, options.body instanceof FormData]);
+      return options.body.get('file').name === 'bad.png' ? Promise.reject(new Error("Roost can't read images yet. Attach text files or PDFs."))
+        : new Promise(resolve => { release = () => resolve({name:'notes.txt',kind:'text',chars:41,tokens:11,text:'x'.repeat(41)}); }); };`);
+  const done = f.run(`attachFiles([new File(['x'.repeat(41)], 'notes.txt'), new File(['x'], 'bad.png')])`);
+  await tick();
+  let tray = f.get('attach-tray');
+  assert.equal(tray.classList.contains('hidden'), false);
+  assert.match(textOf(tray), /Reading…/);
+  assert.ok(findAll(tray, node => node.className === 'attach-spinner').length);
+  assert.equal(f.get('send').disabled, true, 'Send waits for the file to finish');
+  f.run('release()'); await done;
+  tray = f.get('attach-tray');
+  assert.deepEqual(plain(f.run('calls')), [['/attachments/extract', 'POST', true], ['/attachments/extract', 'POST', true]]);
+  assert.match(textOf(tray), /notes\.txt\s+~11 tokens/);
+  assert.match(textOf(tray), /bad\.png.*Roost can't read images yet/);
+  assert.equal(chipsIn(tray).length, 2);
+  assert.equal(f.get('send').disabled, false);
+  findAll(tray, n => n.attributes?.['aria-label'] === 'Remove bad.png')[0].events.click({stopPropagation() {}});
+  assert.equal(chipsIn(f.get('attach-tray')).length, 1);
+  findAll(f.get('attach-tray'), n => n.attributes?.['aria-label'] === 'Remove notes.txt')[0].events.click({stopPropagation() {}});
+  assert.equal(f.get('attach-tray').classList.contains('hidden'), true);
+});
+
+test('the attach button is native only, takes the allowed types, and files over 20 MB never upload', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  const accept = /id="attach-input"[^>]*accept="([^"]+)"/.exec(html)[1].split(',');
+  for (const type of ['.txt', '.md', '.csv', '.json', '.yaml', '.toml', '.xml', '.html', '.log', '.py', '.js', '.pdf']) assert.ok(accept.includes(type), type);
+  assert.match(html, /id="attach-button"[^>]*aria-label="Attach files"/);
+  const f = fixture(undefined, {FormData, File}); await tick();
+  f.run('state.backend="hermes"; updateNativeComposer()');
+  assert.equal(f.get('attach-button').classList.contains('hidden'), true);
+  f.run('state.backend="native"; updateNativeComposer()');
+  assert.equal(f.get('attach-button').classList.contains('hidden'), false);
+  f.run(`globalThis.uploads = 0; api = async () => { uploads++; return {}; }`);
+  await f.run(`attachFiles([Object.defineProperty(new File([''], 'big.txt'), 'size', {value: 21 * 1024 * 1024})])`);
+  assert.equal(f.run('uploads'), 0);
+  assert.match(textOf(f.get('attach-tray')), /larger than 20 MB/);
+});
+
+test('the running total appears near the cap, and Send is disabled over it until a file is removed', async () => {
+  const f = fixture(); await tick();
+  const file = (name, chars) => `{name:'${name}', kind:'text', status:'ready', chars:${chars}, text:'t'}`;
+  f.run(`state.backend='native'; state.attachments=[${file('a.txt', 20000)}]; updateNativeComposer()`);
+  assert.equal(findAll(f.get('attach-tray'), n => n.className?.startsWith('attach-total')).length, 0, 'quiet well under the cap');
+  f.run(`state.attachments=[${file('a.txt', 100000)}]; updateNativeComposer()`);
+  assert.match(textOf(f.get('attach-tray')), /About 25,000 of 30,000 tokens/);
+  assert.equal(f.get('send').disabled, false);
+  f.run(`state.attachments=[${file('a.txt', 100000)}, ${file('b.txt', 24000)}]; updateNativeComposer()`);
+  assert.equal(f.get('send').disabled, true);
+  assert.match(textOf(f.get('attach-tray')), /31,000 tokens of files\. The limit is 30,000/);
+  f.get('message').value = 'hello';
+  f.run(`globalThis.sent = 0; api = async () => { sent++; return {session_id: 'one'}; }`);
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(f.run('sent'), 0);
+  findAll(f.get('attach-tray'), n => n.attributes?.['aria-label'] === 'Remove b.txt')[0].events.click({stopPropagation() {}});
+  assert.equal(f.get('send').disabled, false);
+});
+
+test('sending carries the extracted attachments, clears the tray, and keeps them on the sent row for Retry', async () => {
+  const posts = [], f = fixture(async (url, options = {}) => {
+    if (options.method === 'POST') { posts.push(JSON.parse(options.body)); return {ok:true, json:async () => ({session_id:'one'})}; }
+    return {ok:true, json:async () => ({signed_in:false})};
+  }); await tick();
+  f.run(`state.backend='native'; state.current='one'; loadMessages = async () => {}; loadConversations = async () => {};
+    state.attachments=[{name:'a.md', kind:'text', status:'ready', chars:5, text:'Hello'}, {name:'bad.png', status:'error', error:'No'}, {name:'wait.txt', status:'ready', chars:2, text:'Hi'}]`);
+  f.get('message').value = 'Read these';
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.deepEqual(posts[0].attachments, [{name:'a.md', text:'Hello'}, {name:'wait.txt', text:'Hi'}]);
+  assert.equal(posts[0].text, 'Read these');
+  assert.equal(f.run('state.attachments.length'), 0);
+  assert.equal(f.get('attach-tray').classList.contains('hidden'), true);
+  assert.deepEqual(plain(f.run('state.sentMessages[0].attachments.map(a => a.name)')), ['a.md', 'wait.txt']);
+  f.run('state.sentMessages[0].failed = true');
+  f.run(`renderMessages([])`);
+  assert.match(textOf(f.get('transcript')), /a\.md/);
+  // Without attachments the payload has no field at all.
+  f.get('message').value = 'Plain';
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal('attachments' in posts[1], false);
+});
+
+test('a first message sends its attachments with the new conversation', async () => {
+  const posts = [], f = fixture(async (url, options = {}) => {
+    if (options.method === 'POST') { posts.push([url, JSON.parse(options.body)]); return {ok:true, json:async () => ({session_id:'new'})}; }
+    return {ok:true, json:async () => ({signed_in:false})};
+  }); await tick();
+  f.run(`state.backend='native'; state.current=null; loadMessages = async () => {}; loadConversations = async () => {};
+    state.attachments=[{name:'a.md', kind:'text', status:'ready', chars:5, text:'Hello'}]`);
+  f.get('message').value = 'First';
+  await f.run('submitMessage({preventDefault() {}})');
+  assert.equal(posts[0][0], '/api/conversations');
+  assert.deepEqual(posts[0][1].attachments, [{name:'a.md', text:'Hello'}]);
+});
+
+test('sent messages show attachment chips and tapping one opens a read-only sheet with the text', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.current='chat'; ${attachRows}; renderMessages(rows)`);
+  const chips = chipsIn(f.get('transcript'));
+  assert.equal(chips.length, 2);
+  assert.match(textOf(chips[0]), /notes\.md\s+~10 tokens/);
+  assert.match(textOf(chips[1]), /paper\.pdf\s+~1,000 tokens/);
+  assert.equal(findAll(f.get('transcript'), n => /Remove/.test(n.attributes?.['aria-label'] || '')).length, 0, 'sent chips cannot be removed');
+  const open = findAll(chips[1], n => n.attributes?.['aria-label'] === 'Read paper.pdf')[0];
+  open.events.click({stopPropagation() {}});
+  assert.equal(f.get('attachment-sheet').open, true);
+  assert.equal(f.get('attachment-title').textContent, 'paper.pdf');
+  assert.equal(f.get('attachment-meta').textContent, 'PDF · ~1,000 tokens');
+  assert.equal(f.get('attachment-text').textContent, 'Page text');
+  f.get('attachment-close').events.click();
+  assert.equal(f.get('attachment-sheet').open, false);
+  assert.equal(textOf(f.get('transcript')).includes('Summarize these'), true);
+});
+
+test('Edit shows the message attachments as removable chips and sends them only when changed', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.current='chat'; ${attachRows}; globalThis.controls=[]; nativeControl = (action, id, extra) => controls.push([action, id, extra]);
+    renderMessages(rows)`);
+  const edit = () => findAll(f.get('transcript'), n => n.textContent === 'Edit' && n.attributes?.['aria-label'] === 'Edit message')[0];
+  edit().events.click({stopPropagation() {}});
+  let form = findAll(f.get('transcript'), n => n.className === 'inline-edit')[0];
+  assert.equal(chipsIn(form).length, 2);
+  const submit = event => form.events.submit(event);
+  const textarea = findAll(form, n => n.tagName === 'TEXTAREA')[0];
+  assert.equal(textarea.value, 'Summarize these');
+  submit({preventDefault() {}});
+  const kept = f.run('controls[0]');
+  assert.equal(kept[0], 'edit');
+  assert.equal('attachments' in kept[2], false, 'unchanged attachments are kept by the server');
+  findAll(form, n => n.attributes?.['aria-label'] === 'Remove notes.md')[0].events.click({stopPropagation() {}});
+  assert.equal(chipsIn(form).length, 1);
+  submit({preventDefault() {}});
+  assert.deepEqual(plain(f.run('controls[1][2].attachments')), [{name:'paper.pdf', text:'Page text'}]);
+  findAll(form, n => n.attributes?.['aria-label'] === 'Remove paper.pdf')[0].events.click({stopPropagation() {}});
+  submit({preventDefault() {}});
+  assert.deepEqual(plain(f.run('controls[2][2].attachments')), []);
+});
+
+test('attachment chips and the attach button have 44px coarse-pointer targets and the sheet is in the markup', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8');
+  assert.match(css, /@media \(pointer: coarse\)\s*\{[^}]*\.attach-button \{ min-width: 44px; min-height: 44px; \}/);
+  assert.match(css, /\.attach-chip-main, \.attach-chip-remove \{ min-height: 44px; \}/);
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  assert.match(html, /<dialog id="attachment-sheet"[^>]*>[\s\S]*id="attachment-text"[\s\S]*id="attachment-close"/);
+});
+
+test('sign-out clears chosen files and closes the attachment sheet', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.attachments=[{name:'a.txt', status:'ready', chars:4, text:'private'}]; updateNativeComposer()`);
+  f.get('attachment-sheet').open = true;
+  f.run('signedOut()');
+  assert.equal(f.run('state.attachments.length'), 0);
+  assert.equal(f.get('attachment-sheet').open, false);
+  assert.equal(f.get('attach-tray').children.length, 0);
+});
