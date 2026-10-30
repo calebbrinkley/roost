@@ -1,3 +1,3 @@
-"""Roost: a small, owner-only Hermes client."""
+"""Roost: a self-hosted, owner-only chat client."""
 
 __version__ = "0.1.0"

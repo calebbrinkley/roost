@@ -150,8 +150,8 @@ class Push:
                                (" WHERE id = ?" if only else ""), (only,) if only else ()).fetchall()
         delivered = 0
         for subscription_id, endpoint, p256dh, auth in rows:
-            headers = {"Authorization": vapid_authorization(self.key, endpoint, self.subject), "TTL": str(120 if message.get("approval") else TTL_SECONDS),
-                       "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "Urgency": "high" if message.get("approval") else "normal"}
+            headers = {"Authorization": vapid_authorization(self.key, endpoint, self.subject), "TTL": str(TTL_SECONDS),
+                       "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "Urgency": "normal"}
             try:
                 async with http.post(endpoint, data=encrypt(payload, p256dh, auth), headers=headers,
                                      allow_redirects=False) as response:

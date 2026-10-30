@@ -17,4 +17,11 @@ Use a short-lived work branch and a pull request to `main`; do not push directly
 
 ## Verification
 
-Run `make check` for every change, and `make PYTHON=.venv/bin/python smoke` for anything that touches the server or the interface. Neither contacts a live Hermes; say plainly what was checked against a real agent and what was not.
+Run `make check` for every change, and `make PYTHON=.venv/bin/python smoke` for anything that touches the server or the interface. These use deterministic local providers; say plainly what was checked against real model, speech, search or push services and what was not.
+
+
+## Product boundaries
+
+Roost owns its chat store, turn runner, personas, memory and jobs. Register HTTP handlers directly;
+there is one application flow. Model and speech API keys stay server-side. Keep the existing
+`native.sqlite3` filename and schema identifiers compatible with installed chat stores.

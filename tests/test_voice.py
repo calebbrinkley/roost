@@ -1,21 +1,147 @@
-"""Voice: transcription, replies read aloud (with byte ranges for Safari) and the silence clip."""
+"""Speech uses real HTTP with a deterministic speech provider, no external services."""
 
 import asyncio
 import base64
-import os
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
-
-from aiohttp import CookieJar
-from aiohttp.test_utils import TestClient, TestServer
 
 from roost import server
-from roost.auth import make_password_hash
-from hermes_fake import fake_hermes
+from unittest.mock import patch
 
-AUDIO = b"ID3-fake-mp3-bytes"
+from speech_fake import SpeechFake
+
+import test_chat
+from test_chat import wait_for
+
+
+class VoiceTests(unittest.IsolatedAsyncioTestCase):
+    request = test_chat.ChatTests.request
+    create = test_chat.ChatTests.create
+    async def asyncSetUp(self):
+        await test_chat.ChatTests.asyncSetUp(self)
+        self.speech_fake = await SpeechFake().start()
+        self.app['servers'].update('primary', {'base_url': self.speech_fake.url, 'key': 'example-primary-key'})
+
+    async def asyncTearDown(self):
+        await self.speech_fake.close()
+        await test_chat.ChatTests.asyncTearDown(self)
+
+    async def recording(self, mime='audio/mp4', data=b'clip', **extra):
+        return await self.client.post('/api/audio/transcribe', headers=self.headers, json={
+            'data_url': 'data:' + mime + ';base64,' + base64.b64encode(data).decode(), 'mime_type': mime, **extra})
+
+    async def test_chat_transcription_mapping(self):
+        for mime, extension in [('audio/mp4;codecs=mp4a.40.2', 'mp4'), ('audio/webm;codecs=opus', 'webm'), ('audio/aac', 'aac')]:
+            self.speech_fake.plain = extension == 'webm'
+            response = await self.recording(mime)
+            self.assertEqual(await response.json(), {'transcript': 'Hello'})
+            key, fields = self.speech_fake.calls[-1]
+            self.assertEqual(key, 'Bearer example-primary-key')
+            self.assertEqual(fields['model'][2], b'whisper-1')
+            self.assertEqual(fields['file'], ('recording.' + extension, mime.split(';')[0], b'clip'))
+        response = await self.recording(data=b'clip' * 50000)
+        self.assertEqual(response.status, 200, 'upload accepts recordings beyond the global JSON limit')
+
+    async def test_chat_errors_and_limits(self):
+        for status in (429, 503, 401):
+            self.speech_fake.status = status
+            response = await self.recording()
+            body = await response.json()
+            self.assertEqual(response.status, 503 if status in (429, 503) else 502)
+            self.assertEqual(body['error'], 'Speech is busy right now. Try again in a moment.' if status != 401 else 'Speech server returned HTTP 401.')
+        response = await self.client.post('/api/settings/voice/test', headers=self.headers, json={})
+        self.assertEqual((response.status, await response.json()), (502, {'error': 'Speech server returned HTTP 401.'}))
+        response = await self.recording(duration_seconds=121)
+        self.assertEqual(response.status, 400)
+        with patch('roost.speech.MAX_RECORDING', 3):
+            response = await self.recording(data=b'large')
+            self.assertEqual(response.status, 413)
+        self.speech_fake.status = 200
+        with patch('roost.speech.MAX_TRANSCRIPT', 3):
+            self.assertEqual((await self.recording()).status, 502)
+
+    async def test_settings_keys_validation_and_test(self):
+        url = '/api/settings/voice'
+        saved = await self.request('GET', url)
+        self.assertTrue(saved['same_as_model'])
+        saved = await self.request('PUT', url, {'same_as_model': False, 'base_url': self.speech_fake.url,
+                                              'key': 'example-speech-key', 'voice': 'nova'})
+        self.assertTrue(saved['has_key'])
+        from roost.speech import VoiceSettings
+        self.assertEqual(VoiceSettings(self.state).public(), saved)
+        for name in ('voice.json', 'speech-keys.json'):
+            self.assertEqual((self.state / name).stat().st_mode & 0o777, 0o600)
+        self.assertNotIn('key', saved)
+        self.assertNotIn('example-speech-key', str(await self.request('GET', url)))
+        response = await self.recording()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.speech_fake.calls[-1][0], 'Bearer example-speech-key')
+        response = await self.client.post(url + '/test', headers=self.headers, json={})
+        self.assertEqual((response.status, await response.read()), (200, self.speech_fake.audio))
+        self.assertEqual(self.speech_fake.calls[-1][1]['voice'], 'nova')
+        for change in ({'same_as_model': 1}, {'base_url': 'https://user:pass@example.invalid'}, {'voice': ''},
+                       {'transcription_model': []}, {'key': 'bad\nkey'}, {'unknown': True}):
+            await self.request('PUT', url, change, 400)
+        await self.request('PUT', url, {'clear_key': True})
+        self.assertFalse((await self.request('GET', url))['has_key'])
+        await self.request('PUT', url, {'same_as_model': True})
+        await self.recording()
+        self.assertEqual(self.speech_fake.calls[-1][0], 'Bearer example-primary-key')
+
+    async def test_chat_synthesis_cache_ranges_and_cleanup(self):
+        # Use the model fake for a committed assistant row, then switch the speech target.
+        self.app['servers'].update('primary', {'base_url': self.fake.url})
+        sent = await self.create()
+        await wait_for(lambda: self.store.get_turn(sent['turn_id']).state == 'completed')
+        self.store.db.execute('UPDATE messages SET content=? WHERE id=?', ('**Hello** [3] [world](https://example.invalid). ```code```', sent['assistant_message_id']))
+        self.app['servers'].update('primary', {'base_url': self.speech_fake.url})
+        url = f"/api/conversations/{sent['session_id']}/speech/{sent['assistant_message_id']}"
+        first, second = await asyncio.gather(self.client.get(url), self.client.get(url, headers={'Range': 'bytes=0-2'}))
+        self.assertEqual((first.status, await first.read()), (200, self.speech_fake.audio))
+        self.assertEqual((second.status, await second.read()), (206, self.speech_fake.audio[:3]))
+        self.assertEqual(second.headers['Content-Range'], f'bytes 0-2/{len(self.speech_fake.audio)}')
+        self.assertEqual((await self.client.get(url, headers={'Range': 'bytes=999-'})).status, 416)
+        suffix = await self.client.get(url, headers={'Range': 'bytes=-3'})
+        self.assertEqual(await suffix.read(), self.speech_fake.audio[-3:])
+        user_url = f"/api/conversations/{sent['session_id']}/speech/{sent['message_id']}"
+        self.assertEqual((await self.client.get(user_url)).status, 404)
+        self.assertEqual((await self.client.get(f"/api/conversations/missing/speech/{sent['assistant_message_id']}")).status, 404)
+        self.assertEqual(len(self.speech_fake.calls), 1)
+        self.assertEqual(self.speech_fake.calls[0][1], {'model': 'tts-1', 'input': 'Hello world.', 'voice': 'alloy', 'response_format': 'mp3'})
+        with patch('roost.speech.MAX_AUDIO', 3):
+            response = await self.client.post('/api/settings/voice/test', headers=self.headers, json={})
+            self.assertEqual(response.status, 502)
+
+    async def test_the_silence_clip_is_a_short_wav(self):
+        response = await self.client.get('/api/audio/silence')
+        body = await response.read()
+        self.assertEqual((response.content_type, body[:4], body[8:12]), ('audio/wav', b'RIFF', b'WAVE'))
+        self.client.session.cookie_jar.clear()
+        self.assertEqual((await self.client.get('/api/audio/silence')).status, 401)
+
+    async def test_malformed_recordings_transcripts_and_settings(self):
+        for body in ({'data_url': 'data:audio/mp4;base64,???', 'mime_type': 'audio/mp4'},
+                     {'data_url': 'data:audio/mp4extra;base64,Y2xpcA==', 'mime_type': 'audio/mp4'},
+                     {'data_url': 'data:audio/mp4;base64,', 'mime_type': 'audio/mp4'},
+                     {'data_url': 'data:audio/mp4;base64,Y2xpcA==', 'mime_type': 'text/html'},
+                     {'data_url': 'https://example.invalid/a.mp4', 'mime_type': 'audio/mp4'}, {}):
+            response = await self.client.post('/api/audio/transcribe', headers=self.headers, json=body)
+            self.assertEqual(response.status, 400)
+        self.speech_fake.transcript = {'unexpected': 'shape'}
+        self.assertEqual((await self.recording()).status, 502)
+        for code in (429, 503):
+            self.speech_fake.status = code
+            response = await self.client.post('/api/settings/voice/test', headers=self.headers, json={})
+            self.assertEqual((response.status, (await response.json())['error']),
+                             (503, 'Speech is busy right now. Try again in a moment.'))
+
+    async def test_transport_timeouts_are_public_safe(self):
+        import aiohttp
+        for error, status in ((asyncio.TimeoutError('synthetic private detail'), 504),
+                              (aiohttp.ClientConnectionError('synthetic private detail'), 502)):
+            with patch.object(self.app['provider_http'], 'post', side_effect=error):
+                response = await self.recording()
+            self.assertEqual(response.status, status)
+            self.assertNotIn('private', str(await response.json()))
 
 
 class SpeakableTests(unittest.TestCase):
@@ -23,73 +149,3 @@ class SpeakableTests(unittest.TestCase):
         reply = "**Two** things:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```py\nprint(1)\n```\nSee [the docs](https://example.invalid). `ok`"
         self.assertEqual(server.speakable(reply), "Two things: a b 1 2 See the docs. ok")
         self.assertEqual(len(server.speakable("word " * 5000)), server.SPEECH_CHARACTERS)
-
-
-class VoiceRouteTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        state = Path(self.directory.name)
-        (state / "password.hash").write_text(make_password_hash("example-demo-password"))
-        (state / "upstream-password").write_text("upstream")
-        with patch.dict(os.environ, {
-            "ROOST_PUBLIC_ORIGIN": "https://roost.example.invalid", "ROOST_STATE_DIR": str(state),
-            "ROOST_HERMES_URL": "http://127.0.0.1:1", "ROOST_HERMES_USERNAME": "demo",
-            "ROOST_HERMES_PASSWORD_FILE": str(state / "upstream-password"),
-        }):
-            self.app = server.create_app()
-        self.calls = []
-        self.speak_delay = 0
-        async def speak(text):
-            self.calls.append(text)
-            await asyncio.sleep(self.speak_delay)
-            return "data:audio/mpeg;base64," + base64.b64encode(AUDIO).decode()
-        self.app["hermes"] = fake_hermes()
-        self.app["hermes"].messages.return_value = {"messages": [{"id": 1, "role": "user", "content": "hi"},
-                                                                 {"id": 2, "role": "assistant", "content": "**Hello** there."}]}
-        self.app["hermes"].speak.side_effect = speak
-        self.app["hermes"].transcribe.return_value = "what is on today"
-        self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
-        await self.client.start_server()
-        self.headers = {"Origin": "https://roost.example.invalid", "X-Roost-Request": "1"}
-        response = await self.client.post("/api/login", headers=self.headers, json={"password": "example-demo-password"})
-        self.cookies = {server.COOKIE: response.cookies[server.COOKIE].value}
-
-    async def asyncTearDown(self):
-        await self.client.close()
-        self.directory.cleanup()
-
-    async def test_a_recording_is_transcribed_by_hermes(self):
-        response = await self.client.post("/api/audio/transcribe", headers=self.headers, json={"data_url": "x"})
-        self.assertEqual(response.status, 401)
-        for body in ({"data_url": "data:audio/mp4;base64,AAAA", "mime_type": "text/html"},
-                     {"data_url": "https://example.invalid/a.mp4", "mime_type": "audio/mp4"}, {}):
-            response = await self.client.post("/api/audio/transcribe", headers=self.headers, json=body, cookies=self.cookies)
-            self.assertEqual(response.status, 400, body)
-        recording = "data:audio/webm;codecs=opus;base64," + "A" * 200000  # over the app-wide body limit
-        response = await self.client.post("/api/audio/transcribe", headers=self.headers, cookies=self.cookies,
-                                          json={"data_url": recording, "mime_type": "audio/webm;codecs=opus"})
-        self.assertEqual(await response.json(), {"transcript": "what is on today"})
-        self.app["hermes"].transcribe.assert_awaited_once_with(recording, "audio/webm;codecs=opus")
-
-    async def test_a_reply_is_read_aloud_once_with_byte_ranges(self):
-        url = "/api/conversations/chat:one/speech/2"
-        self.speak_delay = 0.05
-        first, second = await asyncio.gather(self.client.get(url, cookies=self.cookies),
-                                             self.client.get(url, headers={"Range": "bytes=0-1"}, cookies=self.cookies))
-        self.assertEqual((first.status, first.content_type, await first.read()), (200, "audio/mpeg", AUDIO))
-        self.assertEqual((second.status, second.headers["Content-Range"], await second.read()),
-                         (206, f"bytes 0-1/{len(AUDIO)}", AUDIO[:2]))
-        response = await self.client.get(url, headers={"Range": "bytes=-3"}, cookies=self.cookies)
-        self.assertEqual(await response.read(), AUDIO[-3:])
-        response = await self.client.get(url, headers={"Range": "bytes=999-"}, cookies=self.cookies)
-        self.assertEqual(response.status, 416)
-        self.assertEqual(self.calls, ["Hello there."], "one synthesis, then the cache")
-        response = await self.client.get("/api/conversations/chat:one/speech/1", cookies=self.cookies)
-        self.assertEqual(response.status, 404, "only the agent's replies are read")
-        response = await self.client.get(url)
-        self.assertEqual(response.status, 401)
-
-    async def test_the_silence_clip_is_a_short_wav(self):
-        response = await self.client.get("/api/audio/silence", cookies=self.cookies)
-        body = await response.read()
-        self.assertEqual((response.content_type, body[:4], body[8:12]), ("audio/wav", b"RIFF", b"WAVE"))

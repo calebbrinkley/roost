@@ -15,7 +15,7 @@ SPEC.loader.exec_module(guard)
 
 class PublicContentTests(unittest.TestCase):
     def test_private_home_is_rejected_without_echoing_value(self):
-        sample = "/Users/" + "example-person/private-file"
+        sample = "/" + "/".join(("Users", "example-person", "private-file"))
         findings = guard.inspect_text(sample, "sample.md")
         self.assertTrue(findings)
         self.assertNotIn(sample, str(findings[0]))

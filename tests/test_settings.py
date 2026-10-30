@@ -17,14 +17,14 @@ class SettingsTests(unittest.TestCase):
         self.directory.cleanup()
 
     def test_defaults_survive_a_missing_or_damaged_file(self):
-        default = {"agent_name": "", "accent": "forest", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False}
+        default = {"accent": "forest", "time_zone": "", "search_url": "", "use_fallback": False}
         self.assertEqual(settings.load(self.path), default)
         for content in ("{not json", "[]", '{"agent_name": 5, "accent": "neon", "time_zone": "../etc"}'):
             self.path.write_text(content)
             self.assertEqual(settings.load(self.path), default, content)
 
     def test_refused_changes_name_the_problem_and_save_nothing(self):
-        for changes in ({"agent_name": "x" * 41}, {"agent_name": "line\nbreak"}, {"accent": "neon"}, {"accent": "#12345g"},
+        for changes in ({"accent": "neon"}, {"accent": "#12345g"},
                         {"accent": "#fff"}, {"accent": 5}, {"theme": "dark"}, {}, {"time_zone": "../etc"},
                         {"time_zone": "America/" + "x" * 70}, {"time_zone": 5}, {"accent": "rose", "time_zone": 5}):
             with self.subTest(changes=changes), self.assertRaises(settings.SettingsError):
@@ -50,22 +50,26 @@ class SettingsTests(unittest.TestCase):
         self.path.write_text('{"use_fallback": "true"}')
         self.assertIs(settings.load(self.path)["use_fallback"], False)
 
-    def test_backend_is_explicit_validated_and_persisted(self):
-        settings.update(self.path, {"backend": "native"})
-        self.assertEqual(settings.load(self.path)["backend"], "native")
-        for value in (None, "other", True, []):
-            with self.assertRaises(settings.SettingsError):
-                settings.update(self.path, {"backend": value})
-        self.assertEqual(settings.load(self.path)["backend"], "native")
 
     def test_changes_are_cleaned_saved_privately_and_kept(self):
-        saved = settings.update(self.path, {"agent_name": "  Robin  ", "accent": "rose"})
-        self.assertEqual(saved, {"agent_name": "Robin", "accent": "rose", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False})
+        saved = settings.update(self.path, {"accent": "rose"})
+        self.assertEqual(saved, {"accent": "rose", "time_zone": "", "search_url": "", "use_fallback": False})
         self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
         settings.update(self.path, {"accent": "#A1B2C3", "time_zone": "America/New_York"})
-        self.assertEqual(settings.load(self.path), {"agent_name": "Robin", "accent": "#a1b2c3", "time_zone": "America/New_York", "backend": "hermes", "search_url": "", "use_fallback": False})
-        settings.update(self.path, {"agent_name": "", "time_zone": ""})
-        self.assertEqual(settings.load(self.path), {"agent_name": "", "accent": "#a1b2c3", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False})
+        self.assertEqual(settings.load(self.path), {"accent": "#a1b2c3", "time_zone": "America/New_York", "search_url": "", "use_fallback": False})
+        settings.update(self.path, {"time_zone": ""})
+        self.assertEqual(settings.load(self.path), {"accent": "#a1b2c3", "time_zone": "", "search_url": "", "use_fallback": False})
+
+class RetiredSettingsTests(unittest.TestCase):
+    def test_retired_keys_are_ignored_when_loading_and_discarded_when_saving(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'settings.json'
+            path.write_text('{"backend":"retired","agent_name":"Old name","accent":"rose","time_zone":"UTC"}')
+            saved = settings.load(path)
+            self.assertEqual(saved, {'accent': 'rose', 'time_zone': 'UTC', 'search_url': '', 'use_fallback': False})
+            settings.update(path, {'accent': 'ocean'})
+            self.assertNotIn('backend', path.read_text())
+            self.assertNotIn('agent_name', path.read_text())
 
 
 if __name__ == "__main__":

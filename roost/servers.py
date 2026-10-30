@@ -98,23 +98,27 @@ class Servers:
             if not self.path.exists():
                 primary = {"base_url": "", "models": [], "default_model": None, "key_id": ""}
                 keys = {}
-                if env.get("ROOST_MODEL_URL"):
-                    try:
-                        primary["base_url"] = base_url(env["ROOST_MODEL_URL"])
-                    except ValueError as exc:
-                        raise ServerError(str(exc)) from None
-                    if env.get("ROOST_MODEL_KEY_FILE"):
-                        try:
-                            key = _key(Path(env["ROOST_MODEL_KEY_FILE"]).read_text(encoding="utf-8").strip())
-                        except (OSError, UnicodeError):
-                            raise ServerStorageError("Cannot read the initial model key file.") from None
-                        if key:
-                            primary["key_id"] = uuid4().hex
-                            keys[primary["key_id"]] = key
                 # Commit keys first. A crash can leave an unused key, never a URL with the wrong key.
                 _save(self.keys_path, keys)
                 _save(self.path, {"version": 1, "servers": {"primary": primary}})
-            self._load()
+            config, keys = self._load()
+            primary = config["servers"]["primary"]
+            if not primary["base_url"] and env.get("ROOST_MODEL_URL"):
+                try:
+                    primary["base_url"] = base_url(env["ROOST_MODEL_URL"])
+                except ValueError as exc:
+                    raise ServerError(str(exc)) from None
+                if not keys.get(primary["key_id"]) and env.get("ROOST_MODEL_KEY_FILE"):
+                    try:
+                        key = _key(Path(env["ROOST_MODEL_KEY_FILE"]).read_text(encoding="utf-8").strip())
+                    except (OSError, UnicodeError):
+                        raise ServerStorageError("Cannot read the initial model key file.") from None
+                    if key:
+                        primary["key_id"] = uuid4().hex
+                        keys[primary["key_id"]] = key
+                # Commit keys first so a crash cannot pair the new URL with a missing key.
+                _save(self.keys_path, keys)
+                _save(self.path, config)
             # Tighten permissions even when an owner restored files with a broader mode.
             os.chmod(self.path, 0o600)
             os.chmod(self.keys_path, 0o600)

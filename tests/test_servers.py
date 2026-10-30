@@ -11,7 +11,6 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from roost import server
 from roost.servers import ServerError, ServerStorageError, Servers
-from hermes_fake import fake_hermes
 from openai_fake import OpenAIFake
 
 CURATED = [{"id": "example-model", "display_name": "Example", "enabled": True, "thinking_mode": "template_flag", "tools": True},
@@ -48,12 +47,13 @@ class ServersTests(unittest.TestCase):
         self.assertNotIn("rotated-test-key", self.servers.keys_path.read_text())
         self.assertEqual(Servers(self.state, environ={}).list(), self.servers.list())
 
-    def test_env_prefill_only_on_first_start_even_if_no_url_was_initially_set(self):
+    def test_env_prefills_an_existing_empty_primary_and_preserves_configured_primary(self):
         env_key = self.state / "installer-key"
         env_key.write_text("example-test-key\n")
         env = {"ROOST_MODEL_URL": "https://models.example.invalid/v1", "ROOST_MODEL_KEY_FILE": str(env_key)}
-        # An existing empty configuration is still an owner's saved configuration.
-        self.assertEqual(Servers(self.state, environ=env).get("primary")["base_url"], "")
+        # A first start without installer configuration must not lock out a later prefill.
+        self.assertEqual(Servers(self.state, environ=env).get("primary")["base_url"], env["ROOST_MODEL_URL"])
+        self.assertEqual(Servers(self.state, environ=env).key("primary"), "example-test-key")
         with tempfile.TemporaryDirectory() as directory:
             initialized = Servers(Path(directory), environ=env)
             self.assertEqual(initialized.get("primary")["base_url"], env["ROOST_MODEL_URL"])
@@ -63,6 +63,16 @@ class ServersTests(unittest.TestCase):
             loaded = Servers(Path(directory), environ=env)
             self.assertEqual(loaded.get("primary")["base_url"], "https://changed.example.invalid/v1")
             self.assertFalse(loaded.get("primary")["has_key"])
+
+    def test_env_prefill_keeps_an_existing_primary_key(self):
+        self.servers.update("primary", {"base_url": "https://models.example.invalid/v1", "key": "existing-test-key"})
+        config = json.loads(self.servers.path.read_text())
+        config["servers"]["primary"]["base_url"] = ""
+        self.servers.path.write_text(json.dumps(config))
+        loaded = Servers(self.state, environ={"ROOST_MODEL_URL": "https://models.example.invalid/v1",
+                                              "ROOST_MODEL_KEY_FILE": str(self.state / "absent-key")})
+        self.assertEqual(loaded.get("primary")["base_url"], "https://models.example.invalid/v1")
+        self.assertEqual(loaded.key("primary"), "existing-test-key")
 
     def test_rejected_changes_preserve_both_files(self):
         self.servers.update("primary", {"base_url": "https://models.example.invalid/v1", "key": "example-test-key"})
@@ -150,9 +160,8 @@ class ServerEndpointsTests(unittest.IsolatedAsyncioTestCase):
         (self.state / "password.hash").write_text("unused-demo-password-hash")
         self.fake = await OpenAIFake().start()
         env = {"ROOST_STATE_DIR": str(self.state), "ROOST_PUBLIC_ORIGIN": "https://roost.example.invalid",
-               "ROOST_HERMES_URL": "https://hermes.example.invalid", "ROOST_HERMES_USERNAME": "demo",
-               "ROOST_HERMES_PASSWORD_FILE": str(self.state / "password"), "ROOST_MODEL_URL": "", "ROOST_MODEL_KEY_FILE": ""}
-        with patch.dict(os.environ, env), patch("roost.server.Hermes", return_value=fake_hermes()):
+               "ROOST_MODEL_URL": "", "ROOST_MODEL_KEY_FILE": ""}
+        with patch.dict(os.environ, env):
             self.app = server.create_app()
         self.client = TestClient(TestServer(self.app))
         await self.client.start_server()
@@ -231,10 +240,9 @@ class ServerEndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("a/b", json.dumps(body))
         self.assertNotIn(r"a\/b", body["error"])
 
-    async def test_native_files_do_not_change_existing_auth_or_hermes_mode(self):
+    async def test_chat_files_preserve_existing_auth_state(self):
         self.assertTrue(self.app["sessions"].valid(self.cookie[server.COOKIE]))
         self.assertEqual((await self.client.get("/api/conversations", cookies=self.cookie)).status, 200)
-        self.app["hermes"].sessions.assert_awaited_once()
         self.assertEqual(self.app["passkeys"].list(), [])
         self.assertEqual(self.app["servers"].get("primary")["base_url"], "")
         self.assertTrue((self.state / "sessions.sqlite3").exists())

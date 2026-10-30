@@ -1,116 +1,69 @@
-# Connect Roost to Hermes
+# Set up Roost
 
-Prefer containers? Follow the [Docker Compose installation guide](docker-compose.md). The steps below install Roost directly with Python.
+Run one Roost process with a private writable state directory and access to an OpenAI-compatible
+model API. For containers, follow [Docker Compose](docker-compose.md).
 
-Roost requires Git, Python 3.11+, and a reachable Hermes dashboard with its password provider enabled and the desired agent and model already configured. The integration targets **Hermes `v2026.9.24`**; see [compatibility](compatibility.md) before using another version. Roost does not start Hermes or load a model. To have Hermes handle installation, use the [agent setup runbook](agent-setup.md).
+## Local installation
 
-### 0. Install Roost
+Python 3.11+ is required. From the checkout:
 
-Run these commands on the machine that will host Roost, using a Python 3.11+ interpreter:
-
-```bash
-git clone https://github.com/calebbrinkley/roost.git
-cd roost
+```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
-```
-
-No Node.js or frontend build is needed to run Roost. These commands install the real app; do not run `dev/demo.py` for a connected installation.
-
-### 1. Set your Roost password
-
-```bash
-umask 077
-export ROOST_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/roost"
-mkdir -p "$ROOST_STATE_DIR"
+export ROOST_STATE_DIR=/REPLACE_PRIVATE_DIRECTORY/state
+export ROOST_PUBLIC_ORIGIN=https://roost.example.com
 .venv/bin/python -m roost set-password
-```
-
-Enter a password of at least 12 characters at the hidden prompts. This is your Roost sign-in password, separate from the Hermes dashboard password. Keep using this same absolute state directory when starting the service; it holds your account, settings, and keys.
-
-### 2. Configure the connection
-
-Store your Hermes dashboard password in a file **outside the checkout**, readable only by the service account (file mode `600`, private parent directory). Enter it locally with a private editor; do not put it in a shell command or chat. Replace the placeholders below with your dashboard endpoint, username and password-file path.
-
-```bash
-export ROOST_PUBLIC_ORIGIN="http://127.0.0.1:8787"
-export ROOST_HERMES_URL="https://REPLACE_HERMES_DASHBOARD_HOST:8445"
-export ROOST_HERMES_USERNAME="REPLACE_OPERATOR_USERNAME"
-export ROOST_HERMES_PASSWORD_FILE="/REPLACE_PRIVATE_DIRECTORY/hermes-password"
 .venv/bin/python -m roost serve
 ```
 
-Open **http://127.0.0.1:8787** and sign in with the password you set in step 1.
+Put a trusted HTTPS reverse proxy in front of loopback port 8787. Use a service manager that restarts
+on failure; Restart Roost exits with status 75 after replying. A local HTTP preview is allowed only
+on loopback; HTTPS is required for normal installed-app use. Keep the origin exact, including a
+non-default port. Never trust client-supplied forwarding headers on an unprotected public listener.
 
-`curl --fail --silent --show-error http://127.0.0.1:8787/api/health` should return `{"status": "ready"}`. This checks Roost only. After sign-in, load Messages and Jobs and send a short test message to verify the Hermes connection. An empty list is valid for a new agent; an authentication or connection error is not.
+## Connect services in Settings
 
-### 3. Access it from another device
+1. **Models**: save a `/v1` base URL and optional API key; discover or add model IDs, enable models,
+   choose the default, and save. Set thinking mode, tools and context size per model. See
+   [model servers](model-server.md).
+2. **Persona**: edit the default preset's name and instructions. Its name labels the assistant,
+   including before sign-in. Chats may select another preset and have their own instructions.
+3. **Memory**: manage facts used across chats. The model may save facts when its tools are enabled.
+4. **Web search** (optional): save a SearXNG base URL with JSON search enabled, then Test.
+5. **Voice** (optional): use the primary API's speech endpoints or configure a custom speech `/v1`
+   base and key. Test playback and then try a short recording.
+6. **Notifications** (optional): add this browser/device and send a test. An installed PWA and
+   device permission may be required. The server needs outbound HTTPS to browser push services.
 
-Roost binds to loopback by default. Put it behind a **private HTTPS proxy** and set `ROOST_PUBLIC_ORIGIN` to the exact browser origin, with no path or trailing slash. Keep access restricted to your private network: authenticated users can submit work to the agent.
+[Jobs](jobs.md), [attachments](attachments.md), [voice](voice.md), [fallback](fallback.md) and the
+[API](api.md) describe their controls and limits.
 
-For example, if Tailscale is already installed and authenticated on the Roost host, `tailscale serve --bg http://127.0.0.1:8787` provides a private HTTPS address. Inspect any existing Serve configuration first so you do not replace another service. Set `ROOST_PUBLIC_ORIGIN` to the HTTPS origin it reports, restart Roost with the same state and connection settings, and open that address from a device on your tailnet. Use Serve for private access; do not enable Funnel. See the [Tailscale Serve documentation](https://tailscale.com/kb/1242/tailscale-serve) for prerequisites and access controls.
+## Environment and state
 
-### Keep it running
-
-The foreground `serve` command stops when its terminal closes. For a persistent installation, configure your host's service manager (for example, systemd on Linux or launchd on macOS) with the absolute path to `.venv/bin/python`, arguments `-m roost serve`, the checkout as its working directory, and all the configuration values above. Set `ROOST_REVISION` to the installed Git commit for Settings › About. Keep any environment file outside the checkout with mode `600`; do not commit it.
-
-The service account must be able to read the Hermes password file and write the state directory. Configure restart on failure, including exit status 75 used by Settings › Restart Roost. Verify stop/start and reboot persistence before calling the installation complete. Back up the private state directory and configuration securely. For updates, record the current commit, stop Roost, back up state, fast-forward a clean checkout, rerun `.venv/bin/python -m pip install -e .`, update `ROOST_REVISION`, and restart and repeat the connection checks. Retain the old commit and backup for recovery.
-
-### Approval requests
-
-When Hermes asks permission to run a tool, the conversation shows its redacted command and reason with **Allow once** and **Deny**. Reopening the conversation reloads pending requests from Hermes. The decision applies to that exact request; it does not grant a session-wide or permanent allowance, or change filesystem permissions. Expired requests and requests answered elsewhere cannot be approved again.
-
-Enable notifications for each device in **Settings › Notifications**. Requests from turns Roost is following send a summary notification when that conversation is not visible. Supporting browsers (including Chrome on macOS) offer **Allow once** and **Deny** directly on the notification. Safari/macOS web apps and iOS Home Screen apps open the conversation instead, because WebKit does not support custom notification actions. iOS requires Roost installed on the Home Screen with notification permission. OS notification settings control whether summaries appear on a locked device.
-
-Direct actions require an existing Roost login and network access to Roost. If either is unavailable, or Hermes has already resolved the request, Roost opens the conversation for review without replaying the decision. Closing a notification does not deny the request. Hermes owns the timeout and final decision; push messages expire after two minutes but never extend Hermes' deadline. After restarting Roost, reopen the conversation to recover an existing pending request; notification watches are held in memory.
-
-To exercise the flow without executing a command, run the loopback demo and send `/approval-demo`. This is a disposable protocol stand-in, not a live Hermes security test.
-
-### 4. Optional: reply measurements and job reports from Hermes
-
-Roost's reply notifications work on their own. To record reply token counts and TPS, or get the agent's job reports and messages it sends on its own, Hermes needs Roost's platform plugin. It ships with Roost, and **Settings › Notifications** has it as a download, along with these steps and the values to paste:
-
-1. Unzip the plugin into Hermes's plugins folder, so it becomes `$HERMES_HOME/plugins/roost`.
-2. Enable it: `hermes plugins enable roost` (or add `roost` to `plugins.enabled` in Hermes's `config.yaml`).
-3. Add to Hermes's `.env`: `ROOST_URL` (Roost's address as Hermes reaches it), `ROOST_DELIVERY_TOKEN` (shown in Settings) and `ROOST_HOME_CHANNEL=roost`.
-4. Restart Hermes's gateway, then set a job's Deliver to `roost`.
-
-The plugin needs nothing beyond Python's standard library. It posts each delivery to `/api/hermes/deliveries` with the token; Roost keeps the newest 200 and notifies every device. A tapped job report opens the job; any other message opens in Roost. **New token** in Settings replaces the token, and the old one stops working at once.
-
-Plugin **1.1.0 or later** also records whole-reply input/output tokens and model-call time. For an existing installation, download the plugin again, replace both files in `$HERMES_HOME/plugins/roost`, and restart the Hermes process serving Roost (including the dashboard/TUI gateway, not just a separate messaging gateway). Keep the existing `.env` values. No new token or notification permission is needed for measurements.
-
-Tap or click an assistant reply to show its timestamp and measurements. Input tokens count the prompts across every completed main-model call, including cache reads; output tokens include provider-reported thinking and tool-call rounds. TPS is output tokens divided by the sum of those model-call durations, including prompt processing and network time, excluding tool execution and approval waits. It is an effective model-call rate, not a decode-only GPU benchmark. Auxiliary calls and delegated agents have separate accounting and are excluded. The metrics belong to the turn's final saved assistant reply. Older replies, interrupted turns, missing provider usage/timing, or failed telemetry deliveries show **—**; Roost never substitutes character estimates, conversation totals or rolling TPS. Measurements persist in Roost state and are removed with the conversation; they cannot be backfilled from old transcripts.
-
-## Configuration
-
-| Variable | Purpose | Default |
+| Variable | Meaning | Default |
 | --- | --- | --- |
-| `ROOST_PUBLIC_ORIGIN` | Exact browser origin; HTTPS required except for local HTTP previews. | Required |
-| `ROOST_PUSH_SUBJECT` | Optional Web Push (`sub`) subject: an `https://` origin or `mailto:` address. Set it when `ROOST_PUBLIC_ORIGIN` uses a private host name such as `.internal`, which Apple's push service rejects (`403 BadJwtToken`). | Unset (the origin) |
-| `ROOST_HERMES_URL` | Hermes dashboard base URL. | Required |
-| `ROOST_HERMES_USERNAME` | Dashboard password-provider username. | Required |
-| `ROOST_HERMES_PASSWORD_FILE` | File containing the dashboard password. | Required |
-| `ROOST_STATE_DIR` | Directory for the password hash, session database (also passkeys and notification devices), settings, the notification signing key (`vapid.pem`) and Hermes's delivery token (`delivery-token`), both created on first start. | `.roost-state` |
-| `ROOST_REVISION` | The commit Roost was built from, shown in Settings › About. Set by whatever builds Roost. | Unset (shown as unknown) |
-| `ROOST_TRUST_FORWARDED` | Set to `1` only when a trusted proxy is the service's sole entry point and controls `X-Forwarded-For`. | Off |
+| `ROOST_PUBLIC_ORIGIN` | Exact HTTPS browser origin; HTTP allowed only for loopback preview | Required |
+| `ROOST_STATE_DIR` | Private writable state directory | `.roost-state` |
+| `ROOST_MODEL_URL` | Installer prefill for an absent or empty primary URL | Empty |
+| `ROOST_MODEL_KEY_FILE` | Installer key prefill only while filling that URL, and only if no key exists | Empty |
+| `ROOST_ADMISSION` | Concurrent model turns, 1–16 | `1` |
+| `ROOST_PUSH_SUBJECT` | Public HTTPS origin or mailto VAPID subject | Browser origin |
+| `ROOST_TRUST_FORWARDED` | Trust forwarding header from any peer; only behind an exclusive trusted proxy | `0` |
+| `ROOST_REVISION` | Optional hexadecimal build revision displayed on About | Empty |
 
-The server command also accepts `--host` and `--port`; defaults are `127.0.0.1` and `8787`. With forwarded-header trust off, only loopback peers' forwarded addresses are trusted. Turning it on trusts that header from every peer, so direct access must be blocked.
+Prefill never changes a configured primary URL or key. An earlier start without env may have saved
+an empty primary; later env prefill still works. Settings remains authoritative after configuration.
+Models must still be curated and a default selected. Search and speech are configured in Settings.
+The earlier `ROOST_NATIVE_ADMISSION` name remains an alias when `ROOST_ADMISSION` is unset; it
+controls concurrency only.
 
-The agent's name comes from Roost's Settings if set there, otherwise from the display name of the Hermes profile the dashboard serves, otherwise "Agent".
+State includes `password.hash`, `sessions.sqlite3` (sessions, passkeys, push subscriptions),
+`native.sqlite3` (chat, personas, memory, jobs and outbox), `servers.json`, `model-keys.json`,
+`settings.json`, `voice.json`, `speech-keys.json` and `vapid.pem`. Keep the complete directory private;
+back it up with the service stopped, or use SQLite's backup facilities for a consistent live copy.
+The existing chat-store filename is retained for installed users. Unknown old preference keys and
+retired credential/token files are ignored; they need not be removed to start Roost.
 
-**Restart Roost** in Settings exits the process with status 75 so a service manager restarts it. Run Roost under one that restarts on failure (systemd `Restart=on-failure`, for example), or the button just stops it.
-
-## Security
-
-The Python server holds the Hermes dashboard credential. The browser receives only Roost's conversation, Job and Settings routes; it does not receive dashboard credentials, inference keys or direct gateway access. Conversation text and Job prompts are rendered without raw HTML injection.
-
-**Passkeys.** Once signed in, add a passkey in Settings › Account; the sign-in page then offers it. Passkeys are bound to the host name in `ROOST_PUBLIC_ORIGIN` (the WebAuthn relying party ID), so changing that name makes existing passkeys unusable; the password keeps working. Every passkey use requires user verification (Face ID, Touch ID or the device PIN). No attestation is requested, because only a signed-in owner can add one. Removing a passkey in Roost doesn't delete it from the device, so also remove it from the device's passwords. Passkeys need HTTPS, or `localhost`; an IP-address origin can't use them. Failed passkey sign-ins count toward the same per-device limit as passwords.
-
-Sessions last up to 30 days and use revocable, server-side records with HttpOnly, SameSite Strict cookies. HTTPS enables Secure cookies. Sign-in is rate limited.
-
-Run `set-password` again to change your Roost password; no restart is needed. **Existing sessions remain valid.** To revoke them, sign out on each device, or stop Roost and remove its session database before restarting.
-
-Keep credentials, state and conversation data out of version control. For suspected exposure or vulnerabilities, follow [SECURITY.md](../SECURITY.md).
-
-
-See [compatibility and preview status](compatibility.md) before deployment.
+Model/speech keys are write-only in the UI and stored in separate 0600 files. A blank key field
+keeps the saved key; Clear saved key removes it. Rotate credentials through their provider if exposed.
+See [security](../SECURITY.md).

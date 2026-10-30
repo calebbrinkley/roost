@@ -12,21 +12,18 @@ const SLICES = {
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
-  approvals: () => ({ approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalFocus: null,
-                      approvalFocusConversation: null, approvalLoading: null }),
   voice: () => ({ voiceDraft: false, voiceReply: null, playing: null }),
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
-  settings: () => ({ settings: null, voiceSettings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
-                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, fallback: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
+  settings: () => ({ settings: null, voiceSettings: null, settingsGroup: null, settingsBusy: false, timeZone: "", about: null, models: [], defaultModel: null, primary: null, fallback: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
-                    push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
+                    push: null, removingPush: null }),
 };
 const KEPT = () => ({
   // Sign-ins and views only count up; an answer to an earlier one is ignored.
   authEpoch: 0, viewEpoch: 0,
   // Newest-request counters: an older answer never replaces a newer one.
-  conversationRequest: 0, messageRequest: 0, messageApplied: 0, jobsRequest: 0, approvalRevision: 0, sentKey: 0,
+  conversationRequest: 0, messageRequest: 0, messageApplied: 0, jobsRequest: 0, sentKey: 0,
   // The device and the sign-in page: not private, and needed before the next sign-in.
   section: "messages", agentName: "", passkeysAvailable: false, passkeyLogin: null,
   workingVerb: undefined, player: null, stream: null, liveFrame: 0,
@@ -46,17 +43,17 @@ function records(rows) { return rows.filter((row) => row && typeof row === "obje
 
 function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
-// The agent's name comes from the server: Roost's own setting, else Hermes's name for it, else "Agent".
+// The default persona names the assistant; each saved reply keeps its own persona name.
 // The markup holds templates for it.
 function agent() {
-  if (isNative()) return state.currentPersona || state.personaData?.personas.find(item => item.id === state.personaData.default_persona_id)?.name || state.agentName || "Assistant";
-  return state.agentName || "Agent";
+  return state.currentPersona || state.personaData?.personas.find(item => item.id === state.personaData.default_persona_id)?.name || state.agentName || "Assistant";
 }
 
-function replyName(row) { return isNative() ? row.persona_name || agent() : agent(); }
+function replyName(row) { return row.persona_name || agent(); }
 
 function applyAgentName(name) {
   if (name) state.agentName = name;
+  document.title = `${agent()} · Roost`;
   for (const node of document.querySelectorAll("[data-agent-text]")) node.textContent = node.dataset.agentText.replaceAll("{agent}", agent());
   for (const node of document.querySelectorAll("[data-agent-placeholder]")) node.placeholder = node.dataset.agentPlaceholder.replaceAll("{agent}", agent());
   for (const node of document.querySelectorAll("[data-agent-initial]")) node.textContent = agent().charAt(0).toUpperCase();
@@ -74,13 +71,13 @@ function nextWorkingVerb() {
 
 function workingLabel(ellipsis = false) {
   const label = el("span", "working-label" + (ellipsis ? " ellipsis" : ""));
-  label.textContent = (state.approvals?.length ? `${agent()} is waiting for your approval` : `${agent()} is ${state.workingVerb || "thinking"}`) + (ellipsis ? "…" : "");
+  label.textContent = `${agent()} is ${state.workingVerb || "thinking"}` + (ellipsis ? "…" : "");
   return label;
 }
 
 function refreshWorkingLabels() {
   for (const label of document.querySelectorAll(".working-label")) {
-    label.textContent = (state.approvals?.length ? `${agent()} is waiting for your approval` : `${agent()} is ${state.workingVerb}`) + (label.classList.contains("ellipsis") ? "…" : "");
+    label.textContent = `${agent()} is ${state.workingVerb}` + (label.classList.contains("ellipsis") ? "…" : "");
   }
 }
 // Line icons in one style (24 px grid, 2 px round strokes, current text colour).
@@ -246,13 +243,13 @@ function signedOut(clearLink = true) {
   state.sentMessages.forEach(stopSendCheck);
   try { localStorage.removeItem("roost.composer-drafts"); } catch { /* Storage may be unavailable. */ }
   Object.assign(state, freshSlices());
+  applyAgentName();
   updateLatest();
-  renderApprovals();
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
-  for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
+  for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail", "attach-tray"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet", "attachment-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["job-dialog", "conversation-sheet", "remember-sheet", "summary-sheet", "attachment-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -323,7 +320,7 @@ async function signedIn() {
   try { await loadConversations(); if (scope.alive()) setConnection(true); } catch (error) { if (scope.alive()) { setConnection(false); notice(error.message); } }
   if (!scope.alive()) return;
   navigation.signingIn = false;
-  // A tapped notification opens Roost at /?c=<conversation>, /?j=<job> or /?d=<delivered message>.
+  // A tapped notification opens Roost at /?c=<conversation> or /?j=<job>.
   const search = navigation.pending || globalThis.location?.search || "";
   navigation.pending = "";
   if (search) { if (globalThis.location?.search) history.replaceState(null, "", "/"); openLink(search); }
@@ -362,12 +359,10 @@ function refreshOnResume() {
 }
 
 function openLink(search) {
-  const link = new URLSearchParams(search); state.approvalFocus = link.get("a");
-  const conversation = link.get("c"), job = link.get("j"), delivery = link.get("d");
-  state.approvalFocusConversation = conversation;
+  const link = new URLSearchParams(search);
+  const conversation = link.get("c"), job = link.get("j");
   if (conversation) { setSection("messages"); selectConversation(conversation); }
-  else if (job && !isNative()) showJob(job);
-  else if (delivery && !isNative()) openDelivery(delivery);
+  else if (job) showJob(job);
 }
 
 async function showJob(id) {
@@ -377,17 +372,6 @@ async function showJob(id) {
   else notice("That job no longer exists.");
 }
 
-// A message the agent sent on its own, kept by Roost (Hermes has no transcript of it).
-async function openDelivery(id) {
-  const scope = signInScope();
-  try {
-    const item = await api("/deliveries/" + encodeURIComponent(id));
-    $("delivery-title").textContent = item.title || agent();
-    $("delivery-time").textContent = dateTimeLabel(item.created);
-    const body = $("delivery-text"); body.replaceChildren(); addMarkdown(body, String(item.text || ""));
-    if (!$("delivery-sheet").open) $("delivery-sheet").showModal();
-  } catch (error) { report(error, scope); }
-}
 
 // The agent's name and the synced accent, as the signed-in server sees them.
 async function refreshIdentity() {
@@ -399,21 +383,11 @@ async function refreshIdentity() {
 }
 
 // /me, /settings and a saved change all answer with the name shown, the accent and the time zone.
-function isNative() { return state.backend === "native"; }
 
-function backendSurfaces(backend) {
-  return { jobs: true, soul: backend !== "native", voice: true,
-    approvals: backend !== "native", hermes: backend !== "native" };
-}
 
 function applyServerSettings(data) {
-  state.backend = data.backend || "hermes";
-  const surfaces = backendSurfaces(state.backend);
-  for (const id of ["nav-jobs", "mobile-nav-jobs"]) show(id, surfaces.jobs);
-  show("voice-button", surfaces.voice);
-  $("search").maxLength = isNative() ? 200 : 524288;
-  $("app").classList.toggle("native", isNative());
-  if (isNative()) loadModels().catch(error => notice(error.message));
+  $("search").maxLength = 200;
+  loadModels().catch(error => notice(error.message));
   state.agentName = data.agent || "";
   applyAgentName(data.agent);
   window.roostTheme.setAccent(data.accent);
@@ -502,7 +476,7 @@ function messageTime(value) {
 }
 
 function sessionName(item) {
-  return item.title || item.name || withoutInstructions(item.preview) || "Conversation";
+  return item.title || item.name || (item.preview) || "Conversation";
 }
 
 // Hold a conversation (about half a second) or right-click it to rename or delete it.
@@ -525,8 +499,8 @@ function holdToAct(node, act) {
   node.addEventListener("contextmenu", (event) => { event.preventDefault(); cancel(); act(); });
 }
 
-// Swipe a conversation left on a phone to reveal Delete, as in Mail or Messages. Deleting is permanent
-// in Hermes, so both the Delete button and a full swipe go through the confirmation sheet.
+// Swipe a conversation left on a phone to reveal Delete, as in Mail or Messages. Deleting is permanent,
+// so both the Delete button and a full swipe go through the confirmation sheet.
 const SWIPE_REVEAL = 88;
 const phoneWidth = window.matchMedia("(max-width: 700px)");
 // On touch screens, focusing the message field opens the on-screen keyboard; only the owner's tap should do that.
@@ -590,7 +564,7 @@ function openConversationSheet(item) {
   if (state.sheetBusy) return;
   state.sheetItem = item;
   $("sheet-title").textContent = sessionName(item);
-  $("sheet-instructions").textContent = isNative() ? "Chat settings" : "Instructions";
+  $("sheet-instructions").textContent = "Chat settings";
   $("sheet-error").textContent = ""; $("sheet-confirm-error").textContent = ""; $("sheet-instructions-error").textContent = "";
   $("sheet-export").href = `/api/conversations/${encodeURIComponent(item.id)}/export`;
   sheetView("sheet-actions");
@@ -621,14 +595,13 @@ async function openInstructions() {
   const scope = signInScope(), field = $("sheet-instructions-text");
   field.value = ""; field.disabled = true;
   sheetView("sheet-instructions-form");
-  show("sheet-native-settings", isNative());
-  show("sheet-hermes-note", !isNative());
+  show("sheet-chat-settings", true);
   try {
-    if (isNative()) await Promise.all([loadModels(), loadPersonas()]);
+    await Promise.all([loadModels(), loadPersonas()]);
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
     if (state.sheetItem !== item) return;
     field.value = typeof data.instructions === "string" ? data.instructions : "";
-    if (isNative()) {
+    {
       fillModelPicker($("sheet-model"), data.model);
       fillPersonaPicker($("sheet-persona"), data.persona_id);
       $("sheet-reasoning").value = data.reasoning || "none";
@@ -647,8 +620,8 @@ async function saveInstructions(event) {
   const scope = signInScope();
   state.sheetBusy = true;
   try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked, keep_local: $("sheet-keep-local").checked, persona_id: $("sheet-persona").value || null} : {}) }) });
-    if (isNative() && state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); await loadMessages(id); }
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...({model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked, keep_local: $("sheet-keep-local").checked, persona_id: $("sheet-persona").value || null}) }) });
+    if (state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); await loadMessages(id); }
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
   } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
@@ -680,13 +653,13 @@ async function deleteConversation() {
 
 function renderConversations() {
   const signature = JSON.stringify([state.conversations, state.current, state.search, state.working, state.loadingMore,
-    state.searchResults, state.searchLoading, state.searchError, state.swipeOpenId, state.approvals.length > 0, state.timeZone, agent(), dayKey(new Date())]);
+    state.searchResults, state.searchLoading, state.searchError, state.swipeOpenId, state.timeZone, agent(), dayKey(new Date())]);
   if (signature === state.listSignature) return;
   state.listSignature = signature;
   const list = $("conversation-list"); list.replaceChildren();
-  const searching = isNative() && Boolean(state.search);
+  const searching = Boolean(state.search);
   const rows = searching ? state.searchResults || [] : state.conversations.filter((item) =>
-    (sessionName(item) + " " + (withoutInstructions(item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
+    (sessionName(item) + " " + ((item.preview) || "") + " " + (item.source || "")).toLowerCase().includes(state.search));
   if (searching && state.searchLoading) list.append(el("p", "empty-list", "Searching…"));
   else if (searching && state.searchError) { const error = el("p", "empty-list", state.searchError); error.setAttribute("role", "alert"); list.append(error); }
   else if (!rows.length) list.append(el("p", "empty-list", state.search ? "No matching conversations." : `No conversations yet. Start one with ${agent()}.`));
@@ -707,7 +680,7 @@ function renderConversations() {
     // The server marks conversations it is following; the open one also knows what this device just sent.
     const working = item.working === true || (id === state.current && state.working);
     const preview = el("span", "row-preview" + (working ? " live" : ""));
-    preview.append(searching ? item.snippet || item.preview || "" : working ? workingLabel(true) : (withoutInstructions(item.preview) || `Conversation with ${agent()}`));
+    preview.append(searching ? item.snippet || item.preview || "" : working ? workingLabel(true) : ((item.preview) || `Conversation with ${agent()}`));
     copy.append(heading, preview);
     button.append(copy);
     const meta = el("span", "row-meta");
@@ -775,7 +748,7 @@ async function loadConversations(more = false) {
 // Older conversations load as the list nears its end, or at once when the loaded ones don't fill it.
 function loadMoreIfNearEnd() {
   const list = $("conversation-list");
-  if ((isNative() && state.search) || state.section !== "messages" || !state.conversationsMore || state.loadingMore) return;
+  if ((state.search) || state.section !== "messages" || !state.conversationsMore || state.loadingMore) return;
   if (list.scrollTop + list.clientHeight < list.scrollHeight - 400) return;
   loadConversations(true).catch((error) => notice(error.message));
 }
@@ -788,8 +761,8 @@ function finishLoadingConversations(data, rows, more) {
     $("app").classList.remove("chat-open");
     reportPresence();
   }
-  // A native chat's automatic title can arrive after the chat was opened.
-  const open = isNative() && state.current ? rows.find((row) => row.id === state.current) : null;
+  // A chat's automatic title can arrive after the chat was opened.
+  const open = state.current ? rows.find((row) => row.id === state.current) : null;
   if (open) $("chat-title").textContent = sessionName(open);
   renderConversations();
   if (!state.current && !more) renderWelcome();
@@ -797,7 +770,7 @@ function finishLoadingConversations(data, rows, more) {
 
 function renderWelcome() {
   state.messageHistory = null; state.lastRows = null; state.messageSignature = null;
-  if (isNative()) { state.currentPersona = null; applyAgentName(); state.live = null; state.turn = null; state.model = null; state.noWeb = false; state.webForce = false; state.context = null; updateNativeComposer(); renderContext(); }
+  { state.currentPersona = null; applyAgentName(); state.live = null; state.turn = null; state.model = null; state.noWeb = false; state.webForce = false; state.context = null; updateComposer(); renderContext(); }
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -811,7 +784,7 @@ function renderWelcome() {
   setChatAvatar(state.draftSeed);
   const card = el("div", "welcome-card");
   const starters = el("div", "starters");
-  for (const [title, hint, text] of (isNative() ? NATIVE_STARTERS : STARTERS)) {
+  for (const [title, hint, text] of (STARTERS)) {
     const starter = el("button", "starter");
     starter.type = "button";
     starter.append(el("b", "", title), el("span", "", hint));
@@ -830,33 +803,14 @@ function renderWelcome() {
 }
 
 // Suggestions on a new conversation's welcome screen: a tap puts the message in the box to edit or send.
-const NATIVE_STARTERS = [
+const STARTERS = [
   ["Think it through", "A fresh perspective", "Help me think through a decision. Ask me what I’m weighing up."],
   ["Make a plan", "One step at a time", "Help me break a project into a practical plan."],
 ];
-const STARTERS = [
-  ["Plan my week", "From your calendar and notes", "Help me plan my week, using my calendar and notes if you can see them."],
-  ["Set up a job", "A briefing every weekday at 8", "Set up a job that sends me a short briefing every weekday at 8."],
-  ["Summarise a note", "Anything in your notes folder", "Summarise a note from my notes folder. Ask me which one."],
-  ["Check on the server", "Disk, services and backups", "Check on the server: disk space, services and backups."],
-];
-
-// Instructions set for a conversation travel once with the next message, between these lines
-// (roost/chats.py writes them); the transcript shows that message as it was typed.
-const INSTRUCTIONS_BEGIN = "[Instructions for this conversation, set by the owner in Roost. Follow them until they change.]";
-const INSTRUCTIONS_END = "[End of instructions]";
-
-function withoutInstructions(text) {
-  // Hermes's list previews are cut short and flattened to one line, so match loosely.
-  if (typeof text !== "string" || !text.startsWith(INSTRUCTIONS_BEGIN.slice(0, 40))) return text;
-  const end = text.indexOf(INSTRUCTIONS_END, INSTRUCTIONS_BEGIN.length);
-  // Cut off inside the instructions: none of the message is left.
-  return end < 0 ? "" : text.slice(end + INSTRUCTIONS_END.length).trimStart();
-}
 
 function messageText(message) {
-  const value = message.display_content ?? message.content;
-  if (typeof value === "string") return message.role === "user" ? withoutInstructions(value) : value;
+  const value = message.content;
+  if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : (part?.text || part?.type || "")).join("\n");
   if (value && typeof value === "object") return typeof value.text === "string" ? value.text : JSON.stringify(value);
   return "";
@@ -995,14 +949,13 @@ function copyButton(text, label) {
   return button;
 }
 
-// The same field precedence as Hermes's own desktop app.
 function reasoningText(row) {
   const value = row.display_reasoning !== undefined ? row.display_reasoning
     : row.reasoning || row.reasoning_content || (typeof row.reasoning_details === "string" ? row.reasoning_details : "");
   return typeof value === "string" ? value.trim() : "";
 }
 
-// Native traces use the same compact Thoughts layout for saved and live steps.
+// Turn traces use the same compact Thoughts layout for saved and live steps.
 function fillThoughts(body, items) {
   body.replaceChildren();
   for (const [index, item] of items.entries()) {
@@ -1025,7 +978,7 @@ function fillThoughts(body, items) {
       const label = item.forgotten ? `Forgotten: ${fact}` : item.fact_id ? `Remembered: ${fact}` : item.status === "running" ? `Remembering: ${fact || "…"}` : `Memory not saved: ${result.error || item.status}`;
       tool.append(el("div", "tool-call tool-call-plain", label));
       if (item.fact_id && !item.forgotten) {
-        const remove = el("button", "send-action native-action memory-forget", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Forget this memory"); remove.title = "Forget this memory";
+        const remove = el("button", "send-action message-action memory-forget", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Forget this memory"); remove.title = "Forget this memory";
         remove.addEventListener("click", async () => {
           remove.disabled = true;
           try { await api(`/memory/${item.fact_id}`, {method: "DELETE"}); state.memoryData = null; item.forgotten = true; fillThoughts(body, items); }
@@ -1069,7 +1022,7 @@ function fillThoughts(body, items) {
   }
 }
 
-function nativeThoughts(row) {
+function turnThoughts(row) {
   return [...(Array.isArray(row.memories) && row.memories.length ? [{kind: "memories", turn_id: row.turn_id, facts: row.memories}] : []), ...(row.trace || [])];
 }
 
@@ -1081,7 +1034,7 @@ function rememberPrefill(row, body) {
 
 function appendRemember(parent, row, body) {
   if (!row.turn_id || !["completed", "failed", "interrupted"].includes(row.state)) return;
-  const button = el("button", "send-action native-action", "Remember…"); button.type = "button";
+  const button = el("button", "send-action message-action", "Remember…"); button.type = "button";
   button.addEventListener("pointerdown", event => event.preventDefault());
   button.addEventListener("click", () => {
     state.rememberSource = {source_message_id: row.id, conversation_id: state.current};
@@ -1146,9 +1099,7 @@ document.addEventListener("selectionchange", () => {
   }
 });
 
-// Hermes can acknowledge a busy-session prompt before it becomes a durable transcript row.
-// Returns the rows with this device's unsaved messages added, the sent messages still unsaved, and
-// `savedAs`: for each sent message Hermes saved just now, its key and the id of the row that holds it.
+// Reconcile local echoes by the durable request ID, never by message text.
 function withSentMessages(rows, sent, current) {
   let pending = sent;
   const savedAs = {};
@@ -1159,32 +1110,17 @@ function withSentMessages(rows, sent, current) {
       if (matched) { savedAs[matched.key] = row.id; stopSendCheck(matched); pending = pending.filter(item => item !== matched); }
       continue;
     }
-    const candidates = pending.filter((item) => (!item.failed || item.pending) && item.id === current && row.id > item.after);
-    const saved = messageText(row);
-    let combined = "";
-    for (let index = 0; index < candidates.length; index++) {
-      combined += (index ? "\n\n" : "") + candidates[index].text;
-      if (combined === saved) {
-        // Hermes can merge a queued burst into one user row. Consume exactly that prefix once.
-        const matched = new Set(candidates.slice(0, index + 1));
-        for (const item of matched) { savedAs[item.key] = row.id; stopSendCheck(item); }
-        pending = pending.filter((item) => !matched.has(item));
-        // Keep item identity: its check timer follows it until it is saved or discarded.
-        for (const item of pending) if ((!item.failed || item.pending) && item.id === current) item.after = Math.max(item.after, row.id);
-        break;
-      }
-      if (!saved.startsWith(combined)) break;
-    }
+
   }
   return { sent: pending, savedAs, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
     role: "user", content: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}), timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
   }))] };
 }
 
-// What a conversation shows: Hermes's saved rows, this device's messages Hermes has not saved yet, and
-// the turn being written live in place of the steps Hermes has saved for it. The server says whether the
-// agent is working and where the live turn begins (`after`, paired with the turn by `started`), so
-// nothing here matches messages by their text. `server` is the latest conversation response's
+// What a conversation shows: the saved rows, this device's messages that are not saved yet, and the turn
+// being written live in place of the steps saved for it. The server says whether the agent is working
+// and where the live turn begins (`after`, paired with the turn by `started`), so nothing here matches
+// messages by their text. `server` is the latest conversation response's
 // { working, after, started, at }, or {} before there is one.
 function conversationView({ rows, sent, current, live, server }) {
   const added = withSentMessages(rows, sent, current);
@@ -1227,7 +1163,7 @@ function openSummary(summary) {
   $("summary-sheet").showModal(); $("summary-title").focus();
 }
 
-// Attachments (native only). The server reads a file and returns its text; only that text travels with the
+// Attachments. The server reads a file and returns its text; only that text travels with the
 // message, and it stays readable from the message's chips. Chips use one shape for the composer, sent
 // messages and the edit form.
 const ATTACH_CAP_TOKENS = 30000, ATTACH_MAX_FILES = 10, ATTACH_MAX_BYTES = 20 * 1024 * 1024;
@@ -1269,12 +1205,12 @@ function openAttachment(file) {
 
 function drawAttachments() {
   const list = state.attachments, tray = $("attach-tray"), total = attachmentTotal(), over = total > ATTACH_CAP_TOKENS;
-  show("attach-button", isNative());
+  show("attach-button", true);
   $("attach-button").disabled = list.length >= ATTACH_MAX_FILES;
-  show("attach-tray", isNative() && list.length > 0);
+  show("attach-tray", list.length > 0);
   tray.replaceChildren();
-  if (isNative() && list.length) {
-    const removeFile = (file) => { state.attachments = state.attachments.filter((item) => item !== file); updateNativeComposer(); };
+  if (list.length) {
+    const removeFile = (file) => { state.attachments = state.attachments.filter((item) => item !== file); updateComposer(); };
     tray.append(attachmentChips(list, { open: (file) => file.status === "ready" && openAttachment(file), remove: removeFile }));
     const near = total >= ATTACH_CAP_TOKENS * 0.8;
     const note = el("p", "attach-total" + (over ? " over" : ""), over
@@ -1286,12 +1222,12 @@ function drawAttachments() {
 }
 
 async function attachFiles(files) {
-  if (!isNative()) return;
+
   const scope = signInScope();
   await Promise.all(files.map(async (file) => {
     if (state.attachments.length >= ATTACH_MAX_FILES) { notice(`Attach at most ${ATTACH_MAX_FILES} files to a message.`); return; }
     const entry = { name: file.name, status: "loading" };
-    state.attachments.push(entry); updateNativeComposer();
+    state.attachments.push(entry); updateComposer();
     try {
       if (file.size > ATTACH_MAX_BYTES) throw new Error("That file is larger than 20 MB.");
       const form = new FormData(); form.append("file", file, file.name);
@@ -1301,7 +1237,7 @@ async function attachFiles(files) {
       if (!scope.alive()) return;
       Object.assign(entry, { status: "error", error: error.message });
     }
-    if (scope.alive() && state.attachments.includes(entry)) updateNativeComposer();
+    if (scope.alive() && state.attachments.includes(entry)) updateComposer();
   }));
 }
 
@@ -1334,7 +1270,7 @@ function summaryDividers(visible) {
 function renderMessages(rows) {
   const transcript = $("transcript");
   state.lastRows = rows;
-  if (state.editTurn) { updateNativeComposer(); return; }
+  if (state.editTurn) { updateComposer(); return; }
   if (state.renderedConversation === state.current && selectingTranscript()) {
     state.selectionDeferred = true;
     return;
@@ -1352,7 +1288,7 @@ function renderMessages(rows) {
   if (view.live && view.after != null) view.live.after = view.after;
   state.working = view.working;
   readVoiceReply(view);
-  updateNativeComposer();
+  updateComposer();
   renderContext();
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
@@ -1363,7 +1299,7 @@ function renderMessages(rows) {
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
     state.messageHistory?.hasOlder, state.messageHistory?.loading, currentSummaries(),
     [...state.shownTimes], [...state.openThoughts], state.liveThoughtsOpen !== false, state.playing,
-    state.approvals, state.reasoning, state.timeZone, agent(), dayKey(new Date())]);
+    state.reasoning, state.timeZone, agent(), dayKey(new Date())]);
   // Reconciliation above still runs on every poll; Markdown and DOM work only follow a view change.
   if (prepend) state.messageHistory.prepend = false;
   if (signature === state.messageSignature) return;
@@ -1382,7 +1318,7 @@ function renderMessages(rows) {
     button.addEventListener("click", loadEarlierMessages);
     transcript.append(button);
   }
-  const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && (messageText(row) || (isNative() && ["failed", "interrupted"].includes(row.state))));
+  const visible = all.filter((row) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden" && (messageText(row) || (["failed", "interrupted"].includes(row.state))));
   const content = JSON.stringify([visible.filter((row) => row.role === "assistant").map((row) => [row.id, messageText(row)]), live?.text || ""]);
   const changed = !fresh && !prepend && content !== state.latestContent;
   state.latestContent = content;
@@ -1394,7 +1330,7 @@ function renderMessages(rows) {
   let thoughts = [], thoughtsKey = null;
   all.forEach((row, index) => {
     const text = row.role === "assistant" && row.display_kind !== "hidden" ? reasoningText(row) : "";
-    const items = isNative() && Array.isArray(row.trace) ? nativeThoughts(row) : text ? [text] : [];
+    const items = Array.isArray(row.trace) ? turnThoughts(row) : text ? [text] : [];
     if (items.length) { thoughts.push(...items); thoughtsKey ??= String(row.id ?? `at ${index}`); }
     if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
   });
@@ -1409,13 +1345,13 @@ function renderMessages(rows) {
       if (row.attachments?.length) body.append(attachmentChips(row.attachments, { open: openAttachment }));
       addUserMessage(body, messageText(row), key);
     }
-    else addReply(body, messageText(row), isNative() ? row.sources || [] : []);
-    if (isNative() && row.role === "assistant") wrapper.append(el("div", "persona-label", replyName(row)));
+    else addReply(body, messageText(row), row.sources || []);
+    if (row.role === "assistant") wrapper.append(el("div", "persona-label", replyName(row)));
     wrapper.append(body);
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
     if (row.role === "user") {
-      const status = isNative() && row.state === "queued" ? "Queued" : row.local_pending ? "Sending…" : row.local_failed ? "Not sent" : row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
+      const status = row.state === "queued" ? "Queued" : row.local_pending ? "Sending…" : row.local_failed ? "Not sent" : row.local_sent ? "Sent" : visible.slice(index + 1).some((next) => next.role === "assistant") ? "Read" : "Delivered";
       const under = el("div", "under right" + (row.local_failed ? " failed-send" : ""));
       under.append(el("span", "", shown ? `${status} - ${time}` : status));
       if (row.local_failed) {
@@ -1431,17 +1367,17 @@ function renderMessages(rows) {
         });
         under.append(retry, remove);
       }
-      if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
+      { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
       transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
       if (row.id != null) under.append(playButton(row.id));
       under.append(copyButton(messageText(row), "Copy reply"));
-      if (isNative() && ["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
-      if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
-      if (shown || (isNative() && row.state === "completed")) {
+      if (["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
+      { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
+      if (shown || (row.state === "completed")) {
         const details = el("span", "reply-usage", `${shown ? time + " · " : ""}${replyUsage(row)}`);
-        details.title = isNative() ? "Measured output tokens per second and time to first token. — means no recorded measurement." : "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
+        details.title = "Measured output tokens per second and time to first token. — means no recorded measurement.";
         under.append(details);
       }
       if (under.children.length) transcript.append(under);
@@ -1502,7 +1438,7 @@ async function selectConversation(id, source) {
   showReasoning("default"); loadReasoning(id);
   try { await loadMessages(id); } catch (error) {
     if (state.current === id && state.sentMessages.some((item) => item.id === id && item.failed)) renderMessages([]);
-    else if (isNative() && state.current === id) {
+    else if (state.current === id) {
       const retry = el("button", "secondary", "Try again"); retry.type = "button";
       retry.addEventListener("click", () => selectConversation(id, source));
       const message = el("p", "empty-transcript", "Couldn’t load this conversation."); message.setAttribute("role", "alert");
@@ -1524,8 +1460,8 @@ async function loadMessages(id = state.current) {
     state.messageApplied = serial;
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, turn_id: data.turn_id, at };
-    if (isNative()) { state.context = data.context; state.currentPersona = data.persona_name || null; applyAgentName(); }
-    if (isNative() && data.job) {
+    { state.context = data.context; state.currentPersona = data.persona_name || null; applyAgentName(); }
+    if (data.job) {
       const date = parseTime(data.job.scheduled_for);
       $("chat-title").textContent = `${data.job.name} · ${date.toLocaleDateString(undefined, {month: "short", day: "numeric", ...zone()})}, ${clockTime(date)}`;
     }
@@ -1535,12 +1471,12 @@ async function loadMessages(id = state.current) {
     }
     let history = state.messageHistory;
     if (history?.id !== id) history = state.messageHistory = { id, rows: [], loaded: false, loading: false };
-    history.rows = history.loaded && (!isNative() || data.has_older) ? mergeMessages(history.rows, data.messages, isNative()) : data.messages;
+    history.rows = history.loaded && (data.has_older) ? mergeMessages(history.rows, data.messages, true) : data.messages;
     if (!history.loaded) history.hasOlder = data.has_older === true;
-    if (isNative()) history.summaries = Array.isArray(data.summaries) ? data.summaries : [];
+    history.summaries = Array.isArray(data.summaries) ? data.summaries : [];
     renderMessages(history.rows);
     messagePollDelay();
-    if (!isNative()) loadApprovals(id);
+
   }
 }
 
@@ -1552,7 +1488,7 @@ function messageOrder(a, b) {
 
 function mergeMessages(older, newer, snapshot = false) {
   const rows = new Map();
-  // A native tail is authoritative: cancelled or edited rows must disappear, even after paging.
+  // A committed tail is authoritative: cancelled or edited rows must disappear, even after paging.
   const boundary = newer[0];
   const retained = snapshot ? older.filter(row => boundary && (row.ordinal < boundary.ordinal || (row.turn_id != null && row.turn_id === boundary.turn_id && messageOrder(row, boundary) < 0)) && !newer.some(next => next.id === row.id)) : older;
   for (const row of records([...retained, ...newer])) rows.set(String(row.id), row);
@@ -1582,82 +1518,6 @@ async function loadEarlierMessages() {
   }
 }
 
-// Approvals belong to the exact Hermes request. A notification link only opens the card.
-function setApprovals(items) {
-  state.approvalRevision = state.approvalRevision + 1;
-  const previous = new Set((state.approvals || []).map(item => item.request_id));
-  state.approvals = items.filter(item => item && typeof item.request_id === "string");
-  if (state.approvals.some(item => !previous.has(item.request_id))) state.approvalNotice = "";
-  state.approvalReady = true;
-  refreshWorkingLabels(); renderApprovals();
-}
-
-async function loadApprovals(id = state.current) {
-  if (isNative() || !id || state.approvalLoading?.id === id) return;
-  const scope = viewScope(id), revision = state.approvalRevision;
-  const loading = {id}; state.approvalLoading = loading;
-  try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/approvals`);
-    if (scope.alive() && revision === state.approvalRevision) {
-      setApprovals(Array.isArray(data.approvals) ? data.approvals : []);
-    }
-  } catch {
-    if (scope.alive()) { state.approvalReady = false; renderApprovals(); }
-  } finally { if (state.approvalLoading === loading) state.approvalLoading = null; }
-}
-
-function renderApprovals() {
-  const panel = $("approvals"), items = isNative() ? [] : state.approvals || [];
-  const signature = JSON.stringify([items, state.approvalBusy, state.approvalReady, state.approvalNotice, state.approvalFocus]);
-  if (panel.dataset.content === signature) return;
-  panel.dataset.content = signature; panel.replaceChildren();
-  for (const item of items) {
-    const card = el("article", "approval-card");
-    const heading = el("div", "approval-heading");
-    heading.append(icon("warning"), el("strong", "", item.command ? `${agent()} wants to run a command` : `${agent()} needs your approval`));
-    card.append(heading);
-    if (item.description) card.append(el("p", "approval-summary", item.description));
-    if (item.command) card.append(el("pre", "approval-command", item.command));
-    const buttons = el("div", "approval-actions");
-    for (const [choice, label] of [["once", "Allow once"], ["deny", "Deny"]]) {
-      if (!Array.isArray(item.choices) || !item.choices.includes(choice)) continue;
-      const button = el("button", choice === "once" ? "primary" : "secondary", label);
-      button.type = "button"; button.disabled = Boolean(state.approvalBusy) || !state.approvalReady;
-      button.addEventListener("click", () => decideApproval(item.request_id, choice));
-      buttons.append(button);
-    }
-    card.append(buttons); panel.append(card);
-  }
-  if (items.length && !state.approvalReady) panel.append(el("p", "approval-status", "Reconnecting. Decisions are unavailable until Roost can check this request."));
-  if (state.approvalNotice) panel.append(el("p", "approval-status", state.approvalNotice));
-  else if (state.approvalFocus && state.approvalFocusConversation === state.current && state.approvalReady && !items.some(item => item.request_id === state.approvalFocus)) {
-    panel.append(el("p", "approval-status", "That request is no longer waiting for approval."));
-  }
-  show("approvals", panel.children.length > 0);
-}
-
-async function decideApproval(requestId, choice) {
-  if (state.approvalBusy || !state.approvalReady || !["once", "deny"].includes(choice)) return;
-  const id = state.current, scope = viewScope(id);
-  state.approvalBusy = requestId; state.approvalNotice = ""; renderApprovals();
-  try {
-    await api(`/conversations/${encodeURIComponent(id)}/approvals`, {
-      method: "POST", body: JSON.stringify({request_id: requestId, choice})});
-    if (scope.alive()) {
-      state.approvalRevision = state.approvalRevision + 1;
-      state.approvals = state.approvals.filter(item => item.request_id !== requestId);
-      state.approvalNotice = choice === "once" ? "Allowed once." : "Denied.";
-    }
-  } catch (error) {
-    if (scope.alive()) {
-      state.approvalNotice = error.message; state.approvalReady = false;
-    }
-  } finally {
-    if (scope.alive()) {
-      state.approvalBusy = null; renderApprovals(); loadApprovals(id);
-    }
-  }
-}
 
 // A reply being written arrives as an event stream of its thoughts and text. The transcript stays
 // the record: a stream that can't open or ends early leaves the turn to polling, as before.
@@ -1673,7 +1533,7 @@ function openStream(id) {
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
     if (!ours() || !data || typeof data !== "object") return;
-    if (isNative() && data.reset && data.turn_id !== state.live?.turn_id) loadMessages(id).catch(() => {});
+    if (data.reset && data.turn_id !== state.live?.turn_id) loadMessages(id).catch(() => {});
     // Every connection, reconnections included, starts with the turn so far.
     if (data.reset) {
       if (state.live?.id !== id || state.live.started !== data.started || state.live.turn_id !== data.turn_id) {
@@ -1682,14 +1542,13 @@ function openStream(id) {
       }
       state.live = applyStreamFrame(null, data, id);
     }
-    if (isNative() && Array.isArray(data.summaries) && state.messageHistory?.id === id) state.messageHistory.summaries = data.summaries;
+    if (Array.isArray(data.summaries) && state.messageHistory?.id === id) state.messageHistory.summaries = data.summaries;
     if (state.live?.id !== id) return;
     state.stream.healthy = true; state.idleSince = null;
     state.live = applyStreamFrame(state.live, data, id);
-    if (!isNative() && Array.isArray(data.approvals)) setApprovals(data.approvals);
+
     if (data.done) endStream(id);
-    else if (isNative()) renderMessages(state.lastRows || []);
-    else scheduleLive();
+    else renderMessages(state.lastRows || []);
   };
   // The browser retries a dropped connection by itself; a refused one (the turn is over) ends here.
   source.onerror = () => {
@@ -1740,8 +1599,7 @@ function messagePollDelay() {
 function leaveLive() {
   stopRecording(true); state.voiceDraft = false;
   closeStream();
-  Object.assign(state, { approvals: [], approvalBusy: null, approvalNotice: "", approvalReady: false, approvalLoading: null, selectionDeferred: false, live: null, liveNodes: null, lastRows: null });
-  renderApprovals();
+  Object.assign(state, { selectionDeferred: false, live: null, liveNodes: null, lastRows: null });
 }
 
 function scheduleLive() {
@@ -1765,10 +1623,10 @@ function liveNodes(live) {
 
 function fillLive(live) {
   const nodes = state.liveNodes;
-  const items = isNative() && Array.isArray(live.trace) ? nativeThoughts(live) : live.thoughts.trim() ? [live.thoughts] : [];
+  const items = Array.isArray(live.trace) ? turnThoughts(live) : live.thoughts.trim() ? [live.thoughts] : [];
   const signature = JSON.stringify(items), reply = JSON.stringify([live.text, live.sources, live.persona_name]);
   if (nodes.shownThoughts !== signature) { fillThoughts(nodes.thoughts, items); nodes.shownThoughts = signature; }
-  if (nodes.shownText !== reply) { nodes.body.replaceChildren(); if (isNative()) nodes.body.append(el("div", "persona-label", replyName(live))); addReply(nodes.body, live.text, live.sources || []); nodes.shownText = reply; }
+  if (nodes.shownText !== reply) { nodes.body.replaceChildren(); nodes.body.append(el("div", "persona-label", replyName(live))); addReply(nodes.body, live.text, live.sources || []); nodes.shownText = reply; }
   nodes.details.classList.toggle("hidden", !items.length);
   nodes.message.classList.toggle("hidden", !live.text.trim());
 }
@@ -1787,12 +1645,11 @@ function renderLive() {
   updateLatest(changed);
 }
 
-// How hard the model thinks in the open conversation; a new one starts at Hermes's own setting.
 function showReasoning(level) {
   state.reasoning = level;
   $("reasoning").value = level;
   $("reasoning-chip").classList.toggle("chosen", level !== "default");
-  if (isNative()) updateThinking();
+  updateThinking();
 }
 
 async function loadReasoning(id) {
@@ -1827,8 +1684,8 @@ function newConversation() {
   restoreComposer();
   state.draft = true;
   newDraftSeed();
-  showReasoning(isNative() ? "none" : "default");
-  updateNativeComposer(); renderContext();
+  showReasoning("none");
+  updateComposer(); renderContext();
   $("app").classList.add("chat-open");
   placePresence();
   renderConversations(); renderWelcome();
@@ -1842,7 +1699,7 @@ async function submitMessage(event) {
   if (text.length > 16000) { notice("The message is too long. Shorten the draft before sending."); return; }
   // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
   // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
-  if (isNative() && !text && (runningTurn() || queuedTurn())) { await stopNativeReply(); return; }
+  if (!text && (runningTurn() || queuedTurn())) { await stopReply(); return; }
   if (text && attachmentsBlocked()) { notice(state.attachments.some((file) => file.status === "loading") ? "Wait for the files to finish reading." : "The attached files are over the limit. Remove one to send."); return; }
   if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
@@ -1977,7 +1834,7 @@ function acceptMessage(item, id, here) {
   });
 }
 
-function sentFiles(item) { return isNative() && item.attachments?.length ? { attachments: item.attachments.map(({ name, text }) => ({ name, text })) } : {}; }
+function sentFiles(item) { return item.attachments?.length ? { attachments: item.attachments.map(({ name, text }) => ({ name, text })) } : {}; }
 
 // Sends the composer or one failed row, without consuming a newer draft on Retry.
 async function sendText(text, { voice = false, retry = null } = {}) {
@@ -1986,11 +1843,11 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
-    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined,
-    attachments: state.attachments.filter((file) => file.status === "ready").map(({ name, kind, chars, text }) => ({ name, kind, chars, text })), reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
+    request_id: sendId(), model: state.model, web: state.webForce ? "force" : undefined,
+    attachments: state.attachments.filter((file) => file.status === "ready").map(({ name, kind, chars, text }) => ({ name, kind, chars, text })), reasoning: state.reasoning || ("none"), since: Date.now() };
   if (!retry) {
     state.webForce = false; updateWebToggle();
-    state.attachments = []; updateNativeComposer();
+    state.attachments = []; updateComposer();
     state.voiceDraft = false; $("message").value = ""; saveComposer();
     $("composer").classList.remove("has-text");
   }
@@ -2001,8 +1858,8 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   let result, failure;
   try {
     result = oldId
-      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}), ...sentFiles(item) }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}), ...sentFiles(item) }) });
+      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(item.web ? {web: item.web} : {}), ...sentFiles(item) }) })
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...({model: item.model || null, ...(item.web ? {web: item.web} : {})}), ...sentFiles(item) }) });
   } catch (error) { failure = error; }
   finally {
     if (scope.alive()) { state.busy = false; $("send").disabled = false; }
@@ -2025,7 +1882,6 @@ async function sendText(text, { voice = false, retry = null } = {}) {
 
 function jobValue(job, key) { return job[key] == null ? "" : String(job[key]); }
 
-// Hermes stores the schedule as {kind, expr | run_at, display}; the editable form is expr or run_at.
 function jobSchedule(job) {
   const schedule = job.schedule;
   if (schedule && typeof schedule === "object") return String(schedule.expr || schedule.run_at || job.schedule_display || schedule.display || "");
@@ -2033,14 +1889,13 @@ function jobSchedule(job) {
 }
 
 function jobScheduleLabel(job) {
-  if (isNative() && job.schedule?.kind === "every") return `Every ${job.schedule.value} ${job.schedule.unit} · ${job.time_zone}`;
-  if (isNative() && job.schedule?.kind === "once") return `Once: ${job.schedule.at} · ${job.time_zone}`;
+  if (job.schedule?.kind === "every") return `Every ${job.schedule.value} ${job.schedule.unit} · ${job.time_zone}`;
+  if (job.schedule?.kind === "once") return `Once: ${job.schedule.at} · ${job.time_zone}`;
   const schedule = jobSchedule(job);
   const label = scheduleLabel(schedule);
   return label !== schedule ? label : (jobValue(job, "schedule_display") || schedule);
 }
 
-// Hermes treats `enabled` as authoritative; a disabled job is paused.
 function jobPaused(job) { return job.paused === true || job.enabled === false; }
 
 function scheduleLabel(schedule) {
@@ -2063,7 +1918,7 @@ function updateSchedulePreview() {
   const schedule = $("job-schedule").value.trim();
   const label = scheduleLabel(schedule);
   $("job-schedule-preview").textContent = !schedule ? "Example: 0 8 * * * runs daily at 8:00 AM." :
-    label === schedule ? (isNative() ? "Five cron fields: minute hour day month weekday." : "This schedule will be sent to Hermes as entered.") : "Runs " + label.toLowerCase() + ".";
+    label === schedule ? ("Five cron fields: minute hour day month weekday.") : "Runs " + label.toLowerCase() + ".";
 }
 
 function renderJobs() {
@@ -2146,10 +2001,10 @@ function renderJobDetail() {
   enabled.append(el("span", "", paused ? "Paused" : "Enabled"), toggle);
   top.append(enabled);
   summary.append(top);
-  // Hermes keeps no report on the job itself; its newest run's preview is the last report.
+  // the server keeps no report on the job itself; its newest run's preview is the last report.
   const latestRun = state.jobRuns[job.id]?.[0];
   const facts = [["Last run", timeLabel(job.last_run_at || latestRun?.started_at || latestRun?.created_at || latestRun?.timestamp) || "Not yet"],
-                 ...(isNative() ? [["Time zone", job.time_zone], ["Notifications", job.notify === "changed" ? "Only if changed" : "Every result"]] : [["Delivery", jobValue(job, "deliver") === "local" ? "Saved in Hermes" : jobValue(job, "deliver") || "Saved in Hermes"]])];
+                 ...([["Time zone", job.time_zone], ["Notifications", job.notify === "changed" ? "Only if changed" : "Every result"]])];
   const stats = el("dl", "stats");
   for (const [term, value] of facts) { const item = el("div"); item.append(el("dt", "", term), el("dd", "", value)); stats.append(item); }
   summary.append(stats);
@@ -2209,7 +2064,7 @@ async function loadJobRuns(id) {
   } finally { loading.delete(id); }
 }
 
-// Hermes answers a create, edit, pause or resume with the job as saved. Show that at once, and keep
+// The server answers a create, edit, pause or resume with the job as saved. Show that at once, and keep
 // it over the next few list refreshes: a list read straight after a change has come back without it.
 const JOB_PATCH_MS = 30000;
 
@@ -2272,14 +2127,14 @@ async function deleteJob(job) {
 
 function updateJobKind() {
   const kind = $("job-kind").value;
-  show("job-cron-fields", !isNative() || kind === "cron");
+  show("job-cron-fields", kind === "cron");
   show("job-every-fields", kind === "every"); show("job-once-fields", kind === "once");
-  $("job-schedule").required = !isNative() || kind === "cron";
-  $("job-every").required = isNative() && kind === "every";
-  $("job-once").required = isNative() && kind === "once";
+  $("job-schedule").required = kind === "cron";
+  $("job-every").required = kind === "every";
+  $("job-once").required = kind === "once";
 }
 
-function nativeJobSchedule() {
+function jobScheduleInput() {
   const kind = $("job-kind").value;
   if (kind === "every") return {kind, value: Number($("job-every").value), unit: $("job-unit").value};
   if (kind === "once") return {kind, at: $("job-once").value};
@@ -2296,14 +2151,13 @@ function openJob(job = null) {
   $("job-prompt").value = job ? jobValue(job, "prompt") : "";
   $("job-schedule").value = job ? jobSchedule(job) : "";
   updateSchedulePreview();
-  show("native-job-kind", isNative()); show("native-job-fields", isNative()); show("job-delivery-fields", !isNative());
-  $("job-deliver").required = !isNative();
-  if (isNative()) {
+  show("job-kind-fields", true); show("job-fields", true);
+  {
     $("job-kind").value = job?.schedule?.kind || "cron";
     $("job-every").value = job?.schedule?.value || 1;
     $("job-unit").value = job?.schedule?.unit || "hours";
     $("job-once").value = job?.schedule?.at || "";
-    const saved = job?.time_zone || state.settings.time_zone || "UTC";
+    const saved = job?.time_zone || state.settings?.time_zone || "UTC";
     const zones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
     $("job-zone").replaceChildren();
     for (const name of [...new Set([saved, "UTC", ...zones])]) { const option = el("option", "", name); option.value = name; $("job-zone").append(option); }
@@ -2317,7 +2171,6 @@ function openJob(job = null) {
     else { $("job-persona").replaceChildren(); loadPersonas().then(fill).catch(error => report(error, scope)); }
   }
   updateJobKind();
-  $("job-deliver").value = job ? (jobValue(job, "deliver") || "local") : "local";
   show("job-management", Boolean(job));
   $("job-dialog").showModal();
 }
@@ -2330,10 +2183,9 @@ async function saveJob(event) {
   const buttons = [...$("job-form").querySelectorAll("button")];
   buttons.forEach((button) => { button.disabled = true; });
   const data = { name: $("job-name").value.trim(), prompt: $("job-prompt").value.trim(),
-                 ...(isNative() ? {schedule: nativeJobSchedule(), time_zone: $("job-zone").value,
+                 ...({schedule: jobScheduleInput(), time_zone: $("job-zone").value,
                    notify: $("job-changed").checked ? "changed" : "always", allow_memory: $("job-memory").checked,
-                   web: $("job-web").checked, model: $("job-model").value || null, persona: $("job-persona").value || null}
-                   : {schedule: $("job-schedule").value.trim(), deliver: $("job-deliver").value.trim()}) };
+                   web: $("job-web").checked, model: $("job-model").value || null, persona: $("job-persona").value || null}) };
   const id = state.job?.id;
   try {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
@@ -2361,12 +2213,12 @@ function thinkingVisible(models, selected, defaultModel) {
 async function loadModels() {
   const data = await api("/models");
   state.models = data.models || []; state.defaultModel = data.default_model; state.webAvailable = Boolean(data.web_available);
-  if (isNative()) updateThinking();
+  updateThinking();
 }
 
 function updateWebToggle() {
   const model = state.models.find(item => item.id === (state.model || state.defaultModel));
-  const available = isNative() && state.webAvailable && model && model.tools !== false && !state.noWeb;
+  const available = state.webAvailable && model && model.tools !== false && !state.noWeb;
   if (!available) state.webForce = false;
   show("web-toggle", Boolean(available));
   $("web-toggle").setAttribute("aria-pressed", String(state.webForce));
@@ -2403,23 +2255,23 @@ function turnControls(row, rows) {
 
 function runningTurn() {
   return (state.live && !state.live.done && state.live.state !== "queued" ? state.live.turn_id : null) ||
-    state.lastRows?.find(row => row.state === "running")?.turn_id;
+    state.lastRows?.find(row => row?.state === "running")?.turn_id;
 }
 
 function queuedTurn() {
-  return state.lastRows?.find(row => row.state === "queued")?.turn_id ||
+  return state.lastRows?.find(row => row?.state === "queued")?.turn_id ||
     (state.live?.state === "queued" && !state.live.done ? state.live.turn_id : null);
 }
 
-function stopNativeReply() {
+function stopReply() {
   const running = runningTurn(), queued = queuedTurn();
-  if (running || queued) return nativeControl(running ? "stop" : "cancel", running || queued);
+  if (running || queued) return turnControl(running ? "stop" : "cancel", running || queued);
 }
 
-function updateNativeComposer() {
+function updateComposer() {
   updateWebToggle();
   drawAttachments();
-  if (!isNative()) return;
+
   const running = Boolean(runningTurn() || queuedTurn()), send = $("send");
   send.type = running ? "button" : "submit";
   send.textContent = running ? "Stop" : "↑";
@@ -2430,10 +2282,10 @@ function updateNativeComposer() {
   $("queue-send").disabled = state.busy || attachmentsBlocked();
 }
 
-async function nativeControl(action, turnId, extra = {}) {
+async function turnControl(action, turnId, extra = {}) {
   if (state.controlBusy) return;
   const id = state.current, scope = viewScope(id);
-  state.controlBusy = true; updateNativeComposer();
+  state.controlBusy = true; updateComposer();
   try {
     await api(`/conversations/${encodeURIComponent(id)}/turns/${action}`, {
       method: "POST", body: JSON.stringify({turn_id: turnId, ...extra})});
@@ -2453,13 +2305,13 @@ async function nativeControl(action, turnId, extra = {}) {
 function appendTurnControls(under, row, rows, body) {
   const controls = turnControls(row, rows);
   const button = (text, label, action) => {
-    const node = el("button", "send-action native-action", text);
+    const node = el("button", "send-action message-action", text);
     node.type = "button"; node.disabled = state.controlBusy; node.setAttribute("aria-label", label);
     node.addEventListener("click", event => { event.stopPropagation(); action(); }); under.append(node);
   };
   if (controls.queue) {
-    button("×", "Cancel queued message", () => nativeControl("cancel", row.turn_id));
-    button("↑", "Send queued message now", () => nativeControl("send-now", row.turn_id));
+    button("×", "Cancel queued message", () => turnControl("cancel", row.turn_id));
+    button("↑", "Send queued message now", () => turnControl("send-now", row.turn_id));
   }
   if (controls.edit) button("Edit", "Edit message", () => {
     state.editTurn = row.turn_id; body.classList.add("editing");
@@ -2483,16 +2335,16 @@ function appendTurnControls(under, row, rows, body) {
     form.addEventListener("submit", event => {
       event.preventDefault(); const text = input.value.trim(); if (!text) return;
       save.disabled = cancel.disabled = true;
-      nativeControl("edit", row.turn_id, {text, request_id: sendId(), ...(kept.length !== original.length ? {attachments: kept.map(({name, text}) => ({name, text}))} : {})});
+      turnControl("edit", row.turn_id, {text, request_id: sendId(), ...(kept.length !== original.length ? {attachments: kept.map(({name, text}) => ({name, text}))} : {})});
     });
     actions.append(cancel, save); form.append(files, input, warning, actions); body.replaceChildren(form); input.focus();
   });
-  if (controls.regenerate) button(row.state === "failed" ? "Retry" : "Regenerate", row.state === "failed" ? "Retry reply" : "Regenerate reply", () => nativeControl("regenerate", row.turn_id));
+  if (controls.regenerate) button(row.state === "failed" ? "Retry" : "Regenerate", row.state === "failed" ? "Retry reply" : "Regenerate reply", () => turnControl("regenerate", row.turn_id));
 }
 
 function renderContext() {
   const context = state.context, meter = $("context-meter");
-  const visible = isNative() && context?.prompt_tokens != null && context?.context_tokens != null;
+  const visible = context?.prompt_tokens != null && context?.context_tokens != null;
   show("context-meter", visible);
   if (!visible) return;
   meter.replaceChildren();
@@ -2692,15 +2544,6 @@ function renderWebSearch(detail) {
 }
 
 function renderModels(detail) {
-  const backend = settingsSection(detail, "Backend", "Choose which conversations Roost shows.");
-  const select = el("select");
-  for (const value of ["hermes", "native"]) { const option = el("option", "", value === "native" ? "Native" : "Hermes"); option.value = value; select.append(option); }
-  select.value = state.backend; select.disabled = state.settingsBusy;
-  modelField(backend, "Backend", select);
-  select.addEventListener("change", async () => {
-    if (await saveSettings({backend: select.value}, "Backend saved.")) location.reload();
-  });
-  if (!isNative()) return;
   renderServer(detail, "primary");
   renderServer(detail, "fallback");
   renderFallbackSwitch(detail);
@@ -2779,8 +2622,8 @@ function renderServer(detail, role) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ...(isNative() ? [["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", "Delete conversations or jobs"],
-          ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Replies and job reports on your devices"],
+          ["models", "Models", "Model servers and defaults"], ...([["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]]), ["data", "Data", "Delete conversations or jobs"],
+          ["service", "Service", "Restart Roost"], ["notifications", "Notifications", "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
@@ -2796,11 +2639,10 @@ async function loadSettings() {
     state.settings = data;
     applyServerSettings(data);
     renderSettings();
-    if (isNative() && state.settingsGroup === "voice") await loadVoice();
-    if (isNative() && state.settingsGroup === "personas") { await loadPersonas(); renderSettings(); }
-    if (isNative() && state.settingsGroup === "memory") { await loadMemory(); renderSettings(); }
+    if (state.settingsGroup === "voice") await loadVoice();
+    if (state.settingsGroup === "personas") { await loadPersonas(); renderSettings(); }
+    if (state.settingsGroup === "memory") { await loadMemory(); renderSettings(); }
   } catch (error) { report(error, scope); }
-  if (state.settingsGroup === "agent" && !isNative()) loadSoul();
 }
 
 function selectSettingsGroup(id) {
@@ -2813,10 +2655,9 @@ function selectSettingsGroup(id) {
   if (id === "voice") loadVoice();
   if (id === "personas") loadPersonas().then(renderSettings).catch(error => notice(error.message));
   if (id === "memory") loadMemory().then(renderSettings).catch(error => notice(error.message));
-  if (id === "agent" && !isNative()) loadSoul();
   if (id === "about") loadAbout();
   if (id === "account") loadPasskeys();
-  if (id === "notifications") { loadPush(); if (!isNative()) loadHermesLink(); }
+  if (id === "notifications") { loadPush();  }
 }
 
 function renderSettings() {
@@ -2826,7 +2667,7 @@ function renderSettings() {
     row.type = "button";
     if (state.settingsGroup === id) row.setAttribute("aria-current", "true");
     const badge = el("span", "settings-icon");
-    if (id === "agent") badge.textContent = agent().charAt(0).toUpperCase(); else badge.append(icon(SETTINGS_ICONS[id]));
+    badge.append(icon(SETTINGS_ICONS[id]));
     const copy = el("span", "settings-row-copy");
     copy.append(el("span", "job-list-name", label), el("span", "settings-row-hint", hint));
     row.append(badge, copy);
@@ -2839,7 +2680,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ voice: renderVoice, personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ voice: renderVoice, personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -2861,7 +2702,10 @@ function settingsButton(className, text, action) {
 
 async function loadPersonas() {
   const scope = signInScope(), data = await api("/personas");
-  if (scope.alive()) state.personaData = data;
+  if (scope.alive()) {
+    state.personaData = data;
+    applyAgentName(data.personas.find(item => item.id === data.default_persona_id)?.name);
+  }
 }
 
 async function loadMemory() {
@@ -3038,13 +2882,12 @@ function deviceTimeZone() {
 
 function renderTimeSettings(detail) {
   const section = settingsSection(detail, "Time zone",
-    isNative() ? "Conversation and run times show in this zone. New jobs default to this zone; existing jobs keep their own time zone." :
-    `Conversation, message and job run times show in this zone on every device you sign in on. It doesn’t change when jobs run; ${agent()}’s scheduler keeps its own clock.`);
+    "Conversation and run times show in this zone. New jobs default to this zone; existing jobs keep their own time zone.");
   const label = el("label", "", "Show times in"); label.htmlFor = "settings-time-zone";
   const select = el("select"); select.id = "settings-time-zone"; select.disabled = state.settingsBusy;
   const device = deviceTimeZone();
   const zones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
-  const saved = state.settings.time_zone;
+  const saved = state.settings?.time_zone;
   for (const [value, text] of [["", "This device’s time zone" + (device ? ` (${device.replaceAll("_", " ")})` : "")],
                                ...[...new Set([...zones, ...(saved ? [saved] : [])])].map((name) => [name, name.replaceAll("_", " ")])]) {
     const option = el("option", "", text); option.value = value; option.selected = value === saved;
@@ -3119,23 +2962,13 @@ function renderAbout(detail) {
      "app " + formatBytes(stats.app_bytes) + " · data " + formatBytes(stats.state_bytes)],
     ["Free space", formatBytes(stats.disk_free_bytes), "of " + formatBytes(stats.disk_total_bytes) + " on the shared drive"]]));
   live.append(el("p", "", "Updated " + clockTime(about.at)));
-  if (!isNative()) {
-    const hermes = about.hermes;
-    const hermesSection = settingsSection(detail, agent() + " (Hermes)", null);
-    hermesSection.append(statList(hermes.reachable ? [
-      ["Status", hermes.gateway_running ? "Running" : (hermes.gateway_state || "Stopped")],
-      ["Response time", hermes.latency_ms + " ms"],
-      ["Hermes version", String(hermes.version || "Unknown"), hermes.release_date ? String(hermes.release_date) : ""],
-      ["Active sessions", String(hermes.active_sessions ?? "Unknown")]] : [["Status", "Unreachable", "Roost can’t reach the Hermes dashboard"]]));
-  }
+
   const credits = settingsSection(detail, "Credits", null);
   const list = el("ul", "credits");
   for (const [text, href] of [
     ["Roost by calebbrinkley, MIT License", "https://github.com/calebbrinkley/roost"],
-    ["Hermes Agent by Nous Research", "https://github.com/NousResearch/hermes-agent"],
     ["Space Grotesk typeface by the Space Grotesk Project Authors, SIL Open Font License 1.1", "https://github.com/floriankarsten/space-grotesk"],
     ["aiohttp by the aio-libs contributors, Apache License 2.0", "https://github.com/aio-libs/aiohttp"]]) {
-    if (isNative() && text.startsWith("Hermes Agent")) continue;
     const item = el("li"), link = el("a", "", text);
     link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
     item.append(link); list.append(item);
@@ -3143,43 +2976,12 @@ function renderAbout(detail) {
   credits.append(list);
 }
 
-function renderAgentSettings(detail) {
-  if (isNative()) return;
-  const hermesName = state.settings.hermes_agent_name;
-  const name = settingsSection(detail, "Name", hermesName ?
-    `Leave empty to use the name Hermes gives it: ${hermesName}.` :
-    (isNative() ? "Roost shows “Agent” when this is empty." : "Hermes has no name for it, so Roost shows “Agent” when this is empty."));
-  const label = el("label", "", "Name shown in Roost"); label.htmlFor = "settings-agent-name";
-  const input = el("input"); input.id = "settings-agent-name"; input.maxLength = 40; input.autocomplete = "off";
-  input.value = state.nameDraft ?? state.settings.agent_name; input.placeholder = hermesName || "Agent";
-  input.addEventListener("input", () => { state.nameDraft = input.value; });
-  const actions = el("div", "settings-actions");
-  actions.append(settingsButton("primary", "Save name", async () => {
-    if (await saveSettings({ agent_name: input.value.trim() }, "Name saved.")) { state.nameDraft = undefined; renderSettings(); }
-  }));
-  name.append(label, input, actions);
-
-  if (isNative()) return;
-  const soul = settingsSection(detail, "Instructions",
-    `What ${agent()} should know and how it should behave, everywhere it works: Roost, the desktop app and scheduled jobs. Hermes keeps these in its SOUL.md file.`);
-  const soulLabel = el("label", "", "Instructions"); soulLabel.htmlFor = "settings-soul";
-  const area = el("textarea"); area.id = "settings-soul"; area.maxLength = 16000;
-  const loaded = state.soul !== undefined;
-  area.value = loaded ? (state.soulDraft ?? state.soul) : ""; area.disabled = !loaded;
-  area.placeholder = loaded ? `For example: Keep answers short. Call me by my first name.` : "Loading…";
-  area.addEventListener("input", () => { state.soulDraft = area.value; });
-  const soulActions = el("div", "settings-actions");
-  const save = settingsButton("primary", "Save instructions", saveSoul);
-  save.disabled = state.settingsBusy || !loaded;
-  soulActions.append(save);
-  soul.append(soulLabel, area, soulActions);
-}
 
 function renderDataSettings(detail) {
   for (const [kind, heading, text] of [
     ["conversations", "Delete all conversations", `Removes every conversation in Messages, whatever started it, from ${agent()}’s history for good. Job run history stays with its jobs.`],
     ["jobs", "Delete all jobs", `Removes every scheduled job and stops it running. This can’t be undone.`]]) {
-    const section = settingsSection(detail, heading, isNative() && kind === "conversations" ? "Removes conversations in Messages for good. Job run history stays with its jobs." : text);
+    const section = settingsSection(detail, heading, kind === "conversations" ? "Removes conversations in Messages for good. Job run history stays with its jobs." : text);
     // The operation's own name is the phrase to type, shown in the empty field; capitals and spacing don't matter.
     const phrase = heading.toLowerCase(), prompt = `Type “${phrase}” to confirm`;
     const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "off";
@@ -3308,14 +3110,7 @@ async function signOut() {
 }
 
 function renderServiceSettings(detail) {
-  if (!isNative()) {
-    const agentSection = settingsSection(detail, `Restart ${agent()}`,
-      `Restarts the Hermes gateway: its messaging platforms and the job scheduler. A reply that is being written may stop.`);
-    const agentActions = el("div", "settings-actions");
-    agentActions.append(settingsButton("secondary", `Restart ${agent()}`, () =>
-      serviceAction("/service/restart-agent", `${agent()} is restarting. Replies may take a minute.`)));
-    agentSection.append(agentActions);
-  }
+
   const roostSection = settingsSection(detail, "Restart Roost", "Restarts this web app. You stay signed in.");
   const roostActions = el("div", "settings-actions");
   roostActions.append(settingsButton("secondary", "Restart Roost", restartRoost));
@@ -3365,7 +3160,7 @@ function renderNotifications(detail) {
     else actions.append(settingsButton("primary", "Turn on", enablePush));
     section.append(actions);
   }
-  if (!isNative()) renderHermesLink(detail);
+
   if (!state.push.devices.length) return;
   const devices = settingsSection(detail, "Devices", "Every device that gets Roost’s notifications.");
   const list = el("ul", "passkey-list");
@@ -3383,45 +3178,6 @@ function renderNotifications(detail) {
   devices.append(list);
 }
 
-async function loadHermesLink() {
-  const scope = signInScope();
-  try {
-    const data = await api("/hermes");
-    state.hermesLink = data;
-    if (state.settingsGroup === "notifications") renderSettings();
-  } catch (error) { report(error, scope); }
-}
-
-// Job reports and messages the agent starts reach Roost through a plugin installed in Hermes.
-function renderHermesLink(detail) {
-  const link = state.hermesLink;
-  const section = settingsSection(detail, "Job reports from " + agent(),
-    `Install Roost’s plugin in Hermes for reply token counts and TPS, plus ${agent()}’s job reports and messages it sends on its own.`);
-  if (!link) { section.append(el("p", "", "Loading…")); return; }
-  section.append(el("p", "", link.last_delivery ? "Last report received " + dateTimeLabel(link.last_delivery) + "." : "Nothing received from Hermes yet."));
-  const steps = el("ol", "setup-steps");
-  const download = el("a", "", "Download the plugin"); download.href = "/api/hermes/plugin.zip"; download.setAttribute("download", "");
-  const first = el("li"); first.append(download, " and unzip it into Hermes’s plugins folder, so it becomes ", el("code", "", "$HERMES_HOME/plugins/roost"), ".");
-  const second = el("li"); second.append("Enable it: ", el("code", "", "hermes plugins enable roost"), ".");
-  const third = el("li"); third.append("Add these lines to Hermes’s ", el("code", "", ".env"), ". Use the address Hermes reaches Roost at if it differs.");
-  third.append(el("pre", "setup-block", `ROOST_URL=${link.url}\nROOST_DELIVERY_TOKEN=${link.token}\nROOST_HOME_CHANNEL=roost`));
-  const fourth = el("li"); fourth.append("Restart Hermes’s gateway. Then set a job’s Deliver to ", el("code", "", "roost"), ".");
-  steps.append(first, second, third, fourth);
-  section.append(steps);
-  const confirming = state.rotatingToken;
-  const rotate = settingsButton("secondary" + (confirming ? " confirming" : ""), confirming ? "Confirm new token" : "New token",
-    () => confirming ? rotateDeliveryToken() : (state.rotatingToken = true, renderSettings()));
-  const actions = el("div", "settings-actions"); actions.append(rotate);
-  section.append(actions);
-}
-
-function rotateDeliveryToken() {
-  return withSettingsBusy(async () => {
-    const data = await api("/hermes/token", { method: "POST", body: JSON.stringify({ confirm: true }) });
-    state.hermesLink = data; state.rotatingToken = false;
-    notice("New token made. Update ROOST_DELIVERY_TOKEN in Hermes; the old one no longer works.");
-  });
-}
 
 function enablePush() {
   return withSettingsBusy(async () => {
@@ -3503,26 +3259,6 @@ function saveSettings(changes, message) {
   });
 }
 
-async function loadSoul() {
-  if (state.soul !== undefined || state.soulLoading) return;
-  const scope = signInScope();
-  state.soulLoading = true;
-  try {
-    const data = await api("/settings/soul");
-    state.soul = data.content;
-    if (state.settingsGroup === "agent") renderSettings();
-  } catch (error) { report(error, scope); }
-  finally { state.soulLoading = false; }
-}
-
-function saveSoul() {
-  const content = $("settings-soul").value;
-  return withSettingsBusy(async () => {
-    await api("/settings/soul", { method: "PUT", body: JSON.stringify({ content }) });
-    state.soul = content; state.soulDraft = undefined;
-    notice("Instructions saved.");
-  });
-}
 
 function deleteEverything(kind, typed) {
   if (!typed()) return;
@@ -3538,13 +3274,6 @@ function deleteEverything(kind, typed) {
     }
     const count = Number(result.deleted) || 0;
     notice(`Deleted ${count} ${kind === "jobs" ? (count === 1 ? "job" : "jobs") : (count === 1 ? "conversation" : "conversations")}.`);
-  });
-}
-
-function serviceAction(path, message) {
-  return withSettingsBusy(async (scope) => {
-    await api(path, { method: "POST" });
-    if (scope.alive()) notice(message);
   });
 }
 
@@ -3643,7 +3372,7 @@ $("run-selected-job").addEventListener("click", () => state.selectedJob && jobAc
 $("edit-selected-job").addEventListener("click", () => currentJob() && openJob(currentJob()));
 $("search").addEventListener("input", () => {
   const query = $("search").value.trim().toLowerCase();
-  if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = isNative() ? query.slice(0, 200) : query; if (isNative()) queueSearch(); renderConversations(); }
+  if (state.section === "jobs") { state.jobSearch = query; renderJobs(); } else { state.search = query.slice(0, 200); queueSearch(); renderConversations(); }
 });
 $("conversation-list").addEventListener("scroll", loadMoreIfNearEnd, { passive: true });
 
@@ -3725,9 +3454,9 @@ $("attachment-close").addEventListener("click", () => $("attachment-sheet").clos
 $("web-toggle").append(icon("globe"));
 $("web-toggle").addEventListener("click", () => { state.webForce = !state.webForce; updateWebToggle(); });
 $("sheet-model").addEventListener("change", updateSheetThinking);
-$("message").addEventListener("input", updateNativeComposer);
+$("message").addEventListener("input", updateComposer);
 $("send").addEventListener("click", event => {
-  if (isNative() && (runningTurn() || queuedTurn())) { event.preventDefault(); stopNativeReply(); }
+  if (runningTurn() || queuedTurn()) { event.preventDefault(); stopReply(); }
 });
 $("sheet-rename").addEventListener("click", () => {
   $("sheet-name").value = state.sheetItem?.title || ""; $("sheet-name").placeholder = sessionName(state.sheetItem || {});
@@ -3829,7 +3558,7 @@ async function startRecording() {
     recorder.start(); take.phase = "recording"; take.started = Date.now();
     const tick = () => {
       const seconds = Math.floor((Date.now() - take.started) / 1000);
-      if (isNative() && seconds >= 120) { stopRecording(false); return; }
+      if (seconds >= 120) { stopRecording(false); return; }
       recordingUI(`Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · tap the mic to stop`);
     };
     tick(); take.timer = setInterval(tick, 500);
@@ -3866,7 +3595,7 @@ function finishRecording(take) {
 
 async function sendRecording(recording, take) {
   try {
-    if (isNative() && recording.size > 25 * 1024 * 1024) throw new Error("Recordings are limited to 25 MB.");
+    if (recording.size > 25 * 1024 * 1024) throw new Error("Recordings are limited to 25 MB.");
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -3874,7 +3603,7 @@ async function sendRecording(recording, take) {
       reader.readAsDataURL(recording);
     });
     if (!currentTake(take)) return;
-    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type, ...(isNative() ? {duration_seconds: Math.min(120, (Date.now() - take.started) / 1000)} : {}) }) });
+    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type, ...({duration_seconds: Math.min(120, (Date.now() - take.started) / 1000)}) }) });
     if (!currentTake(take)) return;
     const text = String(data.transcript || "").trim();
     if (!text) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
@@ -3893,7 +3622,7 @@ function audioPlayer() {
     player.addEventListener("error", () => {
       if (!state.playing || !player.src.includes("/speech/")) return;
       state.playing = null; refreshPlayButtons();
-      notice(isNative() ? "Couldn’t read that aloud. Check Settings › Voice, or try again." : "Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
+      notice("Couldn’t read that aloud. Check Settings › Voice, or try again.");
     });
   }
   return state.player;
@@ -3939,7 +3668,7 @@ function playButton(id) {
 }
 
 // Once the reply to a voice message is in, read it aloud (once; ten minutes at most). The voice message
-// is found by position: the row Hermes saved it as, and its reply is the last answer before the owner's
+// is found by position: the row the server saved it as, and its reply is the last answer before the owner's
 // next message, once the server says the turn is over.
 function readVoiceReply(view) {
   const waiting = state.voiceReply;
@@ -3977,7 +3706,6 @@ async function start() {
     return;
   } finally { boot.running = false; }
   boot.done = true; show("connecting", false);
-  state.backend = data.backend || "hermes";
   applyAgentName(data.agent);
   state.passkeysAvailable = Boolean(data.passkeys);
   return data.signed_in ? signedIn() : signedOut(false);
@@ -3993,6 +3721,5 @@ navigator.serviceWorker?.addEventListener("message", (event) => {
   if (typeof event.data?.link === "string") notificationLink(event.data.link);
   else if (typeof event.data?.open === "string") notificationLink("?c=" + encodeURIComponent(event.data.open));
 });
-$("delivery-close").addEventListener("click", () => $("delivery-sheet").close());
 window.addEventListener("online", () => { boot.delay = 2000; if (boot.done) refreshOnResume(); else start(); });
 start();

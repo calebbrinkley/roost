@@ -1,4 +1,4 @@
-"""Native jobs against a fake clock, SQLite and a loopback model; no Hermes."""
+"""Native jobs against a fake clock, SQLite and a loopback model; no external services."""
 
 import asyncio
 import json
@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, patch
 from roost import schedules
 from roost.jobs import Jobs, Outbox, enqueue, serve, deliver
 from roost.store import Store, StoreError, MIGRATIONS
-import test_native
-from test_native import wait_for
+import test_chat
+from test_chat import wait_for
 from uuid import uuid4
 from roost.servers import Servers
 
@@ -95,11 +95,11 @@ class ScheduleTests(unittest.TestCase):
 
 
 class JobTests(unittest.IsolatedAsyncioTestCase):
-    request = test_native.NativeTests.request
-    settled = test_native.NativeTests.settled
+    request = test_chat.ChatTests.request
+    settled = test_chat.ChatTests.settled
 
     async def asyncSetUp(self):
-        await test_native.NativeTests.asyncSetUp(self)
+        await test_chat.ChatTests.asyncSetUp(self)
         for key in ('job_scheduler', 'outbox_worker'):
             self.app[key].cancel()
             await asyncio.gather(self.app[key], return_exceptions=True)
@@ -109,7 +109,7 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.fake.delay = 0
 
     async def asyncTearDown(self):
-        await test_native.NativeTests.asyncTearDown(self)
+        await test_chat.ChatTests.asyncTearDown(self)
 
     async def job(self, **changes):
         return await self.request('POST', '/api/jobs', {'name': 'Daily report', 'prompt': 'Report on the garden',
@@ -283,7 +283,6 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         await self.request('POST', '/api/jobs/' + short['id'] + '/trigger')
         run = await self.complete(short['id'])
         self.assertEqual(run['state'], 'failed')
-        self.app['hermes'].start.assert_not_called()
 
     async def test_retry_backoff_survives_scheduler_restart_and_exhausts(self):
         job = await self.job()
@@ -409,7 +408,7 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
         for loop, key in ((serve, 'jobs'), (deliver, 'outbox')):
             with self.subTest(worker=key):
                 worker = SimpleNamespace(tick=AsyncMock(side_effect=[sqlite3.OperationalError('private database detail'), None, asyncio.CancelledError()]))
-                with patch('roost.native.enabled', return_value=True), patch('roost.jobs.asyncio.sleep', new_callable=AsyncMock) as sleep:
+                with patch('roost.jobs.asyncio.sleep', new_callable=AsyncMock) as sleep:
                     with self.assertLogs('roost.jobs', level='WARNING') as logs:
                         with self.assertRaises(asyncio.CancelledError):
                             await loop({key: worker})

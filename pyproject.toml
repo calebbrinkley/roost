@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "roost-hermes"
+name = "roost"
 dynamic = ["version"]
-description = "An owner-only web app for chatting with a Hermes agent"
+description = "A self-hosted chat app for OpenAI-compatible model servers"
 requires-python = ">=3.11"
 dependencies = ["aiohttp==3.14.5", "cryptography==50.0.2", "pypdf==6.21.4"]
 
@@ -17,4 +17,3 @@ include = ["roost*"]
 
 [tool.setuptools.package-data]
 roost = ["static/*"]
-"roost.hermes_plugin" = ["plugin.yaml"]

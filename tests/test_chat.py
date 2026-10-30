@@ -1,9 +1,10 @@
-"""Native route, persistence, runner and control contracts against a loopback provider."""
+"""Chat route, persistence, runner and control contracts against a loopback provider."""
 
 import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,12 +33,11 @@ def without_clock(messages):
     return [m for m in messages if m['role'] != 'system']
 
 
-class NativeTests(unittest.IsolatedAsyncioTestCase):
+class ChatTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.state = Path(self.directory.name)
         (self.state / 'password.hash').write_text(make_password_hash('example-password'))
-        settings.update(self.state / 'settings.json', {'backend': 'native'})
         self.fake = await OpenAIFake().start()
         self.fake.frames = frame({'reasoning_content': 'Thinking'}) + frame({'content': 'Hello'}) + frame({}, finish='stop', usage={'prompt_tokens': 12, 'completion_tokens': 3})
         self.fake.completion['choices'][0]['message']['content'] = 'A short title'
@@ -49,8 +49,6 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
                                       'default_model': 'example-model'})
         with patch.dict(os.environ, {'ROOST_PUBLIC_ORIGIN': 'http://localhost', 'ROOST_STATE_DIR': str(self.state)}):
             self.app = server.create_app()
-        # Any accidental Hermes route call fails instead of being hidden by an unreachable service.
-        self.app['hermes'] = AsyncMock()
         self.client = TestClient(TestServer(self.app))
         await self.client.start_server()
         self.client.session.cookie_jar.update_cookies({server.COOKIE: self.app['sessions'].issue()})
@@ -102,8 +100,32 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m['role'] for m in view['messages']], ['user', 'assistant'] * 2)
         self.assertEqual(view['context'], {'prompt_tokens': 12, 'context_tokens': 4096})
         self.assertGreater(view['messages'][-1]['roost_usage']['tokens_per_second'], 0)
-        for method in ('profile', 'messages', 'sessions', 'start'):
-            getattr(self.app['hermes'], method).assert_not_called()
+
+    async def test_logout_or_expiry_ends_only_that_sessions_stream(self):
+        from aiohttp import ClientSession
+        for revoke in ('logout', 'expiry'):
+            with self.subTest(revoke=revoke), patch('roost.server.HEARTBEAT_SECONDS', .05):
+                self.fake.delay = 5
+                first = await self.create()
+                token, other = self.app['sessions'].issue(), self.app['sessions'].issue()
+                url = self.client.make_url(f"/api/conversations/{first['session_id']}/stream")
+                async with ClientSession() as client:
+                    async with client.get(url, cookies={server.COOKIE: token}) as response:
+                        self.assertTrue((await response.content.readuntil(b'\n\n')).startswith(b'data: '))
+                        if revoke == 'logout':
+                            async with client.post(self.client.make_url('/api/logout'), headers=self.headers,
+                                                   cookies={server.COOKIE: token}) as logged_out:
+                                self.assertEqual(logged_out.status, 200)
+                        else:
+                            with self.app['sessions'].db:
+                                self.app['sessions'].db.execute('UPDATE sessions SET expires=0 WHERE token_hash=?',
+                                                               (self.app['sessions']._hash(token),))
+                        async with asyncio.timeout(1):
+                            self.assertEqual(await response.content.read(), b'')
+                    async with client.get(url, cookies={server.COOKIE: other}) as response:
+                        self.assertTrue((await response.content.readuntil(b'\n\n')).startswith(b'data: '))
+                self.assertTrue(self.app['sessions'].valid(other))
+                self.assertIn(self.store.get_turn(first['turn_id']).state, ('queued', 'running'))
 
     async def test_short_checkpoint_is_committed_while_provider_is_quiet(self):
         self.fake.chunk_delay = 1
@@ -157,7 +179,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(one, two)
         self.assertEqual([t.id for t in self.store.list_turns(cid)], [one['turn_id']])
 
-    async def test_shutdown_ends_native_stream_with_queued_work(self):
+    async def test_shutdown_ends_chat_stream_with_queued_work(self):
         self.fake.delay = 2
         first = await self.create()
         cid = first['session_id']
@@ -169,7 +191,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(1):
                 await self.app.shutdown()
                 await response.read()
-            self.assertFalse(self.app['native_streams'])
+            self.assertFalse(self.app['streams'])
             self.assertEqual(self.store.get_turn(first['turn_id']).state, 'interrupted')
             self.assertEqual(self.store.get_turn(second['turn_id']).state, 'queued')
         finally:
@@ -240,6 +262,31 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         retry = await self.send(cid, 'Second', key)
         self.assertEqual(accepted['turn_id'], retry['turn_id'])
 
+    async def test_request_ids_pagination_and_deletion_validate_before_mutating(self):
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        cid = first['session_id']
+        for offset in ('9' * 5000, '١', '-1', '100001'):
+            await self.request('GET', '/api/conversations?offset=' + offset, status=400)
+        for query in ('before=0', 'before=-1', 'before=x', 'before=١', 'before=' + '9' * 100,
+                      'before=1&limit=0', 'before=1&limit=501', 'before=1&limit=x', 'limit=2',
+                      'before=1&before=2', 'before=1&limit=2&limit=3'):
+            await self.request('GET', f'/api/conversations/{cid}?' + query, status=400)
+        await wait_for(lambda: self.store.get_conversation(cid).title == 'A short title')
+        calls = len(self.fake.requests)
+        for path in ('/api/conversations', f'/api/conversations/{cid}/messages'):
+            for value in ('bad', '0' * 36, None, [], 1):
+                await self.request('POST', path, {'text': 'Invalid request', 'request_id': value}, 400)
+        self.assertEqual(len(self.fake.requests), calls)
+        self.assertEqual(len(self.store.list_turns(cid)), 1)
+        job = await self.request('POST', '/api/jobs', {'name': 'Test report', 'prompt': 'Say hello',
+                                 'schedule': {'kind': 'every', 'value': 1, 'unit': 'hours'}}, 201)
+        for path in (f'/api/conversations/{cid}', '/api/jobs/' + job['id']):
+            for value in (1, 'true', False, None):
+                await self.request('DELETE', path, {'confirm': value}, 400)
+        self.assertIsNotNone(self.store.get_conversation(cid))
+        self.assertEqual((await self.request('GET', '/api/jobs'))['jobs'][0]['id'], job['id'])
+
     async def test_send_now_stop_cancel_edit_regenerate_and_export(self):
         self.fake.chunk_delay = .04
         self.fake.chunk_sizes = (len(frame({'content': 'Partial' * 200})),)
@@ -301,12 +348,10 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         cid = first['session_id']
         await self.request('PUT', f'/api/conversations/{cid}/settings', {'model': 'disabled'}, 400)
         await self.request('POST', f'/api/conversations/{cid}/turns/send-now', {'turn_id': first['turn_id']}, 400)
-        for path, expected in (('/api/jobs', {'jobs': []}), ('/api/settings/soul', {'content': ''}),
-                               (f'/api/conversations/{cid}/approvals', {'approvals': []})):
-            self.assertEqual(await self.request('GET', path), expected)
+        self.assertEqual(await self.request('GET', '/api/jobs'), {'jobs': []})
         about = await self.request('GET', '/api/about')
-        self.assertEqual(about['hermes'], {'reachable': False})
-        self.assertEqual((await self.request('GET', '/api/me'))['backend'], 'native')
+        self.assertEqual(set(about), {'roost', 'runtime', 'stats'})
+        self.assertNotIn('backend', await self.request('GET', '/api/me'))
         await self.request('GET', '/api/search?q=Hello%00world', status=400)
         async with self.client.post(f'/api/conversations/{cid}/turns/stop', json={}) as response:
             self.assertEqual(response.status, 403)
@@ -332,6 +377,14 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app['push'].send.call_count, 1)
         message = self.app['push'].send.call_args.args[1]
         self.assertEqual(message['tag'], 'reply-' + second['turn_id'])
+        third = await self.send(cid, 'Notify me again')
+        self.app['presence'].clear()
+        self.app['presence']['test-device'] = (time.monotonic() - server.PRESENCE_SECONDS - 1, cid)
+        await self.settled(third['turn_id'])
+        await wait_for(lambda: self.store.db.execute('SELECT 1 FROM push_outbox').fetchone())
+        await self.app['outbox'].tick()
+        self.assertEqual(self.app['push'].send.call_count, 2)
+        self.assertEqual(self.app['push'].send.call_args.args[1]['tag'], 'reply-' + third['turn_id'])
 
     async def web_fixture(self, scenario='web'):
         from web_fake import WebFake
@@ -713,7 +766,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Memory full.', trace['result'])
         self.assertNotIn('fact_id', trace)
 
-    async def test_persona_memory_validation_origin_auth_and_hermes_isolation(self):
+    async def test_persona_memory_validation_origin_auth(self):
         personas = await self.request('GET', '/api/personas')
         pid = personas['default_persona_id']
         await self.request('DELETE', f'/api/personas/{pid}', status=400)
@@ -739,10 +792,6 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         for path, payload in (('/api/memory', {'text': 'Fact'}), ('/api/personas', {'name': 'Name', 'prompt': ''})):
             async with self.client.post(path, json=payload) as response:
                 self.assertEqual(response.status, 403)
-        self.app['hermes'].profile.return_value = {'display_name': 'Remote assistant'}
-        await self.request('PATCH', '/api/settings', {'backend': 'hermes'})
-        for path in ('/api/memory', '/api/personas'):
-            await self.request('GET', path, status=404)
         self.assertEqual(len(self.store.memories()), 1)
         self.client.session.cookie_jar.clear()
         for path in ('/api/memory', '/api/personas'):
@@ -882,15 +931,15 @@ class CompactionTests(unittest.IsolatedAsyncioTestCase):
     """Long-chat compaction through the real runner, store and loopback provider."""
 
     async def asyncSetUp(self):
-        await NativeTests.asyncSetUp(self)
+        await ChatTests.asyncSetUp(self)
         self.fake.delay = 0
         self.fake.completion['choices'][0]['message']['content'] = 'Synthetic running summary.'
         self.set_context(400)
 
-    asyncTearDown = NativeTests.asyncTearDown
-    web_fixture = NativeTests.web_fixture
-    request, create, send, settled, generations, control = (NativeTests.request, NativeTests.create, NativeTests.send,
-                                                             NativeTests.settled, NativeTests.generations, NativeTests.control)
+    asyncTearDown = ChatTests.asyncTearDown
+    web_fixture = ChatTests.web_fixture
+    request, create, send, settled, generations, control = (ChatTests.request, ChatTests.create, ChatTests.send,
+                                                             ChatTests.settled, ChatTests.generations, ChatTests.control)
 
     def set_context(self, tokens):
         primary = self.app['servers'].get('primary')

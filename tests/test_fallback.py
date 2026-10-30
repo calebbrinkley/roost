@@ -12,8 +12,8 @@ from roost.provider import Provider, ProviderConnectionError, ProviderError, Pro
 from roost.runner import Runner, starting_failure
 from roost.tools import REMEMBER_GUIDANCE
 from openai_fake import OpenAIFake, frame
-import test_native
-from test_native import wait_for
+import test_chat
+from test_chat import wait_for
 
 PRIMARY_KEY, FALLBACK_KEY = 'primary-secret-key', 'fallback-secret-key'
 BACKUP_MODEL = {'id': 'backup-model', 'display_name': 'Backup', 'enabled': True, 'thinking_mode': 'reasoning_effort', 'context_tokens': 2048}
@@ -88,14 +88,14 @@ class StartingFailureTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.IsolatedAsyncioTestCase):
-    """The native harness with a second fake server behind the fallback role."""
+    """The chat harness with a second fake server behind the fallback role."""
 
-    web_fixture = test_native.NativeTests.web_fixture
-    request, create, send, settled, control = (test_native.NativeTests.request, test_native.NativeTests.create, test_native.NativeTests.send,
-                                                test_native.NativeTests.settled, test_native.NativeTests.control)
+    web_fixture = test_chat.ChatTests.web_fixture
+    request, create, send, settled, control = (test_chat.ChatTests.request, test_chat.ChatTests.create, test_chat.ChatTests.send,
+                                                test_chat.ChatTests.settled, test_chat.ChatTests.control)
 
     async def asyncSetUp(self):
-        await test_native.NativeTests.asyncSetUp(self)
+        await test_chat.ChatTests.asyncSetUp(self)
         self.fake.delay = 0
         self.fake.frames = frame({'content': 'Primary reply'}) + frame({}, finish='stop', usage={'prompt_tokens': 12, 'completion_tokens': 3})
         self.backup = await OpenAIFake().start()
@@ -106,7 +106,7 @@ class FallbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.backup.close()
-        await test_native.NativeTests.asyncTearDown(self)
+        await test_chat.ChatTests.asyncTearDown(self)
 
     def configure(self, *, use=True, tools=True, models=True):
         servers = self.app['servers']

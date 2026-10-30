@@ -12,6 +12,17 @@ For a suspected disclosure:
 4. Coordinate any history rewrite with the maintainer; deleting the current file does not remove old commits or third-party copies.
 5. Verify the replacement is sanitized before publishing. Do not repeat the secret in a report, commit message or remediation test.
 
-Roost holds the Hermes dashboard password, which administers the agent. Report anything that lets a browser reach a Hermes route Roost does not deliberately forward, or that weakens sign-in, with a minimal generic reproduction and the affected version.
+Roost holds model and speech API keys, account sessions, passkeys, chat data, saved memory,
+job results and browser push subscriptions. Report authentication/origin bypasses, credential
+exposure, private-data leaks, unsafe page fetching or weakening of the public-web address guard.
+Provide a minimal synthetic reproduction and the affected version, without private state or logs.
+
+Deploy one owner-facing process behind trusted HTTPS. Keep its writable state directory private.
+Provider keys stay in separate server-side files and never appear in API responses or exports.
+A configured remote primary or fallback receives selected prompt data, including memory and
+attachments. Web pages and attachments are untrusted input; model output is not authority to
+execute arbitrary code. Roost exposes only its allowlisted tools. Push destinations are restricted
+to supported browser services. Search, model and speech bases are owner-configured trusted services;
+model-selected page URLs are independently restricted to public HTTP(S) destinations.
 
 For branch rules, CI permissions and dependency updates, see [repository security](docs/repository-security.md). These controls help prevent unsafe publication; they do not replace code review, credential rotation or live deployment validation.

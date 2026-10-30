@@ -72,7 +72,6 @@
           </div>
         </header>
         <div id="transcript" class="transcript" aria-live="polite"></div>
-        <section id="approvals" class="approval-panel hidden" aria-label="Approval requests" aria-live="polite"></section>
         <div id="voice-status" class="voice-status hidden" role="status"><span id="voice-status-text"></span><button id="voice-cancel" type="button">Cancel</button></div>
         <div class="latest-anchor"><button id="jump-latest" class="jump-latest hidden" type="button" aria-label="Jump to latest"></button></div>
         <div id="context-meter" class="context-meter hidden"></div>
@@ -133,9 +132,9 @@
       <div class="dialog-heading"><h2 id="job-dialog-title">New job</h2><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
       <label for="job-name">Name</label><input id="job-name" maxlength="500" required placeholder="Morning briefing">
       <label for="job-prompt" data-agent-text="What should {agent} do?">What should the agent do?</label><textarea id="job-prompt" rows="5" maxlength="16000" required placeholder="Give me a clear overview of today's priorities."></textarea>
-      <div id="native-job-kind" class="hidden"><label for="job-kind">Schedule kind</label><select id="job-kind"><option value="cron">Cron</option><option value="every">Every</option><option value="once">Once</option></select></div>
+      <div id="job-kind-fields" class="hidden"><label for="job-kind">Schedule kind</label><select id="job-kind"><option value="cron">Cron</option><option value="every">Every</option><option value="once">Once</option></select></div>
       <div id="job-cron-fields"><label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00 AM.</p></div>
-      <div id="native-job-fields" class="hidden">
+      <div id="job-fields" class="hidden">
         <div id="job-every-fields" class="hidden"><label for="job-every">Repeat every</label><div class="job-interval"><input id="job-every" type="number" min="1" max="525600" value="1" aria-label="Interval"><select id="job-unit" aria-label="Interval unit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></div></div>
         <div id="job-once-fields" class="hidden"><label for="job-once">Run at (local time)</label><input id="job-once" type="datetime-local"></div>
         <label for="job-zone">Time zone</label><select id="job-zone"></select>
@@ -145,18 +144,9 @@
         <label class="job-option"><input id="job-changed" type="checkbox"> Notify only if changed</label>
         <label class="job-option"><input id="job-memory" type="checkbox"> Allow memory saves</label>
       </div>
-      <div id="job-delivery-fields"><label for="job-deliver">Delivery</label><input id="job-deliver" maxlength="500" value="local" required><p class="field-help">“local” saves the result in Hermes.</p></div>
       <div id="job-management" class="job-management hidden"><button id="delete-job" class="danger" type="button">Delete job</button></div>
       <div class="dialog-actions"><button id="cancel-job" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>
-  </dialog>
-  <dialog id="delivery-sheet" class="sheet" aria-labelledby="delivery-title">
-    <div class="sheet-view">
-      <p id="delivery-title" class="sheet-title" tabindex="-1" autofocus></p>
-      <p id="delivery-time" class="sheet-note"></p>
-      <div id="delivery-text" class="delivery-text"></div>
-      <div class="dialog-actions"><button id="delivery-close" class="secondary" type="button">Close</button></div>
-    </div>
   </dialog>
   <dialog id="conversation-sheet" class="sheet" aria-labelledby="sheet-title">
     <div id="sheet-actions" class="sheet-view">
@@ -170,8 +160,7 @@
     <form id="sheet-instructions-form" class="sheet-view hidden">
       <label class="sheet-title" for="sheet-instructions-text">Instructions for this conversation</label>
       <textarea id="sheet-instructions-text" maxlength="4000" rows="6" placeholder="How the agent should work in this conversation" data-agent-placeholder="How {agent} should work in this conversation"></textarea>
-      <p id="sheet-hermes-note" class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
-      <div id="sheet-native-settings" class="sheet-view hidden">
+      <div id="sheet-chat-settings" class="sheet-view hidden">
         <label for="sheet-persona">Persona</label><select id="sheet-persona"></select>
         <label for="sheet-model">Model</label><select id="sheet-model"></select>
         <div id="sheet-thinking"><label for="sheet-reasoning">Thinking</label><select id="sheet-reasoning">

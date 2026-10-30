@@ -140,7 +140,7 @@ class StoreTests(unittest.TestCase):
                 self.store.accept_turn(conversation.id, request, content, model=model)
         self.assertEqual(self.store.list_turns(conversation.id), [])
 
-    def test_native_migrations_leave_existing_owner_state_unchanged(self):
+    def test_chat_migrations_leave_existing_owner_state_unchanged(self):
         state = Path(self.directory.name)
         sessions = Sessions(state / "sessions.sqlite3")
         try:

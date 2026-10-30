@@ -1,79 +1,89 @@
-<p align="center">
-  <img src="assets/roost-logo.png" alt="roost" width="240">
-</p>
+# Roost
 
-<p align="center"><strong>A clean home for your Hermes agent.</strong><br>Conversations and scheduled work in one modern, simple app.</p>
+A self-hosted, installable chat client for any OpenAI-compatible model server. Roost owns your
+conversations and runs accepted replies even when the browser disconnects.
 
-<p align="center">
-  <a href="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml"><img src="https://github.com/calebbrinkley/roost/actions/workflows/checks.yml/badge.svg" alt="Repository checks"></a>
-</p>
+- Streaming chat with Thoughts, citations, model selection, thinking controls and reply statistics
+- Searchable local chat history, exports, durable queues, Stop, edit and regenerate
+- Personas, saved memory and automatic context compaction
+- Web search through optional SearXNG, with guarded public-page reading
+- Text and PDF attachments
+- Optional speech server for transcription and reading replies aloud
+- Scheduled jobs with saved runs and Web Push notifications
+- Optional fallback model server and per-chat Keep this chat local
+- Password/passkey sign-in, light/dark themes and phone/desktop layouts
 
-<p align="center">
-  <a href="#try-the-demo">Try the demo</a> ·
-  <a href="#install-with-your-hermes-agent">Install with Hermes</a> ·
-  <a href="docs/docker-compose.md">Docker Compose</a> ·
-  <a href="docs/setup.md">Setup</a> ·
-  <a href="docs/compatibility.md">Compatibility</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
-</p>
+## Requirements
 
-<p align="center">
-  <a href="assets/roost-readme-hero.png"><img src="assets/roost-readme-hero.png" alt="Illustration of the current Roost Messages and Jobs screens in two angled phone mockups" width="760"></a>
-</p>
+An OpenAI-compatible `/v1` chat-completions server, such as llama.cpp, vLLM, Ollama's OpenAI
+endpoint or a hosted API. Model discovery is optional; you can enter model IDs manually.
+SearXNG JSON search and an OpenAI-compatible speech server are optional. See
+[service contracts](docs/compatibility.md) and [connecting model servers](docs/model-server.md).
 
-Roost is a simple, private app for [Hermes Agent](https://github.com/NousResearch/hermes-agent) built around the features that matter: conversations, scheduled work, and approvals. The interface stays out of your way, with fewer buttons and toggles competing for your attention. Open it on your phone or desktop and get straight to the agent you already run.
+Use HTTPS through a trusted reverse proxy or private network for an installed PWA, passkeys,
+microphone capture and notifications. Roost is an owner-only app, not a public multi-user service.
 
-**Early preview.** See [compatibility and validation status](docs/compatibility.md) for supported versions and device limitations.
+## Quick start with Docker Compose
 
-## What you can do
+Install Docker with Compose v2. Clone this repository and create a private configuration directory
+outside the checkout. Copy `compose.env.example` there, replace the placeholders and create the
+state directory and model-key file it names. The key file may be empty for a server without auth.
+Set `ROOST_UID`/`ROOST_GID` to the file owner's IDs (`id -u`, `id -g`). Then, from the checkout:
 
-- **Messages:** streaming replies, searchable conversations, instructions, and history export.
-- **Jobs:** schedule work, pause or run Jobs, and view their history.
-- **Voice and approvals:** dictate messages, listen to replies, and review tool requests.
-- **Notifications and reply metrics:** receive updates; add the [Hermes plugin](docs/setup.md#4-optional-reply-measurements-and-job-reports-from-hermes) for Job reports, agent-initiated messages, and token/TPS details.
-- **Make it yours:** themes, accent colors, agent settings, and password or passkey sign-in.
-
-## Install with your Hermes agent
-
-Requires **Python 3.11+** or greater and a running Hermes dashboard with password authentication. Give Hermes this prompt:
-
-```text
-Install Roost for my existing Hermes agent from https://github.com/calebbrinkley/roost.
-Read AGENTS.md and follow docs/agent-setup.md. Inspect my setup, ask for missing
-details, and verify the installation before handing me the URL.
+```sh
+docker compose --env-file /REPLACE_PRIVATE_DIRECTORY/compose.env build
+docker compose --env-file /REPLACE_PRIVATE_DIRECTORY/compose.env run --rm roost set-password
+docker compose --env-file /REPLACE_PRIVATE_DIRECTORY/compose.env up -d --wait
 ```
 
-Prefer to install it yourself? Use [Docker Compose](docs/docker-compose.md) or the [Python setup guide](docs/setup.md). Keep credentials and state outside the checkout and use private HTTPS for remote access. Tailscale is highly recommended. Dashboard credentials stay on your Roost server. See [SECURITY.md](SECURITY.md) for security reports.
+Route your configured HTTPS origin to the published loopback port, open Roost and sign in.
+In **Settings › Models**, set `https://models.example.com/v1`, enter the write-only API key if
+needed, discover or add models, enable them and select a default. The same page configures a
+fallback. **Persona** supplies the assistant name and instructions; **Memory**, **Web search**
+and **Voice** configure the optional features. See [Compose setup](docs/docker-compose.md).
 
-On your phone, add Roost to the Home Screen. iPhone and iPad notifications require a Home Screen installation on **iOS/iPadOS 16.4+** or newer.
+## Configuration
 
-## Try the demo
+Settings is the normal configuration path. Installers may prefill an empty primary server with
+`ROOST_MODEL_URL` and `ROOST_MODEL_KEY_FILE`. Prefill also repairs a saved primary with an empty
+URL, preserves an existing key, and never overwrites a configured URL. Curated models and a default
+still need to be selected in Settings.
 
-Requires **Python 3.11+**. Uses disposable sample data; no Hermes agent or model needed.
+`ROOST_STATE_DIR` holds private account, chat and configuration data. `ROOST_PUBLIC_ORIGIN` is the
+exact HTTPS browser origin. Optional `ROOST_PUSH_SUBJECT` provides a public HTTPS or mailto VAPID
+subject. `ROOST_ADMISSION` controls concurrent turns (1–16, default 1). Only enable
+`ROOST_TRUST_FORWARDED=1` when a trusted proxy is the sole path into the service.
 
-```bash
-git clone https://github.com/calebbrinkley/roost.git
-cd roost
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/python dev/demo.py
-```
+## Security and data
 
-Open **http://127.0.0.1:8787** and sign in with **`roost-demo-only`**.
+Provider and speech keys stay on the server in separate private files; they never enter browser
+responses or chat exports. All private APIs require an owner session; mutations also check the
+origin and request header. Search page reads block private/reserved destinations and revalidate
+redirects. Web and attachment content remain untrusted model input. A hosted primary or enabled
+fallback receives the prompt, including selected memory and attachments. Keep this chat local
+prevents fallback use; it does not change where the primary runs.
+
+Keep state, secrets, logs and transcripts outside the public checkout. Back up the complete state
+directory privately. See [security](SECURITY.md), [setup](docs/setup.md), [API](docs/api.md) and
+[repository policy](docs/repository-security.md).
 
 ## Development
 
-Python server, plain HTML/CSS/JavaScript. Install the package as above, then run the checks with **Node.js 18+** available:
+Python 3.11+ and Node.js 18+ are required. No frontend build step or JavaScript packages are needed.
 
-```bash
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
 make hooks
 make PYTHON=.venv/bin/python check
+make PYTHON=.venv/bin/python smoke
+PYTHONPATH=. .venv/bin/python dev/demo.py
 ```
 
-Run `make PYTHON=.venv/bin/python smoke` for server or interface changes. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and validation requirements.
+The loopback demo uses disposable state and deterministic providers; its password is
+`roost-demo-only`. `make smoke-compose` additionally requires Docker. Tests and smoke use local
+fakes, and do not establish live service or physical-device compatibility. See [contributing](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE). Bundled Space Grotesk fonts by Florian Karsten use the [SIL Open Font License](LICENSES/SpaceGrotesk-OFL.txt). Asset notices are in [LICENSES](LICENSES).
-
-*Roost is an independent project and is not affiliated with or endorsed by Nous Research.*
+[MIT](LICENSE). Bundled fonts and artwork have notices in the `LICENSES/` directory.

@@ -1,311 +1,247 @@
-"""Exercise the loopback demo's owner and Hermes integration flows."""
+"""Browser-contract smoke against the deterministic OpenAI-compatible fake."""
 
 import asyncio
 import json
-import secrets
-import sys
 import os
-import socket
+import sys
 import tempfile
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
+from uuid import uuid4
 
-from aiohttp import ClientSession, CookieJar, web
-
-from demo import mock_hermes, DEMO_PASSWORD, HERMES_PASSWORD
-from roost.server import create_app
+from aiohttp import ClientSession, CookieJar, FormData
+from aiohttp.test_utils import TestServer
 
 from roost.auth import make_password_hash
+from roost.server import create_app
 
-BASE = "http://127.0.0.1:8787"
-PASSWORD_FILE = Path(__file__).resolve().parents[1] / ".roost-demo-state" / "password.hash"
-HEADERS = {"Origin": BASE, "X-Roost-Request": "1"}
-
-
-async def request(client, method, path, status=200, body=None):
-    async with client.request(method, BASE + path, headers=HEADERS, json=body) as response:
-        data = await response.json()
-        assert response.status == status, (path, response.status, data)
-        return data
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
+from openai_fake import OpenAIFake, frame
+from web_fake import WebFake
+from speech_fake import SpeechFake
 
 
-async def reply_contains(client, sid, text):
-    """Waits for the demo's saved reply to the latest message."""
-    for _ in range(100):
-        rows = (await request(client, "GET", f"/api/conversations/{sid}"))["messages"]
-        if rows and rows[-1]["role"] == "assistant" and text in rows[-1]["content"]:
-            return
-        await asyncio.sleep(0.1)
-    raise AssertionError((sid, text))
+def configure(state, url):
+    from roost.servers import Servers
+    servers = Servers(state, environ={})
+    servers.update('primary', {'base_url': url})
+    servers.set_models('primary', {'models': [{'id': 'example-model', 'display_name': 'Example', 'enabled': True,
+                                               'thinking_mode': 'template_flag', 'context_tokens': 4096}],
+                                  'default_model': 'example-model'})
 
 
-async def sign_in(device, password):
-    """Sign in as a device behind Tailscale Serve, which forwards the device's address."""
-    async with ClientSession() as client:
-        async with client.post(BASE + "/api/login", headers={**HEADERS, "X-Forwarded-For": device},
-                               json={"password": password}) as response:
-            return response.status
-
-
-async def sign_in_checks():
-    # Fresh device addresses each run, so the smoke check can be repeated against one demo.
-    # Each run still adds six failures toward the overall limit of twenty per five minutes.
-    net = f"100.64.{secrets.randbelow(250)}."
-    # Five wrong passwords lock that device only; another device still signs in.
-    for _ in range(5):
-        assert await sign_in(net + "1", "wrong password") == 401
-    assert await sign_in(net + "1", "roost-demo-only") == 429
-    assert await sign_in(net + "2", "roost-demo-only") == 200
-    # A new password applies at the next sign-in, without restarting Roost.
-    original = PASSWORD_FILE.read_text(encoding="utf-8")
-    try:
-        PASSWORD_FILE.write_text(make_password_hash("a brand new password") + "\n", encoding="utf-8")
-        assert await sign_in(net + "3", "a brand new password") == 200
-        assert await sign_in(net + "4", "roost-demo-only") == 401
-    finally:
-        PASSWORD_FILE.write_text(original, encoding="utf-8")
-
-
-async def checks():
-    async with ClientSession(cookie_jar=CookieJar(unsafe=True)) as client:
-        async with client.get(BASE + "/") as response:
-            assert response.status == 200
-            assert "demo-banner" not in await response.text()
-        for asset in ("/app.js", "/style.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/sw.js",
-                      "/apple-touch-icon.png"):
-            async with client.get(BASE + asset) as response:
-                assert response.status == 200, asset
-        await request(client, "GET", "/api/conversations", 401)
-        # Passkeys: sign-in challenges are public, adding one needs a session.
-        assert (await request(client, "POST", "/api/passkeys/login/options"))["userVerification"] == "required"
-        await request(client, "POST", "/api/passkeys/register/options", 401)
-        assert (await request(client, "GET", "/api/me"))["passkeys"] is False
-        async with client.post(BASE + "/api/login", headers={"Origin": "http://invalid.example", "X-Roost-Request": "1"},
-                               json={"password": "roost-demo-only"}) as response:
-            assert response.status == 403
-        login = await request(client, "POST", "/api/login", body={"password": "roost-demo-only"})
-        assert login["demo"] is True
-        conversations = await request(client, "GET", "/api/conversations")
-        assert any(row.get("source") == "desktop" for row in conversations["sessions"])
-        transcript = await request(client, "GET", "/api/conversations/roost_benchmark")
-        assert len(transcript["messages"]) == 4
-        # Only the authenticated Hermes plugin can attach numeric whole-reply measurements.
-        measured = next(row for row in transcript["messages"] if row["role"] == "assistant")
-        body = {"session_id": "roost_benchmark", "message_id": measured["id"],
-                "input_tokens": 1200, "output_tokens": 240, "model_seconds": 6}
-        token = (PASSWORD_FILE.parent / "delivery-token").read_text(encoding="utf-8").strip()
-        async with client.post(BASE + "/api/hermes/reply-usage", json=body) as response:
-            assert response.status == 401
-        async with client.post(BASE + "/api/hermes/reply-usage", json=body, headers={"Authorization": "Bearer " + token}) as response:
-            assert response.status == 200
-        usage_rows = (await request(client, "GET", "/api/conversations/roost_benchmark"))["messages"]
-        assert next(row for row in usage_rows if row["id"] == measured["id"])["roost_usage"]["output_tokens"] == 240
-        assert all("roost_usage" not in row for row in usage_rows if row["role"] == "user")
-        # Voice: a recording becomes text, and a reply is read aloud with byte ranges.
-        heard = await request(client, "POST", "/api/audio/transcribe", body={"data_url": "data:audio/mp4;base64,AAAA", "mime_type": "audio/mp4"})
-        assert heard["transcript"].startswith("This is the demo transcript")
-        reply = next(row for row in transcript["messages"] if row["role"] == "assistant")
-        async with client.get(BASE + f"/api/conversations/roost_benchmark/speech/{reply['id']}", headers={"Range": "bytes=0-3"}) as response:
-            assert response.status == 206 and await response.read() == b"RIFF"
-
-        created = await request(client, "POST", "/api/conversations", 201, {"text": "Hello from the smoke check"})
-        sid = created["session_id"]
-        # The reply streams while it is written: thoughts, then text, then the end.
-        assert (await request(client, "GET", f"/api/conversations/{sid}"))["live"] is True
-        streamed = {"thoughts": "", "text": ""}
-        async with client.get(BASE + f"/api/conversations/{sid}/stream") as response:
-            assert response.status == 200 and response.content_type == "text/event-stream"
-            async for line in response.content:
-                if line.startswith(b"data: "):
-                    event = json.loads(line[6:])
-                    if event.get("reset"):
-                        assert event["user"] == "Hello from the smoke check"
-                    for field in streamed:
-                        streamed[field] += event.get(field, "")
-                    if event.get("done"):
-                        break
-        assert streamed["thoughts"].startswith("The owner sent a message")
-        assert "local demo reply" in streamed["text"]
-        for _ in range(20):
-            await asyncio.sleep(0.2)
-            transcript = await request(client, "GET", f"/api/conversations/{sid}")
-            if len(transcript["messages"]) >= 2:
-                break
-        assert len(transcript["messages"]) >= 2
-        assert "local demo reply" in transcript["messages"][-1]["content"]
-        # Hold a harmless demo turn at approval so follow-up admission cannot race its completion.
-        overlapping = await request(client, "POST", "/api/conversations", 201, {"text": "/approval-demo"})
-        overlap_sid = overlapping["session_id"]
-        path = f"/api/conversations/{overlap_sid}"
-        for _ in range(20):
-            waiting = (await request(client, "GET", path + "/approvals"))["approvals"]
-            if waiting:
-                break
-            await asyncio.sleep(0.05)
-        assert waiting
-        await request(client, "POST", path + "/messages", body={"text": "Queued follow up"})
-        snapshot = await request(client, "GET", path)
-        assert snapshot["live"] is False, "A queued acknowledgement must not own the first turn's stream."
-        assert not any(row["content"] == "Queued follow up" for row in snapshot["messages"])
-        await request(client, "POST", path + "/approvals", body={"request_id": waiting[0]["request_id"], "choice": "once"})
-        for _ in range(80):
-            snapshot = await request(client, "GET", path)
-            if len(snapshot["messages"]) == 4:
-                break
-            await asyncio.sleep(0.05)
-        assert [row["role"] for row in snapshot["messages"]] == ["user", "assistant", "user", "assistant"]
-        assert [row["content"] for row in snapshot["messages"] if row["role"] == "user"] == ["/approval-demo", "Queued follow up"]
-        await request(client, "DELETE", path, body={"confirm": True})
-
-        # A native approval request must survive browser reconnect and resolve once only.
-        for choice in ("once", "deny"):
-            demo = await request(client, "POST", "/api/conversations", 201, {"text": "/approval-demo"})
-            approval_sid = demo["session_id"]
-            approval_path = f"/api/conversations/{approval_sid}/approvals"
-            for _ in range(20):
-                pending = (await request(client, "GET", approval_path))["approvals"]
-                if pending:
-                    break
-                await asyncio.sleep(0.05)
-            assert pending, "The approval must be visible after resuming the conversation."
-            decision = {"request_id": pending[0]["request_id"], "choice": choice}
-            assert (await request(client, "POST", approval_path, body=decision))["resolved"] is True
-            await asyncio.sleep(0.05)
-            await request(client, "POST", approval_path, 409, decision)
-            await request(client, "DELETE", f"/api/conversations/{approval_sid}", body={"confirm": True})
-
-        # Instructions ride once with the next message; the export has the whole conversation.
-        await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"instructions": "Be brief."})
-        await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "And one more"})
-        async with client.get(BASE + f"/api/conversations/{sid}/export") as response:
-            assert response.status == 200 and response.headers["Content-Disposition"].startswith("attachment;")
-            exported = await response.json()
-        sent = [row["content"] for row in exported["messages"] if row["role"] == "user"]
-        assert exported["instructions"] == "Be brief." and sent[-1].endswith("\n\nAnd one more") and "Be brief." in sent[-1]
-
-        # Thinking: chosen per conversation, set in Hermes with each message, and restored by Default.
-        assert (await request(client, "GET", f"/api/conversations/{sid}/settings"))["reasoning"] == "default"
-        await request(client, "PUT", f"/api/conversations/{sid}/settings", 400, {"reasoning": "extreme"})
-        settings = await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"reasoning": "low"})
-        assert settings == {"instructions": "Be brief.", "reasoning": "low"}
-        await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "Think less"})
-        await reply_contains(client, sid, "Thinking for this conversation: low.")
-        await request(client, "PUT", f"/api/conversations/{sid}/settings", body={"reasoning": "default"})
-        await request(client, "POST", f"/api/conversations/{sid}/messages", body={"text": "Back to normal"})
-        await reply_contains(client, sid, "Thinking for this conversation: medium.")
-        assert (await request(client, "GET", f"/api/conversations/{sid}/settings"))["reasoning"] == "default"
-        thinking = await request(client, "POST", "/api/conversations", 201, {"text": "Quick one", "reasoning": "none"})
-        await reply_contains(client, thinking["session_id"], "Thinking for this conversation: none.")
-        assert (await request(client, "GET", f"/api/conversations/{thinking['session_id']}/settings"))["reasoning"] == "none"
-        await request(client, "POST", "/api/conversations", 400, {"text": "Quick one", "reasoning": "max"})
-
-        await request(client, "PATCH", f"/api/conversations/{sid}", body={"title": "Smoke conversation"})
-        await request(client, "PATCH", f"/api/conversations/{sid}", 400, {"title": "Benchmark at 96K"})
-        await request(client, "DELETE", f"/api/conversations/{sid}", 400, {"confirm": 1})
-        await request(client, "DELETE", f"/api/conversations/{sid}", body={"confirm": True})
-        remaining = await request(client, "GET", "/api/conversations")
-        assert not any(row.get("id") == sid for row in remaining["sessions"])
-
-        jobs = (await request(client, "GET", "/api/jobs"))["jobs"]
-        assert len(jobs) >= 2
-        for job in jobs:
-            runs = await request(client, "GET", f"/api/jobs/{job['id']}/runs")
-            for run in runs["runs"]:
-                transcript = await request(client, "GET", f"/api/conversations/{run['id']}")
-                assert transcript["messages"], "A demo run must open a nonempty conversation."
-        new_job = await request(client, "POST", "/api/jobs", 201, {
-            "name": "Demo check", "prompt": "Say hello", "schedule": "0 9 * * *", "deliver": "local",
-        })
-        jid = new_job["id"]
-        await request(client, "PUT", f"/api/jobs/{jid}", body={"name": "Demo check updated"})
-        await request(client, "POST", f"/api/jobs/{jid}/pause")
-        paused = await request(client, "GET", f"/api/jobs/{jid}")
-        assert paused["enabled"] is False and paused["schedule"]["expr"] == "0 9 * * *"
-        await request(client, "POST", f"/api/jobs/{jid}/resume")
-        await request(client, "POST", f"/api/jobs/{jid}/trigger")
-        await request(client, "DELETE", f"/api/jobs/{jid}", 400, {"confirm": False})
-        await request(client, "DELETE", f"/api/jobs/{jid}", body={"confirm": True})
-
-        # The agent's name: Hermes's profile name until Roost's own setting overrides it.
-        assert (await request(client, "GET", "/api/me"))["agent"] == "Kestrel"
-        settings = await request(client, "PATCH", "/api/settings", body={"agent_name": "Robin", "accent": "ocean"})
-        assert settings["agent_name"] == "Robin" and settings["hermes_agent_name"] == "Kestrel" and settings["accent"] == "ocean"
-        assert (await request(client, "GET", "/api/me"))["agent"] == "Robin"
-        await request(client, "PATCH", "/api/settings", body={"agent_name": ""})
-        assert (await request(client, "GET", "/api/me"))["agent"] == "Kestrel"
-        await request(client, "PATCH", "/api/settings", 400, {"accent": "neon"})
-        await request(client, "PATCH", "/api/settings", 400, {"time_zone": "Mars/Olympus Mons"})
-        await request(client, "PATCH", "/api/settings", body={"time_zone": "America/New_York"})
-        assert (await request(client, "GET", "/api/me"))["time_zone"] == "America/New_York"
-        assert (await request(client, "GET", "/api/passkeys"))["passkeys"] == []
-        assert (await request(client, "POST", "/api/passkeys/register/options"))["authenticatorSelection"]["residentKey"] == "required"
-        # Notifications: Roost's push key and an empty device list; presence accepts the open conversation.
-        # Hermes's plugin delivers a job report with Roost's token; Settings offers the plugin.
-        token = (PASSWORD_FILE.parent / "delivery-token").read_text(encoding="utf-8").strip()
-        async with client.post(BASE + "/api/hermes/deliveries", headers={"Authorization": "Bearer " + token},
-                               json={"text": "Cronjob Response: Smoke\n(job_id: job_smoke)\n---\n\nAll clear."}) as response:
-            assert response.status == 201
-            delivered = (await response.json())["id"]
-        item = await request(client, "GET", f"/api/deliveries/{delivered}")
-        assert (item["title"], item["job_id"], item["text"]) == ("Smoke", "job_smoke", "All clear.")
-        assert (await request(client, "GET", "/api/hermes"))["last_delivery"] == item["created"]
-        async with client.get(BASE + "/api/hermes/plugin.zip") as response:
-            assert response.status == 200 and (await response.read())[:2] == b"PK"
-        push = await request(client, "GET", "/api/push")
-        assert push["public_key"] and push["devices"] == []
-        await request(client, "POST", "/api/presence", body={"conversation": "roost_benchmark"})
-        about = await request(client, "GET", "/api/about")
-        assert about["hermes"]["reachable"] and about["hermes"]["version"] == "demo" and "hermes_home" not in about["hermes"]
-        assert about["roost"]["version"] and about["stats"]["state_bytes"] > 0 and about["stats"]["disk_total_bytes"] > 0
-        await request(client, "PUT", "/api/settings/soul", body={"content": "Be brief."})
-        assert (await request(client, "GET", "/api/settings/soul"))["content"] == "Be brief."
-        await request(client, "POST", "/api/service/restart-agent")
-        await request(client, "DELETE", "/api/jobs", 400, {"confirm": True})
-        assert (await request(client, "DELETE", "/api/jobs", body={"confirm": "DELETE"}))["deleted"] >= 2
-        assert (await request(client, "GET", "/api/jobs"))["jobs"] == []
-        assert (await request(client, "DELETE", "/api/conversations", body={"confirm": "DELETE"}))["deleted"] >= 1
-        left = await request(client, "GET", "/api/conversations")
-        assert not left["sessions"] and left["total"] == 0
-        await request(client, "POST", "/api/logout")
-        await request(client, "GET", "/api/jobs", 401)
-    await sign_in_checks()
-    print("PASS: static assets, origin guard, sign-in, per-device lockout, password change without restart, seeded conversations, authenticated reply measurements, voice, chat turns, streamed replies, busy-session follow-ups, approval reconnect/allow/deny/duplicate rejection, conversation instructions and export, per-conversation thinking, rename/duplicate refusal, linked run transcripts, Jobs CRUD/actions, confirmed deletion, agent name precedence, accent, time zone, About, passkey routes, notification settings and presence, Hermes deliveries and the plugin download, SOUL, delete all, agent restart, sign-out")
-
-
-async def main():
-    global BASE, PASSWORD_FILE, HEADERS
-    # Reserve sockets rather than guessing a port or accidentally testing an existing demo.
-    with tempfile.TemporaryDirectory(prefix="roost-smoke-") as directory, socket.socket() as upstream_socket, socket.socket() as roost_socket:
-        upstream_socket.bind(("127.0.0.1", 0))
-        roost_socket.bind(("127.0.0.1", 0))
+async def run():
+    with tempfile.TemporaryDirectory(prefix='roost-smoke-') as directory:
         state = Path(directory)
-        PASSWORD_FILE = state / "password.hash"
-        PASSWORD_FILE.write_text(make_password_hash(DEMO_PASSWORD))
-        hermes_password = state / "hermes-password"
-        hermes_password.write_text(HERMES_PASSWORD)
-        BASE = f"http://127.0.0.1:{roost_socket.getsockname()[1]}"
-        HEADERS = {"Origin": BASE, "X-Roost-Request": "1"}
-        with patch.dict(os.environ, {
-            "ROOST_STATE_DIR": str(state), "ROOST_PUBLIC_ORIGIN": BASE,
-            "ROOST_HERMES_URL": f"http://127.0.0.1:{upstream_socket.getsockname()[1]}",
-            "ROOST_HERMES_USERNAME": "demo", "ROOST_HERMES_PASSWORD_FILE": str(hermes_password),
-            "ROOST_DEMO": "1", "ROOST_TRUST_FORWARDED": "0",
-        }):
-            upstream = web.AppRunner(mock_hermes(), access_log=None)
-            roost = web.AppRunner(create_app(), access_log=None)
-            try:
-                await upstream.setup()
-                await web.SockSite(upstream, upstream_socket).start()
-                await roost.setup()
-                await web.SockSite(roost, roost_socket).start()
-                await checks()
-            finally:
-                await roost.cleanup()
-                await upstream.cleanup()
+        (state / 'password.hash').write_text(make_password_hash('example-password'))
+        fake = await OpenAIFake().start()
+        search = await WebFake().start()
+        backup = await OpenAIFake().start()
+        speech = await SpeechFake().start()
+        fake.delay, fake.chunk_delay = .1, .3
+        partial = frame({'content': 'Partial reply. ' * 60})
+        fake.frames = partial + frame({'content': 'Finished.'}) + frame({}, finish='stop', usage={'prompt_tokens': 20, 'completion_tokens': 8})
+        fake.chunk_sizes = (len(partial),)
+        fake.completion['choices'][0]['message']['content'] = 'Smoke title'
+        configure(state, fake.url)
+        with patch.dict(os.environ, {'ROOST_STATE_DIR': str(state), 'ROOST_PUBLIC_ORIGIN': 'http://localhost'}):
+            app = create_app()
+        roost = TestServer(app)
+        await roost.start_server()
+        headers = {'Origin': 'http://localhost', 'X-Roost-Request': '1'}
+        try:
+            async with ClientSession(cookie_jar=CookieJar(unsafe=True)) as client:
+                async def request(method, path, body=None, status=200):
+                    async with client.request(method, roost.make_url(path), headers=headers, json=body) as response:
+                        result = await response.json()
+                        assert response.status == status, (path, response.status, result)
+                        return result
+
+                async def settled(tid):
+                    async with asyncio.timeout(10):
+                        while app['store'].get_turn(tid).state in ('queued', 'running'):
+                            await asyncio.sleep(.01)
+
+                async def control(cid, action, body):
+                    return await request('POST', f'/api/conversations/{cid}/turns/{action}', body)
+
+                await request('POST', '/api/login', {'password': 'example-password'})
+                assert 'backend' not in await request('GET', '/api/me')
+                assert (await request('GET', '/api/models'))['default_model'] == 'example-model'
+                first = await request('POST', '/api/conversations', {'text': 'Searchable message', 'request_id': str(uuid4())}, 201)
+                cid, tid = first['session_id'], first['turn_id']
+                path = '/api/conversations/' + cid
+                async with client.get(roost.make_url(path + '/stream')) as response:
+                    assert response.status == 200
+                    async with asyncio.timeout(5):
+                        while True:
+                            line = await response.content.readline()
+                            if line.startswith(b'data: '):
+                                event = json.loads(line[6:])
+                                assert 'revision' in event and 'turn_id' in event
+                                if event.get('text'):
+                                    break
+                # Closing the stream leaves the accepted work alive.
+                assert app['store'].get_turn(tid).state == 'running'
+                second = await request('POST', path + '/messages', {'text': 'Second queued message', 'request_id': str(uuid4())})
+                third = await request('POST', path + '/messages', {'text': 'Third send now', 'request_id': str(uuid4())})
+                cancelled = await request('POST', path + '/messages', {'text': 'Cancel this', 'request_id': str(uuid4())})
+                assert (await request('GET', path))['queue']
+                await control(cid, 'cancel', {'turn_id': cancelled['turn_id']})
+                await control(cid, 'send-now', {'turn_id': third['turn_id']})
+                assert app['store'].get_turn(tid).state == 'interrupted'
+                async with asyncio.timeout(5):
+                    while app['store'].get_turn(third['turn_id']).state != 'running':
+                        await asyncio.sleep(.01)
+                await control(cid, 'stop', {'turn_id': third['turn_id']})
+                await settled(second['turn_id'])
+                assert [t.id for t in app['store'].list_turns(cid)] == [tid, third['turn_id'], second['turn_id']]
+                await control(cid, 'regenerate', {'turn_id': second['turn_id']})
+                await settled(second['turn_id'])
+                edited = await control(cid, 'edit', {'turn_id': tid, 'text': 'Edited searchable message', 'request_id': str(uuid4())})
+                await settled(edited['turn_id'])
+                async with asyncio.timeout(5):
+                    while app['store'].get_conversation(cid).title != 'Smoke title':
+                        await asyncio.sleep(.01)
+                assert (await request('GET', '/api/search?q=searchable'))['sessions'][0]['id'] == cid
+                for query in ('%22', 'OR', 'content%3Asearchable'):
+                    assert not (await request('GET', '/api/search?q=' + query))['sessions']
+                view = await request('GET', path)
+                assert len(view['messages']) == 2 and view['context']['prompt_tokens'] == 20
+                history = await request('GET', path + '?before=' + str(view['messages'][-1]['id']) + '&limit=1')
+                assert history['messages'][0]['role'] == 'user'
+                # Voice talks directly to its speech server.
+                await request('PUT', '/api/settings/voice', {'same_as_model': False, 'base_url': speech.url,
+                                                            'key': 'example-speech-key'})
+                for mime in ('audio/mp4', 'audio/webm;codecs=opus'):
+                    recorded = await request('POST', '/api/audio/transcribe', {
+                        'data_url': 'data:' + mime + ';base64,Y2xpcA==', 'mime_type': mime, 'duration_seconds': 1})
+                    assert recorded == {'transcript': 'Hello'}
+                mid = view['messages'][-1]['id']
+                speech_url = roost.make_url(path + '/speech/' + str(mid))
+                async with client.get(speech_url) as response:
+                    assert response.status == 200 and await response.read() == speech.audio
+                async with client.get(speech_url, headers={'Range': 'bytes=0-2'}) as response:
+                    assert response.status == 206 and await response.read() == speech.audio[:3]
+                assert len(speech.calls) == 3 and speech.calls[-1][0] == 'Bearer example-speech-key'
+                exported = await request('GET', path + '/export')
+                assert exported['messages'][0]['content'] == 'Edited searchable message'
+                await request('PATCH', path, {'title': 'My title'})
+                assert (await request('GET', '/api/conversations'))['sessions'][0]['title'] == 'My title'
+                assert (await request('GET', '/api/jobs')) == {'jobs': []}
+                # Persona and global memory use the same authenticated browser contracts.
+                persona = await request('POST', '/api/personas', {'name': 'Guide', 'prompt': 'You explain warmly in short paragraphs.'}, 201)
+                await request('PUT', path + '/settings', {'persona_id': persona['id'], 'no_web': True})
+                manual = await request('POST', '/api/memory', {'text': 'The user likes concrete examples.',
+                                       'source_message_id': view['messages'][0]['id'], 'conversation_id': cid}, 201)
+                fake.scenario, fake.chunk_delay = 'remember', 0
+                remembered = await request('POST', path + '/messages', {'text': 'Keep my writing preference', 'request_id': str(uuid4())})
+                await settled(remembered['turn_id'])
+                reply = (await request('GET', path))['messages'][-1]
+                assert reply['persona_name'] == 'Guide'
+                assert reply['memories'] == [{'id': manual['fact']['id'], 'text': 'The user likes concrete examples.'}]
+                saved = next(item for item in reply['trace'] if item.get('name') == 'remember')
+                assert saved['fact'] == 'The user prefers short paragraphs.' and not saved['forgotten']
+                facts = (await request('GET', '/api/memory'))['facts']
+                assert [fact['origin'] for fact in facts] == ['user', 'model']
+                assert facts[-1]['source_message_id'] == remembered['assistant_message_id']
+                await request('DELETE', '/api/memory/' + str(saved['fact_id']))
+                assert next(item for item in (await request('GET', path))['messages'][-1]['trace'] if item.get('name') == 'remember')['forgotten']
+                await request('PUT', path + '/settings', {'no_web': False})
+                # Real local HTTP tools, with only the page resolver redirected to the test listener.
+                await request('PATCH', '/api/settings', {'search_url': search.url})
+                assert (await request('POST', '/api/settings/web-search/test', {'query': 'example'}))['results']
+                fake.scenario, fake.chunk_delay = 'web', 0
+                with patch('roost.runner.WebTools', side_effect=search.tools):
+                    web_turn = await request('POST', path + '/messages', {'text': 'Search the web', 'web': 'force', 'request_id': str(uuid4())})
+                    await settled(web_turn['turn_id'])
+                reply = (await request('GET', path))['messages'][-1]
+                assert reply['content'] == 'A useful answer [1].'
+                assert [item['n'] for item in reply['sources']] == [1, 2]
+                assert [item['name'] for item in reply['trace'] if item['kind'] == 'tool'] == ['web_search', 'read_page']
+                async with client.get(roost.make_url(path + '/stream')) as response:
+                    event = json.loads((await response.content.readline())[6:])
+                    assert event['reset'] and event['sources'] == reply['sources'] and event['trace'] == reply['trace']
+                await request('PUT', path + '/settings', {'no_web': True})
+                no_web = await request('POST', path + '/messages', {'text': 'No web for this chat', 'request_id': str(uuid4())})
+                await settled(no_web['turn_id'])
+                assert not app['store'].get_turn(no_web['turn_id']).settings['tools_offered']
+                # An uploaded file is extracted on the server and reaches the model before the typed text.
+                fake.scenario = None
+                form = FormData()
+                form.add_field('file', b'Synthetic attachment line.\n', filename='notes.txt')
+                async with client.post(roost.make_url('/api/attachments/extract'), headers=headers, data=form) as response:
+                    extracted = await response.json()
+                assert response.status == 200 and extracted['kind'] == 'text' and extracted['tokens'] == 7, extracted
+                attached = await request('POST', '/api/conversations', {'text': 'Summarize the file', 'request_id': str(uuid4()),
+                                         'attachments': [{'name': extracted['name'], 'text': extracted['text']}]}, 201)
+                await settled(attached['turn_id'])
+                prompt = [r[2] for r in fake.requests if r[2] and r[2]['stream']][-1]['messages'][-1]
+                assert prompt == {'role': 'user', 'content': '<attachment name="notes.txt">\nSynthetic attachment line.\n\n</attachment>\n\nSummarize the file'}, prompt
+                shown = (await request('GET', '/api/conversations/' + attached['session_id']))['messages'][0]
+                assert shown['content'] == 'Summarize the file' and shown['attachments'][0]['name'] == 'notes.txt'
+                await request('DELETE', '/api/conversations/' + attached['session_id'], {'confirm': True})
+                # A small context makes the fourth message of a fresh chat fold its first turn into a summary.
+                from roost.servers import Servers
+                Servers(state, environ={}).set_models('primary', {'models': [{'id': 'example-model', 'display_name': 'Example', 'enabled': True,
+                                                                             'thinking_mode': 'template_flag', 'context_tokens': 24}],
+                                                                  'default_model': 'example-model'})
+                fake.scenario = None
+                long_chat = None
+                for number in range(1, 5):
+                    body = {'text': f'Compaction message {number}', 'request_id': str(uuid4())}
+                    sent = await request('POST', '/api/conversations' if long_chat is None else f'/api/conversations/{long_chat}/messages', body, 201 if long_chat is None else 200)
+                    long_chat = long_chat or sent['session_id']
+                    await settled(sent['turn_id'])
+                folded = await request('GET', '/api/conversations/' + long_chat)
+                assert [(s['through_ordinal'], s['text']) for s in folded['summaries']] == [(1, 'Smoke title')], folded['summaries']
+                assert len(folded['messages']) == 8 and folded['messages'][-1]['trace'][0]['name'] == 'summarize'
+                assert folded['messages'][-1]['trace'][0]['status'] == 'completed'
+                async with client.get(roost.make_url('/api/conversations/' + long_chat + '/stream')) as response:
+                    assert json.loads((await response.content.readline())[6:])['summaries'] == folded['summaries']
+                last_prompt = [r[2] for r in fake.requests if r[2] and r[2]['stream']][-1]['messages']
+                assert 'Summary of the earlier conversation:' in last_prompt[0]['content']
+                assert not any('Compaction message 1' in m['content'] for m in last_prompt)
+                # The primary refuses with 503: the reply comes from the second fake server and says so.
+                from roost.servers import Servers
+                spare = Servers(state, environ={})
+                spare.update('fallback', {'base_url': backup.url})
+                spare.set_models('fallback', {'models': [{'id': 'backup-model', 'display_name': 'Backup', 'enabled': True,
+                                                          'thinking_mode': 'unsupported'}], 'default_model': 'backup-model'})
+                backup.frames = frame({'content': 'Answered by the fallback.'}) + frame({}, finish='stop', usage={'prompt_tokens': 9, 'completion_tokens': 4})
+                assert (await request('PATCH', '/api/settings', {'use_fallback': True}))['use_fallback']
+                fake.status = 503
+                spare_turn = await request('POST', '/api/conversations', {'text': 'Fallback please', 'request_id': str(uuid4())}, 201)
+                await settled(spare_turn['turn_id'])
+                fake.status = 200
+                reply = (await request('GET', '/api/conversations/' + spare_turn['session_id']))['messages'][-1]
+                assert reply['content'] == 'Answered by the fallback.', reply
+                assert reply['served_by'] == {'server': 'fallback', 'model': 'backup-model', 'display_name': 'Backup'}
+                assert reply['trace'][-1]['name'] == 'fallback' and reply['trace'][-1]['status'] == 'completed'
+                # Schedules use the same runner, with a durable run and notification.
+                job = await request('POST', '/api/jobs', {'name': 'Garden report', 'prompt': 'Report on the garden',
+                    'schedule': {'kind': 'every', 'value': 1, 'unit': 'hours'}, 'web': False}, 201)
+                await request('POST', '/api/jobs/' + job['id'] + '/trigger')
+                async with asyncio.timeout(5):
+                    while not (runs := (await request('GET', '/api/jobs/' + job['id'] + '/runs'))['runs']) or runs[0]['state'] != 'completed' or runs[0]['changed'] is None:
+                        await asyncio.sleep(.01)
+                run = runs[0]
+                assert run['conversation_id'] and run['turn_id']
+                assert app['store'].db.execute('SELECT 1 FROM push_outbox WHERE id=?', ('job-' + run['run_id'],)).fetchone()
+                assert not app['store'].get_turn(run['turn_id']).settings['remember_offered']
+                assert not app['store'].fallback_step(run['turn_id'])
+                await request('DELETE', '/api/conversations/' + spare_turn['session_id'], {'confirm': True})
+                await request('DELETE', path, {'confirm': True})
+                assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
+                await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
+                print('PASS: send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, attachment extraction and prompt layout, fallback reply on a 503, MP4/WebM transcription, speech/cache/ranges, job trigger/run/outbox, No web, rename, delete, delete-all and export; deterministic local providers')
+        finally:
+            await roost.close()
+            await fake.close()
+            await search.close()
+            await backup.close()
+            await speech.close()
 
 
-if __name__ == "__main__":
-    from native_smoke import run as native_smoke
-    if "--native" not in sys.argv:
-        asyncio.run(main())
-    asyncio.run(native_smoke())
+if __name__ == '__main__':
+    asyncio.run(run())
