@@ -7,10 +7,38 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import suppress
 
-from .provider import Provider, ProviderError, ProviderHTTPError, ToolCall
+from .provider import Provider, ProviderConnectionError, ProviderError, ProviderHTTPError, ProviderTimeout, ToolCall
 from .tools import WebTools, DEFINITIONS, TOTAL_SECONDS, REMEMBER_DEFINITION, REMEMBER_GUIDANCE, remember
+from .servers import ServerError
 from .store import StoreError
 from . import compaction
+
+# HTTP statuses that mean "not now" rather than "your request is wrong".
+RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504)
+FORCE_NOTE = 'Search the web first for this message. Call web_search before answering.'
+
+
+def starting_failure(exc):
+    """A short plain reason when the server failed to start a reply, else None. Never mid-reply, never a client error."""
+    if exc.started:
+        return None
+    if isinstance(exc, ProviderConnectionError):
+        return 'connection refused or reset'
+    if isinstance(exc, ProviderTimeout) and exc.connect:
+        return 'connection timed out'
+    if isinstance(exc, ProviderHTTPError) and exc.kind != 'context_overflow' and exc.status in RETRYABLE_STATUS:
+        return f'HTTP {exc.status}'
+    return None
+
+
+class Route:
+    """Where one turn's provider calls go. A turn starts on the primary and moves to the fallback at most once."""
+
+    def __init__(self, turn, *, allow=True):
+        settings = turn.settings
+        self.role, self.model, self.allow, self.reason = 'primary', turn.model, allow, None
+        self.mode, self.context = settings.get('thinking_mode', 'unsupported'), settings.get('context_tokens')
+        self.remember, self.web, self.search_url = settings.get('remember_offered', False), settings.get('tools_offered', False), settings.get('search_url', '')
 
 
 def today(zone):
@@ -66,9 +94,37 @@ class Runner:
                             'remember_offered': item.get('tools', True), 'tools_offered': offered, 'search_url': preferences.get('search_url', '') if offered else '',
                             'web': web, 'current_date': today(zone)}
 
-    def client(self):
-        server = self.servers.get('primary')
-        return Provider(self.session, server['base_url'], self.servers.key('primary'))
+    def client(self, role='primary'):
+        server = self.servers.get(role)
+        return Provider(self.session, server['base_url'], self.servers.key(role))
+
+    def divert(self, turn, route, exc):
+        """Move the turn to the fallback server when `exc` is a failure to start and the fallback may take it."""
+        reason = starting_failure(exc)
+        preferences = self.preferences()
+        conversation = self.store.get_conversation(turn.conversation_id)
+        # Only the chat's current setting counts, so unticking it and regenerating tries the fallback.
+        if (reason is None or route.role != 'primary' or not route.allow or not preferences.get('use_fallback')
+                or (conversation and conversation.keep_local)):
+            return False
+        try:
+            server = self.servers.get('fallback')
+        except ServerError:
+            return False
+        item = next((m for m in server['models'] if m['enabled'] and m['id'] == server['default_model']), None)
+        if not server['base_url'] or item is None:
+            return False
+        route.role, route.model, route.reason = 'fallback', item['id'], reason
+        route.mode, route.context = item['thinking_mode'], item.get('context_tokens')
+        route.remember = item.get('tools', True)
+        route.search_url = preferences.get('search_url', '') if route.remember else ''
+        route.web = bool(route.search_url)
+        payload = {'id': 'fallback-1', 'reason': reason, 'model': item['id'], 'display_name': item['display_name']}
+        if turn.settings.get('web') == 'force' and not (route.web and not turn.settings['no_web']):
+            payload['forced_search_unavailable'] = True
+        self.store.append_step(turn.id, 'fallback_call', payload)
+        self.notify(turn.conversation_id)
+        return True
 
     async def dispatch(self):
         while not self.closing:
@@ -107,12 +163,12 @@ class Runner:
             self.notify(cid)
         task.add_done_callback(finished)
 
-    def prompt(self, turn):
+    def prompt(self, turn, route=None):
         parts = []
         if turn.persona and turn.persona.get('prompt'):
             parts.append(turn.persona['prompt'])
         memory = 'Memory facts:\n' + '\n'.join(f"[{f['id']}] {f['text']}" for f in turn.memories) if turn.memories else ''
-        if turn.settings.get('remember_offered'):
+        if route.remember if route else turn.settings.get('remember_offered'):
             memory += ('\n\n' if memory else '') + REMEMBER_GUIDANCE
         if memory:
             parts.append(memory)
@@ -140,25 +196,27 @@ class Runner:
     def messages(self, tid):
         return self.store.messages_for_turn(tid)
 
-    async def prepare(self, turn):
+    async def prepare(self, turn, route=None):
         """Compact before the first provider call when the last reported prompt nears the context size."""
+        route = route or Route(turn)
         ordered = self.store.list_turns(turn.conversation_id)
         last = next((t for t in reversed(ordered) if t.ordinal < turn.ordinal and t.state == 'completed'), None)
         reported = last.stats.get('usage', {}).get('prompt_tokens') if last else None
-        if compaction.due(turn.settings.get('context_tokens'), reported, self.messages(turn.id)[0].content):
+        if compaction.due(route.context, reported, self.messages(turn.id)[0].content):
             with suppress(ProviderError, StoreError):  # The reply can still try the full history.
-                return await self.compact(turn)
+                return await self.compact(turn, route=route)
         return self.store.get_turn(turn.id)
 
-    async def compact(self, turn, *, overflow=False, failed_tokens=None):
+    async def compact(self, turn, *, overflow=False, failed_tokens=None, route=None):
         """Fold older settled turns into summaries, oldest chunk first; raises ProviderError if none could be made."""
+        route = route or Route(turn)
         tid, cid = turn.id, turn.conversation_id
         previous = self.store.latest_summary(cid, before=turn.ordinal)
         after = previous['through_ordinal'] if previous else 0
         older = [(t, self.messages(t.id)) for t in self.store.list_turns(cid)
                  if after < t.ordinal < turn.ordinal and t.state in ('completed', 'interrupted')]
         pairs = [(rows[0].content, rows[1].content) for _, rows in older]
-        context = turn.settings.get('context_tokens')
+        context = route.context
         count, _ = compaction.split([compaction.estimate(u + a) for u, a in pairs], context or 0, overflow=overflow)
         if count == 0:
             if overflow:
@@ -178,15 +236,20 @@ class Runner:
             chunk = compaction.take(pairs[done:count], tokens)
             calls += 1
             try:
-                result = await self.client().complete(turn.model, compaction.messages(text, chunk), thinking='off',
-                                                      mode=turn.settings.get('thinking_mode', 'unsupported'), max_tokens=limit)
+                result = await self.client(route.role).complete(route.model, compaction.messages(text, chunk), thinking='off',
+                                                                mode=route.mode, max_tokens=limit)
                 if not result.content.strip() or result.finish_reason == 'length':
                     raise ProviderError('Model returned an empty or cut-off summary.')
                 # The last chunk replaces this pass's partial rows, so one compaction leaves one summary.
                 final = done + len(chunk) == count
-                saved.append(self.store.add_summary(tid, older[done + len(chunk) - 1][0].ordinal, result.content, turn.model,
+                saved.append(self.store.add_summary(tid, older[done + len(chunk) - 1][0].ordinal, result.content, route.model,
                                                     replace=saved if final else ())['id'])
             except (ProviderError, StoreError) as exc:
+                if isinstance(exc, ProviderError) and self.divert(turn, route, exc):
+                    calls -= 1  # The same chunk runs again on the fallback.
+                    context = route.context
+                    tokens = compaction.budget(context, failed_tokens, text)
+                    continue
                 failure = exc
                 if getattr(exc, 'kind', None) == 'context_overflow' and tokens // 2 >= compaction.MIN_BUDGET:
                     tokens = shrunk = tokens // 2  # The request itself was too big: retry with a smaller chunk.
@@ -203,8 +266,10 @@ class Runner:
         announce('compaction_result', {'status': 'completed', 'content': f'Summarized {done} earlier turn' + ('s' if done != 1 else '') + '.'})
         return self.store.get_turn(tid)
 
-    async def generate(self, tid):
+    async def generate(self, tid, *, fallback=True):
+        """Run one turn. `fallback=False` keeps it on the primary server whatever the settings say."""
         turn = self.store.get_turn(tid)
+        route = Route(turn, allow=fallback)
         text = reasoning = ''
         usage, first = {}, None
         began = checkpoint = time.monotonic()
@@ -229,21 +294,34 @@ class Runner:
                 save()
         flusher = asyncio.create_task(flush())
         try:
-            turn = await self.prepare(turn)
-            messages = self.prompt(turn)
+            turn = await self.prepare(turn, route)
+            messages = self.prompt(turn, route)
             retried = False
-            offered = turn.settings.get('tools_offered', False) and not turn.settings['no_web']
-            web = WebTools(turn.settings.get('search_url', ''))
+            web = WebTools(route.search_url)
             web_rounds = remember_calls = 0
             searched = False
             assistant_id = self.messages(tid)[1].id
-            for round_index in range(7):
-                web_allowed = offered and web_rounds < 3 and tool_seconds < TOTAL_SECONDS
-                memory_allowed = turn.settings.get('remember_offered', False) and remember_calls < 3
+            def refresh():
+                """After the route changed: rebuild the leading prompt and re-offer what the new server may have."""
+                nonlocal web, web_allowed, memory_allowed, definitions, choice, force_fallback, messages
+                messages[0] = self.prompt(turn, route)[0]
+                web = WebTools(route.search_url)
+                web_allowed, memory_allowed, definitions = plan()
+                if not web_allowed:
+                    # A forced search cannot be satisfied here: drop the tool choice and the synthetic search with it.
+                    choice, force_fallback = None, False
+                    messages = [m for m in messages if not (m['role'] == 'system' and m['content'] == FORCE_NOTE)]
+            def plan():
+                """What the current server may be offered this round."""
+                web_allowed = route.web and not turn.settings['no_web'] and web_rounds < 3 and tool_seconds < TOTAL_SECONDS
+                memory_allowed = route.remember and remember_calls < 3
                 definitions = ([*DEFINITIONS] if web_allowed else []) + ([REMEMBER_DEFINITION] if memory_allowed else [])
                 definitions = definitions or None
                 if round_index == 6:
                     definitions = None
+                return web_allowed, memory_allowed, definitions
+            for round_index in range(7):
+                web_allowed, memory_allowed, definitions = plan()
                 choice = ({'type': 'function', 'function': {'name': 'web_search'}}
                           if web_allowed and not searched and turn.settings.get('web') == 'force' else None)
                 calls, call_text, call_reasoning, call_usage = [], '', '', {}
@@ -251,9 +329,8 @@ class Runner:
                 while True:
                     received = False
                     try:
-                        async for event in self.client().stream(turn.model, messages, thinking=turn.settings['thinking'],
-                                                               mode=turn.settings.get('thinking_mode', 'unsupported'),
-                                                               tools=definitions, tool_choice=choice):
+                        async for event in self.client(route.role).stream(route.model, messages, thinking=turn.settings['thinking'],
+                                                                          mode=route.mode, tools=definitions, tool_choice=choice):
                             if event.kind in ('text', 'reasoning'):
                                 if first is None and event.text:
                                     first = time.monotonic()
@@ -277,6 +354,9 @@ class Runner:
                                 calls.append(event.tool_call)
                         break
                     except ProviderError as exc:
+                        if not received and self.divert(turn, route, exc):
+                            refresh()  # Same prompt, for the fallback model's own tool flags; tool rounds so far stay.
+                            continue
                         if getattr(exc, 'kind', None) == 'context_overflow':
                             if retried:
                                 raise ProviderError(compaction.TOO_LONG) from exc
@@ -285,19 +365,21 @@ class Runner:
                             if received:
                                 raise ProviderError(compaction.TOO_LONG_PLAIN) from exc
                             retried = True
+                            before = route.role
                             turn = await self.compact(turn, overflow=True,
-                                                      failed_tokens=sum(len(m.get('content') or '') for m in messages) // 4)
-                            messages = self.prompt(turn)
+                                                      failed_tokens=sum(len(m.get('content') or '') for m in messages) // 4,
+                                                      route=route)
+                            messages = self.prompt(turn, route)
                             if force_fallback:
-                                messages = [*messages, {'role': 'system', 'content':
-                                            'Search the web first for this message. Call web_search before answering.'}]
+                                messages = [*messages, {'role': 'system', 'content': FORCE_NOTE}]
+                            if route.role != before:  # Compaction itself moved to the fallback.
+                                refresh()
                             continue
                         if not isinstance(exc, ProviderHTTPError) or choice is None or received or exc.status not in (400, 422):
                             raise
                         choice = None
                         force_fallback = True
-                        messages = [*messages, {'role': 'system', 'content':
-                                    'Search the web first for this message. Call web_search before answering.'}]
+                        messages = [*messages, {'role': 'system', 'content': FORCE_NOTE}]
                 if (force_fallback or choice is not None) and not any(call.name == 'web_search' for call in calls):
                     query = self.messages(tid)[0].content.strip()[:2000]
                     calls.insert(0, ToolCall(0, 'forced-web-search', 'web_search', json.dumps({'query': query})))
@@ -357,6 +439,7 @@ class Runner:
             generation = max(0, ended - first - tool_seconds) if first is not None else 0
             count = usage.get('completion_tokens')
             self.store.finish(tid, {'usage': usage, 'model_seconds': duration,
+                                   **({'context_tokens': route.context} if route.role == 'fallback' else {}),
                                    'time_to_first_token': first - began if first is not None else None,
                                    'tokens_per_second': count / generation if type(count) is int and generation > 0 else None})
             self.notify(turn.conversation_id)
@@ -382,7 +465,11 @@ class Runner:
             if current and current.state == 'running':
                 save()
                 self.store.checkpoint_assistant(tid, text, reasoning)
-                self.store.set_turn_state(tid, 'failed', error=str(exc) if isinstance(exc, ProviderError) else 'Reply could not be completed.')
+                error = str(exc) if isinstance(exc, ProviderError) else 'Reply could not be completed.'
+                if route.role == 'fallback' and isinstance(exc, ProviderError):
+                    error = (f"The primary server could not start this reply ({route.reason}), "
+                             f"and the fallback server failed too: {exc}")
+                self.store.set_turn_state(tid, 'failed', error=error[:2000])
                 self.notify(turn.conversation_id)
 
         finally:

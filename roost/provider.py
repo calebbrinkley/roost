@@ -21,7 +21,11 @@ ErrorKind = Literal["context_overflow", "other"]
 
 
 class ProviderError(Exception):
-    """A safe public error message. Upstream details, when retained, are private."""
+    """A safe public error message. Upstream details, when retained, are private.
+
+    `started` says whether the model had begun its reply (any text, reasoning or tool-call delta)
+    when the error happened; only errors before that point are safe to rerun on another server."""
+    started = False
 
 
 class ProviderConnectionError(ProviderError):
@@ -29,7 +33,8 @@ class ProviderConnectionError(ProviderError):
 
 
 class ProviderTimeout(ProviderError):
-    """The provider exceeded a connection, read or total deadline."""
+    """The provider exceeded a connection, read or total deadline. `connect` marks the connection deadline."""
+    connect = False
 
 
 class ProviderHTTPError(ProviderError):
@@ -76,6 +81,9 @@ def _error_details(value: bytes | dict, key: str) -> tuple[str, ErrorKind]:
         or re.search(r"\bmaximum context (?:length|size)\b.{0,300}\b(?:however|requested|resulted)\b", lower)
     )
     return message[:300], "context_overflow" if overflow else "other"
+
+
+_STARTED = object()  # Internal marker: the first reply delta has arrived.
 
 
 @dataclass(frozen=True)
@@ -310,6 +318,10 @@ class Provider:
                     error = ProviderBusy if response.status in (429, 503) else ProviderHTTPError
                     raise error(response.status, excerpt, kind)
                 yield response
+        except aiohttp.ConnectionTimeoutError:
+            error = ProviderTimeout("Model server timed out.")
+            error.connect = True
+            raise error from None
         except asyncio.TimeoutError:
             raise ProviderTimeout("Model server timed out.") from None
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
@@ -349,6 +361,17 @@ class Provider:
         payload = self._payload(model, messages, thinking, mode, tools, True)
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
+        started = False
+        try:
+            async for event in self._stream(payload):
+                started = started or event is _STARTED
+                if event is not _STARTED:
+                    yield event
+        except ProviderError as exc:
+            exc.started = started
+            raise
+
+    async def _stream(self, payload: dict) -> AsyncIterator[Event]:
         thoughts, calls, total, finished = _Thoughts(), _Calls(), 0, False
         async with self._request("POST", "/chat/completions", json=payload) as response:
             if response.content_type != "text/event-stream":
@@ -372,6 +395,8 @@ class Provider:
                     delta = choice.get("delta")
                     if not isinstance(delta, dict):
                         raise MalformedFrame("Model server returned an invalid delta.")
+                    if any(delta.get(key) for key in ("content", "reasoning_content", "reasoning", "tool_calls")):
+                        yield _STARTED
                     for event in thoughts.feed(delta):
                         yield event
                     calls.feed(delta.get("tool_calls"))

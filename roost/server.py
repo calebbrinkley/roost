@@ -347,9 +347,20 @@ async def discover_server_models(request: web.Request):
     return web.json_response({"models": servers.merge_models(saved["models"], discovered)})
 
 
+def fallback_ready(app: web.Application) -> bool:
+    try:
+        server = app["servers"].get("fallback")
+    except servers.ServerError:
+        return False
+    return bool(server["base_url"] and any(m["enabled"] and m["id"] == server["default_model"] for m in server["models"]))
+
+
 async def update_settings(request: web.Request):
     try:
-        saved = settings.update(request.app["settings_file"], await json_body(request))
+        data = await json_body(request)
+        if data.get("use_fallback") is True and not fallback_ready(request.app):
+            raise settings.SettingsError("Set a fallback server and default model before turning the fallback on.")
+        saved = settings.update(request.app["settings_file"], data)
         if saved["backend"] == "hermes" and not request.app["hermes_started"]:
             await request.app["hermes"].start()
             request.app["hermes_started"] = True

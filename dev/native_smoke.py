@@ -37,6 +37,7 @@ async def run():
         (state / 'password.hash').write_text(make_password_hash('example-password'))
         fake = await OpenAIFake().start()
         search = await WebFake().start()
+        backup = await OpenAIFake().start()
         fake.delay, fake.chunk_delay = .1, .3
         partial = frame({'content': 'Native partial reply. ' * 60})
         fake.frames = partial + frame({'content': 'Finished.'}) + frame({}, finish='stop', usage={'prompt_tokens': 20, 'completion_tokens': 8})
@@ -173,14 +174,32 @@ async def run():
                 last_prompt = [r[2] for r in fake.requests if r[2] and r[2]['stream']][-1]['messages']
                 assert 'Summary of the earlier conversation:' in last_prompt[0]['content']
                 assert not any('Compaction message 1' in m['content'] for m in last_prompt)
+                # The primary refuses with 503: the reply comes from the second fake server and says so.
+                from roost.servers import Servers
+                spare = Servers(state, environ={})
+                spare.update('fallback', {'base_url': backup.url})
+                spare.set_models('fallback', {'models': [{'id': 'backup-model', 'display_name': 'Backup', 'enabled': True,
+                                                          'thinking_mode': 'unsupported'}], 'default_model': 'backup-model'})
+                backup.frames = frame({'content': 'Answered by the fallback.'}) + frame({}, finish='stop', usage={'prompt_tokens': 9, 'completion_tokens': 4})
+                assert (await request('PATCH', '/api/settings', {'use_fallback': True}))['use_fallback']
+                fake.status = 503
+                spare_turn = await request('POST', '/api/conversations', {'text': 'Fallback please', 'request_id': str(uuid4())}, 201)
+                await settled(spare_turn['turn_id'])
+                fake.status = 200
+                reply = (await request('GET', '/api/conversations/' + spare_turn['session_id']))['messages'][-1]
+                assert reply['content'] == 'Answered by the fallback.', reply
+                assert reply['served_by'] == {'server': 'fallback', 'model': 'backup-model', 'display_name': 'Backup'}
+                assert reply['trace'][-1]['name'] == 'fallback' and reply['trace'][-1]['status'] == 'completed'
+                await request('DELETE', '/api/conversations/' + spare_turn['session_id'], {'confirm': True})
                 await request('DELETE', path, {'confirm': True})
                 assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, fallback reply on a 503, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()
             await search.close()
+            await backup.close()
 
 
 if __name__ == '__main__':

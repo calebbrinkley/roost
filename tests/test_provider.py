@@ -28,6 +28,12 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def events(self, **kwargs):
         return [event async for event in self.provider.stream("example-model", MESSAGES, **kwargs)]
 
+    async def test_connection_deadline_is_marked_and_read_deadline_is_not(self):
+        for error, connect in ((aiohttp.ConnectionTimeoutError(), True), (aiohttp.SocketTimeoutError(), False), (asyncio.TimeoutError(), False)):
+            with patch.object(self.session, "request", side_effect=error), self.assertRaises(ProviderTimeout) as caught:
+                await self.provider.complete("example-model", MESSAGES)
+            self.assertIs(caught.exception.connect, connect)
+
     async def test_arbitrary_chunks_unicode_usage_final_done_and_no_sampling(self):
         self.fake.frames = (b": keepalive\n\n" + frame({"role": "assistant"}) + frame({"content": "Hé"})
                             + frame({"content": "llo"}) + frame({}, finish="stop")

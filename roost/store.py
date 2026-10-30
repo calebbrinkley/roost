@@ -613,6 +613,10 @@ class Store:
     def sources(self, tid):
         return [dict(row) for row in self.db.execute("SELECT n,title,url FROM sources WHERE turn_id=? ORDER BY n", (tid,))]
 
+    def fallback_step(self, tid):
+        """The step that moved this turn to the fallback server, if it did."""
+        return next((step.payload for step in self.list_steps(tid) if step.kind == 'fallback_call'), None)
+
     def trace(self, tid):
         trace = []
         for step in self.list_steps(tid):
@@ -627,6 +631,18 @@ class Store:
                                   'arguments': call['function']['arguments'], 'status': 'running'})
             elif step.kind == 'compaction_call':
                 trace.append({'kind': 'tool', 'id': step.payload['id'], 'name': 'summarize', 'arguments': '{}', 'status': 'running'})
+            elif step.kind == 'fallback_call':
+                state = self.get_turn(tid).state
+                name, reason = step.payload['display_name'], step.payload['reason']
+                status, ending = {'failed': ('error', f"{name} on the fallback server failed too"),
+                                  'running': ('running', f"answering with {name} on the fallback server"),
+                                  'queued': ('running', f"answering with {name} on the fallback server"),
+                                  'interrupted': ('interrupted', f"switched to {name} on the fallback server"),
+                                  'cancelled': ('interrupted', f"switched to {name} on the fallback server")}.get(
+                    state, ('completed', f"answered with {name} on the fallback server"))
+                extra = "; the forced web search wasn't available there" if step.payload.get('forced_search_unavailable') else ""
+                trace.append({'kind': 'tool', 'id': step.payload['id'], 'name': 'fallback', 'arguments': '{}', 'status': status,
+                              'result': f"Primary couldn't start ({reason}); {ending}{extra}"})
             elif step.kind == 'compaction_result':
                 tool = next((item for item in reversed(trace) if item.get('id') == step.payload['id']), None)
                 if tool:
@@ -671,11 +687,13 @@ class Store:
         return None
 
     def update_conversation(self, cid: str, changes: dict, *, auto_title: bool = False) -> None:
-        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions', 'no_web', 'persona_id'}
+        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions', 'no_web', 'keep_local', 'persona_id'}
         if 'persona_id' in changes and changes['persona_id'] is not None and not self.persona(changes['persona_id']):
             raise StoreError('Persona does not exist.')
         if "no_web" in changes and type(changes["no_web"]) is not bool:
             raise StoreError("no_web must be a boolean.")
+        if "keep_local" in changes and type(changes["keep_local"]) is not bool:
+            raise StoreError("keep_local must be a boolean.")
         if not changes or set(changes) - allowed:
             raise StoreError("Invalid conversation settings.")
         with self._write():
