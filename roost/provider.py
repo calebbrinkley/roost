@@ -345,8 +345,10 @@ class Provider:
         return payload
 
     async def stream(self, model: str, messages: list[dict], *, thinking: str = "off", mode: str = "unsupported",
-                     tools: list[dict] | None = None) -> AsyncIterator[Event]:
+                     tools: list[dict] | None = None, tool_choice: dict | None = None) -> AsyncIterator[Event]:
         payload = self._payload(model, messages, thinking, mode, tools, True)
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         thoughts, calls, total, finished = _Thoughts(), _Calls(), 0, False
         async with self._request("POST", "/chat/completions", json=payload) as response:
             if response.content_type != "text/event-stream":

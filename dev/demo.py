@@ -472,6 +472,13 @@ async def main():
             fake.chunk_delay = float(os.environ.get("ROOST_DEMO_CHUNK_DELAY", "3"))
             fake.completion['choices'][0]['message']['content'] = 'A quieter weekend'
         configure(STATE, fake.url)
+        if "--capture" in sys.argv:
+            from web_fake import WebFake
+            from roost import settings
+            search_fake = await WebFake().start()
+            search_fake.delay = 4
+            settings.update(STATE / "settings.json", {"search_url": search_fake.url})
+            fake.scenario = 'capture'
     mock = web.AppRunner(mock_hermes(), access_log=None) if not native else None
     roost = web.AppRunner(create_app(), access_log=None)
     if mock:
@@ -490,6 +497,8 @@ async def main():
             await mock.cleanup()
         if fake:
             await fake.close()
+        if native and "--capture" in sys.argv:
+            await search_fake.close()
 
 
 if __name__ == "__main__":

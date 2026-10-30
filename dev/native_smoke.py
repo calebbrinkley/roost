@@ -17,6 +17,7 @@ from roost.server import create_app
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 from openai_fake import OpenAIFake, frame
+from web_fake import WebFake
 
 
 def configure(state, url):
@@ -35,6 +36,7 @@ async def run():
         state = Path(directory)
         (state / 'password.hash').write_text(make_password_hash('example-password'))
         fake = await OpenAIFake().start()
+        search = await WebFake().start()
         fake.delay, fake.chunk_delay = .1, .3
         partial = frame({'content': 'Native partial reply. ' * 60})
         fake.frames = partial + frame({'content': 'Finished.'}) + frame({}, finish='stop', usage={'prompt_tokens': 20, 'completion_tokens': 8})
@@ -113,13 +115,32 @@ async def run():
                 assert (await request('GET', '/api/conversations'))['sessions'][0]['title'] == 'My title'
                 assert (await request('GET', '/api/jobs')) == {'jobs': []}
                 assert (await request('GET', '/api/settings/soul')) == {'content': ''}
+                # Real local HTTP tools, with only the page resolver redirected to the test listener.
+                await request('PATCH', '/api/settings', {'search_url': search.url})
+                assert (await request('POST', '/api/settings/web-search/test', {'query': 'example'}))['results']
+                fake.scenario, fake.chunk_delay = 'web', 0
+                with patch('roost.runner.WebTools', side_effect=search.tools):
+                    web_turn = await request('POST', path + '/messages', {'text': 'Search the web', 'web': 'force', 'request_id': str(uuid4())})
+                    await settled(web_turn['turn_id'])
+                reply = (await request('GET', path))['messages'][-1]
+                assert reply['content'] == 'A useful answer [1].'
+                assert [item['n'] for item in reply['sources']] == [1, 2]
+                assert [item['name'] for item in reply['trace'] if item['kind'] == 'tool'] == ['web_search', 'read_page']
+                async with client.get(roost.make_url(path + '/stream')) as response:
+                    event = json.loads((await response.content.readline())[6:])
+                    assert event['reset'] and event['sources'] == reply['sources'] and event['trace'] == reply['trace']
+                await request('PUT', path + '/settings', {'no_web': True})
+                no_web = await request('POST', path + '/messages', {'text': 'No web for this chat', 'request_id': str(uuid4())})
+                await settled(no_web['turn_id'])
+                assert not app['store'].get_turn(no_web['turn_id']).settings['tools_offered']
                 await request('DELETE', path, {'confirm': True})
                 assert not (await request('GET', '/api/conversations'))['sessions']
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, web search/read/answer, forced search, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()
+            await search.close()
 
 
 if __name__ == '__main__':

@@ -169,7 +169,20 @@ def _runtime_down(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE turns DROP COLUMN stats")
 
 
-MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down))
+def _sources_up(db):
+    db.execute("""CREATE TABLE sources (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        n INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
+        PRIMARY KEY(turn_id,n), UNIQUE(turn_id,url))""")
+
+
+def _sources_down(db):
+    if db.execute("SELECT 1 FROM sources LIMIT 1").fetchone():
+        raise StoreError("Cannot roll back saved sources. Preserve their data first.")
+    db.execute("DROP TABLE sources")
+
+
+MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down))
 
 
 class Store:
@@ -382,6 +395,40 @@ class Store:
                         "usage": json.loads(row["usage"]) if row["usage"] is not None else None})
                 for row in self.db.execute("SELECT * FROM turn_steps WHERE turn_id=? ORDER BY ordinal", (turn_id,))]
 
+    def add_source(self, tid, title, url):
+        with self._write():
+            existing = self.db.execute("SELECT n FROM sources WHERE turn_id=? AND url=?", (tid, url)).fetchone()
+            if existing:
+                return existing[0]
+            n = self.db.execute("SELECT COALESCE(MAX(n),0)+1 FROM sources WHERE turn_id=?", (tid,)).fetchone()[0]
+            self.db.execute("INSERT INTO sources VALUES (?,?,?,?)", (tid, n, title, url))
+            return n
+
+    def sources(self, tid):
+        return [dict(row) for row in self.db.execute("SELECT n,title,url FROM sources WHERE turn_id=? ORDER BY n", (tid,))]
+
+    def trace(self, tid):
+        trace = []
+        for step in self.list_steps(tid):
+            if step.kind == 'reasoning':
+                if trace and trace[-1]['kind'] == 'reasoning':
+                    trace[-1]['text'] += step.payload['text']
+                else:
+                    trace.append({'kind': 'reasoning', 'text': step.payload['text']})
+            elif step.kind == 'assistant_call':
+                for call in step.payload['tool_calls']:
+                    trace.append({'kind': 'tool', 'id': call['id'], 'name': call['function']['name'],
+                                  'arguments': call['function']['arguments'], 'status': 'running'})
+            elif step.kind == 'tool_result':
+                tool = next((item for item in reversed(trace) if item.get('id') == step.tool_call_id), None)
+                if tool:
+                    tool.update(status=step.payload['status'], result=step.payload['content'][:16000])
+        if self.get_turn(tid).state not in ('queued', 'running'):
+            for item in trace:
+                if item.get('status') == 'running':
+                    item['status'] = 'interrupted'
+        return trace
+
     def submit(self, request_id: str, content: str, *, conversation_id: str | None,
                model: str, changes: dict, snapshot: dict, identity: dict) -> Acceptance:
         """Accept a browser request, including first-chat creation, in one durable transaction."""
@@ -393,7 +440,7 @@ class Store:
                 cid, now = str(uuid4()), time.time()
                 self.db.execute("INSERT INTO conversations VALUES (?,?, 'auto',?,?,?,?,0,?,?)",
                                 (cid, content.splitlines()[0][:60], changes.get('model'),
-                                 changes.get('thinking', 'off'), changes.get('instructions', ''), 0, now, now))
+                                 changes.get('thinking', 'off'), changes.get('instructions', ''), changes.get('no_web', False), now, now))
                 conversation_id = cid
             return self._accept_turn(conversation_id, request_id, content, model=model,
                                      settings={**snapshot, '_request': identity})
@@ -407,7 +454,9 @@ class Store:
         return None
 
     def update_conversation(self, cid: str, changes: dict, *, auto_title: bool = False) -> None:
-        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions'}
+        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions', 'no_web'}
+        if "no_web" in changes and type(changes["no_web"]) is not bool:
+            raise StoreError("no_web must be a boolean.")
         if not changes or set(changes) - allowed:
             raise StoreError("Invalid conversation settings.")
         with self._write():
@@ -480,6 +529,7 @@ class Store:
             self.db.execute("UPDATE turns SET state='queued',stats='{}',error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
             self.db.execute("UPDATE messages SET content='',reasoning='',state='queued',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
             self.db.execute("DELETE FROM turn_steps WHERE turn_id=?", (tid,))
+            self.db.execute("DELETE FROM sources WHERE turn_id=?", (tid,))
 
     def history(self, cid: str, *, before: int | None = None, limit: int = 500) -> tuple[list[Message], bool]:
         # Cursor IDs stay stable, but their order follows turn ordinals after Send now.

@@ -88,6 +88,7 @@
               <option value="high">High</option>
             </select>
           </label>
+          <button id="web-toggle" class="web-toggle hidden" type="button" aria-label="Search the web for this message" title="Search the web for this message" aria-pressed="false"></button>
           <label class="sr-only" for="message" data-agent-text="Message {agent}">Message the agent</label>
           <textarea id="message" rows="1" placeholder="Message the agent" data-agent-placeholder="Message {agent}" maxlength="16000" required></textarea>
           <button id="voice-button" class="mic-button" type="button" aria-label="Start recording" title="Start recording" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
@@ -160,7 +161,9 @@
         <label for="sheet-model">Model</label><select id="sheet-model"></select>
         <div id="sheet-thinking"><label for="sheet-reasoning">Thinking</label><select id="sheet-reasoning">
           <option value="none">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-        </select></div></div>
+        </select></div>
+        <label><input id="sheet-no-web" type="checkbox"> No web</label>
+      </div>
       <p id="sheet-instructions-error" class="error" role="alert"></p>
       <div class="dialog-actions"><button id="sheet-instructions-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>

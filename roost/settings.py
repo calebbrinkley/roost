@@ -12,7 +12,7 @@ ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
 CUSTOM_ACCENT = re.compile(r"#[0-9a-f]{6}")
 # "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
 TIME_ZONE = re.compile(r"(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})")
-FIELDS = {"agent_name", "accent", "time_zone", "backend"}
+FIELDS = {"agent_name", "accent", "time_zone", "backend", "search_url"}
 
 
 class SettingsError(ValueError):
@@ -33,6 +33,16 @@ def _time_zone(value) -> str | None:
     return value if isinstance(value, str) and len(value) <= 64 and (not value or TIME_ZONE.fullmatch(value)) else None
 
 
+def _search_url(value):
+    from .provider import base_url
+    if value == "":
+        return ""
+    try:
+        return base_url(value)
+    except ValueError:
+        return None
+
+
 def load(path: Path) -> dict:
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
@@ -43,7 +53,8 @@ def load(path: Path) -> dict:
     return {"agent_name": clean_name(stored.get("agent_name")),
             "accent": _accent(stored.get("accent")) or ACCENTS[0],
             "time_zone": _time_zone(stored.get("time_zone")) or "",
-            "backend": "native" if stored.get("backend") == "native" else "hermes"}
+            "backend": "native" if stored.get("backend") == "native" else "hermes",
+            "search_url": _search_url(stored.get("search_url", "")) or ""}
 
 
 def update(path: Path, changes: dict) -> dict:
@@ -70,6 +81,11 @@ def update(path: Path, changes: dict) -> dict:
         if changes["backend"] not in ("hermes", "native"):
             raise SettingsError("Choose Hermes or Native backend.")
         settings["backend"] = changes["backend"]
+    if "search_url" in changes:
+        value = _search_url(changes['search_url'])
+        if value is None:
+            raise SettingsError("Choose an HTTP(S) search base URL without credentials, query or fragment.")
+        settings['search_url'] = value
     temporary = path.with_name(path.name + ".new")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
