@@ -27,6 +27,8 @@ class OpenAIFake:
         self.requests = []
         self.delay = 0
         self.chunk_delay = 0
+        self.max_chars = None
+        self.fail_summary = False
         self.completion = {"choices": [{"message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
                            "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
         app = web.Application()
@@ -57,6 +59,10 @@ class OpenAIFake:
         await asyncio.sleep(self.delay)
         if self.status != 200:
             return web.Response(status=self.status, text=self.error_body)
+        if self.max_chars is not None and sum(len(m.get("content") or "") for m in payload["messages"]) > self.max_chars:
+            return web.json_response({"error": {"message": "context_length_exceeded"}}, status=400)
+        if not payload["stream"] and self.fail_summary and payload.get("max_tokens") == 2000:
+            return web.Response(status=500, text=self.error_body)
         if payload.get("tool_choice") and self.reject_tool_choice:
             return web.json_response({"error": "tool_choice unsupported"}, status=400)
         if not payload["stream"]:

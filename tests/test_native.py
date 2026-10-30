@@ -29,7 +29,7 @@ async def wait_for(predicate, timeout=5):
 
 
 def without_clock(messages):
-    return [m for m in messages if not (m['role'] == 'system' and (m['content'].startswith('Current date and time:') or m['content'] in (DEFAULT_PERSONA_PROMPT, REMEMBER_GUIDANCE)))]
+    return [m for m in messages if m['role'] != 'system']
 
 
 class NativeTests(unittest.IsolatedAsyncioTestCase):
@@ -87,10 +87,12 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await self.settled(second['turn_id'])
         streamed = [entry[2] for entry in self.fake.requests if entry[2] and entry[2]['stream']]
         self.assertEqual([without_clock(r['messages']) for r in streamed], [
-            [{'role': 'system', 'content': 'Be brief.'}, {'role': 'user', 'content': 'First'}],
-            [{'role': 'system', 'content': 'Be brief.'}, {'role': 'user', 'content': 'First'},
+            [{'role': 'user', 'content': 'First'}],
+            [{'role': 'user', 'content': 'First'},
              {'role': 'assistant', 'content': 'Hello'}, {'role': 'user', 'content': 'Second'}]])
         self.assertTrue(all(r['chat_template_kwargs']['enable_thinking'] for r in streamed))
+        self.assertTrue(all([m['role'] for m in r['messages']].count('system') == 1 and r['messages'][0]['role'] == 'system' for r in streamed))
+        self.assertIn('Be brief.', streamed[0]['messages'][0]['content'])
         await wait_for(lambda: self.store.get_conversation(cid).title == 'A short title')
         requests = [entry[2] for entry in self.fake.requests if entry[2]]
         self.assertEqual([p['stream'] for p in requests], [True, True, False])
@@ -192,6 +194,19 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await runner.close()
         self.assertTrue(cancelled.is_set())
         self.assertFalse(runner.completions)
+
+    async def test_system_message_is_identical_across_turns_on_the_same_day(self):
+        first = await self.create('First')
+        cid = first['session_id']
+        await self.settled(first['turn_id'])
+        await asyncio.sleep(.02)
+        second = await self.send(cid, 'Second')
+        await self.settled(second['turn_id'])
+        one, two = (r['messages'][0] for r in self.generations()[:2])
+        self.assertEqual(one, two)
+        self.assertNotRegex(one['content'], r'\d{2}:\d{2}')
+        self.assertEqual(self.store.get_turn(first['turn_id']).settings['current_date'],
+                         self.store.get_turn(second['turn_id']).settings['current_date'])
 
     async def test_empty_interrupted_assistant_is_omitted_from_prompt(self):
         self.fake.delay = 2
@@ -517,8 +532,8 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.generations()), 2)
         self.assertEqual([t['function']['name'] for t in self.generations()[-1]['tools']], ['remember'])
         self.assertIn('Total tool time', self.store.trace(first['turn_id'])[1]['result'])
-        clock = next(m['content'] for m in self.generations()[0]['messages'] if m['content'].startswith('Current date and time:'))
-        self.assertIn('-05:00', clock)
+        self.assertTrue(self.generations()[0]['messages'][0]['content'].endswith('(Etc/GMT+5)'))
+        self.assertIn("\n\nToday's date: ", self.generations()[0]['messages'][0]['content'])
 
 
     async def test_persona_and_memory_prompt_order_queued_edits_and_deleted_snapshot(self):
@@ -539,11 +554,15 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_turn.memories, [{'id': fid, 'text': 'The user prefers examples.'}])
         self.assertEqual(second_turn.memories, [{'id': fid, 'text': 'The user prefers diagrams.'}])
         prompt = self.generations()[1]['messages']
-        self.assertEqual(prompt[0], {'role': 'system', 'content': 'You are a patient guide.'})
-        self.assertTrue(prompt[1]['content'].startswith(f'Memory facts:\n[{fid}] The user prefers diagrams.'))
-        self.assertIn(REMEMBER_GUIDANCE, prompt[1]['content'])
-        self.assertEqual(prompt[2], {'role': 'system', 'content': 'Keep it concrete.'})
-        self.assertTrue(prompt[3]['content'].startswith('Current date and time:'))
+        self.assertEqual([m['role'] for m in prompt].count('system'), 1)
+        parts = prompt[0]['content'].split('\n\n')
+        self.assertEqual(parts[0], 'You are a patient guide.')
+        self.assertEqual(parts[1], f'Memory facts:\n[{fid}] The user prefers diagrams.')
+        self.assertEqual(parts[2], REMEMBER_GUIDANCE)
+        self.assertEqual(parts[3], 'Keep it concrete.')
+        self.assertTrue(parts[4].startswith('Cite web sources'))
+        self.assertTrue(parts[5].startswith("Today's date: "))
+        self.assertEqual(len(parts), 6)
         await self.request('DELETE', f'/api/memory/{fid}')
         view = await self.request('GET', f'/api/conversations/{cid}')
         reply = view['messages'][-1]
@@ -562,9 +581,9 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         first = await self.create()
         await self.settled(first['turn_id'])
         prompt = self.generations()[0]['messages']
-        self.assertEqual(prompt[0]['content'], DEFAULT_PERSONA_PROMPT)
-        self.assertEqual(prompt[1]['content'], REMEMBER_GUIDANCE)
-        self.assertNotIn('Memory facts:', prompt[1]['content'])
+        self.assertEqual(prompt[0]['content'].index(REMEMBER_GUIDANCE), len(DEFAULT_PERSONA_PROMPT) + 2)
+        self.assertTrue(prompt[0]['content'].startswith(DEFAULT_PERSONA_PROMPT + '\n\n' + REMEMBER_GUIDANCE + '\n\nCite web sources'))
+        self.assertNotIn('Memory facts:', prompt[0]['content'])
         primary = self.app['servers'].get('primary')
         self.app['servers'].set_models('primary', {'models': [{**primary['models'][0], 'tools': False}], 'default_model': primary['default_model']})
         fact = self.store.save_memory('A durable preference.')
@@ -572,7 +591,8 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await self.settled(second['turn_id'])
         payload = self.generations()[-1]
         self.assertNotIn('tools', payload)
-        self.assertEqual(payload['messages'][1]['content'], f"Memory facts:\n[{fact['id']}] A durable preference.")
+        self.assertTrue(payload['messages'][0]['content'].startswith(
+            f"{DEFAULT_PERSONA_PROMPT}\n\nMemory facts:\n[{fact['id']}] A durable preference.\n\nCite web sources"))
         self.assertNotIn(REMEMBER_GUIDANCE, str(payload))
 
     async def test_empty_persona_prompt_adds_no_system_message(self):
@@ -580,9 +600,11 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await self.settled(first['turn_id'])
         turn = self.store.get_turn(first['turn_id'])
         runner = self.app['runner']
-        self.assertEqual(runner.prompt(turn)[0]['content'], DEFAULT_PERSONA_PROMPT)
+        self.assertTrue(runner.prompt(turn)[0]['content'].startswith(DEFAULT_PERSONA_PROMPT))
         blank = SimpleNamespace(**{**vars(turn), 'persona': {'name': 'Blank', 'prompt': ''}})
-        self.assertNotIn('', [m['content'] for m in runner.prompt(blank) if m['role'] == 'system'])
+        system = runner.prompt(blank)[0]['content']
+        self.assertTrue(system.startswith(REMEMBER_GUIDANCE))
+        self.assertFalse(system.startswith('\n'))
 
     async def test_regenerate_clears_persona_and_memory_snapshot_while_queued(self):
         self.store.save_memory('A durable preference.')
@@ -668,7 +690,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.get_conversation(first['session_id']).persona_id)
         turn = self.store.get_turn(first['turn_id'])
         self.assertEqual(turn.persona['name'], 'Builder')
-        self.assertEqual(self.generations()[0]['messages'][0]['content'], 'You build carefully.')
+        self.assertTrue(self.generations()[0]['messages'][0]['content'].startswith('You build carefully.\n\n'))
         self.assertEqual((await self.request('GET', '/api/settings'))['agent'], 'Builder')
         await self.request('DELETE', f"/api/personas/{persona['id']}", status=400)
 
@@ -850,3 +872,295 @@ class RecoveryAndSearchTests(unittest.IsolatedAsyncioTestCase):
             for value in (None, True, 0, -1, '4096', 1.5, 100000001):
                 with self.subTest(value=value), self.assertRaises(ServerError):
                     servers.set_models('primary', {'models': [{**model, 'context_tokens': value}], 'default_model': model['id']})
+
+
+class CompactionTests(unittest.IsolatedAsyncioTestCase):
+    """Long-chat compaction through the real runner, store and loopback provider."""
+
+    async def asyncSetUp(self):
+        await NativeTests.asyncSetUp(self)
+        self.fake.delay = 0
+        self.fake.completion['choices'][0]['message']['content'] = 'Synthetic running summary.'
+        self.set_context(400)
+
+    asyncTearDown = NativeTests.asyncTearDown
+    web_fixture = NativeTests.web_fixture
+    request, create, send, settled, generations, control = (NativeTests.request, NativeTests.create, NativeTests.send,
+                                                             NativeTests.settled, NativeTests.generations, NativeTests.control)
+
+    def set_context(self, tokens):
+        primary = self.app['servers'].get('primary')
+        model = {key: value for key, value in primary['models'][0].items() if key != 'context_tokens'}
+        if tokens:
+            model['context_tokens'] = tokens
+        self.app['servers'].set_models('primary', {'models': [model], 'default_model': 'example-model'})
+
+    def seed(self, count, *, prompt_tokens=300, width=90):
+        """Settled earlier turns, written straight to the store so nothing is queued or generated."""
+        cid = self.store.create_conversation(model='example-model').id
+        self.extend(cid, count, prompt_tokens=prompt_tokens, width=width)
+        return cid
+
+    def extend(self, cid, count, *, prompt_tokens=300, width=90, label='q'):
+        start = len(self.store.list_turns(cid))
+        for number in range(start + 1, start + count + 1):
+            accepted = self.store.accept_turn(cid, f'seed-{cid}-{number}', f'{label}{number} ' + 'u' * width, model='example-model')
+            self.store.set_turn_state(accepted.turn_id, 'running')
+            self.store.checkpoint_assistant(accepted.turn_id, f'a{number} ' + 'r' * width)
+            self.store.finish(accepted.turn_id, {'usage': {'prompt_tokens': prompt_tokens}})
+
+    def summary_requests(self):
+        return [r[2] for r in self.fake.requests if r[2] and not r[2]['stream'] and r[2].get('max_tokens') == 2000]
+
+    async def run_turn(self, cid, text='Next'):
+        sent = await self.send(cid, text)
+        await self.settled(sent['turn_id'])
+        return sent['turn_id']
+
+    async def test_threshold_compacts_and_lays_out_the_prompt_with_the_summary(self):
+        cid = self.seed(6)
+        tid = await self.run_turn(cid)
+        turn = self.store.get_turn(tid)
+        self.assertEqual(turn.state, 'completed')
+        summaries = self.store.summaries(cid)
+        self.assertEqual([(s['through_ordinal'], s['text']) for s in summaries], [(4, 'Synthetic running summary.')])
+        self.assertEqual(turn.summary_id, summaries[0]['id'])
+        request = self.summary_requests()[0]
+        self.assertEqual(request['max_tokens'], 2000)
+        self.assertFalse(request['chat_template_kwargs']['enable_thinking'])
+        self.assertNotIn('tools', request)
+        self.assertNotIn('temperature', request)
+        self.assertIn('q1 ', request['messages'][1]['content'])
+        self.assertNotIn('q5 ', request['messages'][1]['content'])
+        messages = self.generations()[0]['messages']
+        self.assertEqual([m['role'] for m in messages].count('system'), 1)
+        self.assertTrue(messages[0]['content'].startswith(DEFAULT_PERSONA_PROMPT))
+        self.assertTrue(messages[0]['content'].endswith('\n\nSummary of the earlier conversation:\nSynthetic running summary.'))
+        self.assertLess(messages[0]['content'].index("Today's date: "), messages[0]['content'].index('Summary of the earlier'))
+        tail = [(m['role'], m['content'][:2]) for m in messages[1:]]
+        self.assertEqual(tail, [('user', 'q5'), ('assistant', 'a5'), ('user', 'q6'), ('assistant', 'a6'), ('user', 'Ne')])
+        trace = (await self.request('GET', f'/api/conversations/{cid}'))['messages'][-1]['trace']
+        self.assertEqual(trace[0], {'kind': 'tool', 'id': 'compaction-1', 'name': 'summarize', 'arguments': '{}',
+                                    'status': 'completed', 'result': 'Summarized 4 earlier turns.'})
+        view = await self.request('GET', f'/api/conversations/{cid}')
+        self.assertEqual(view['summaries'], summaries)
+        self.assertEqual(set(summaries[0]), {'id', 'through_ordinal', 'text', 'created_at'})
+        self.assertEqual(len(view['messages']), 14)
+        self.assertEqual(self.store.search('q1')[0]['conversation_id'], cid)
+        async with self.client.get(f'/api/conversations/{cid}/stream') as response:
+            event = json.loads((await response.content.readline())[6:])
+        self.assertEqual(event['summaries'], summaries)
+        self.assertEqual(event['trace'][0]['name'], 'summarize')
+
+    async def test_trigger_at_and_below_threshold_and_unknown_context(self):
+        # Threshold is 300 tokens of 400; the new message adds 1 (4 characters / 4).
+        below = self.seed(4, prompt_tokens=298)
+        await self.run_turn(below)
+        self.assertEqual(self.summary_requests(), [])
+        self.assertEqual(self.store.summaries(below), [])
+        at = self.seed(4, prompt_tokens=299)
+        await self.run_turn(at)
+        self.assertEqual(len(self.summary_requests()), 1)
+        self.assertEqual(len(self.store.summaries(at)), 1)
+        self.set_context(None)
+        unknown = self.seed(4, prompt_tokens=10 ** 6)
+        await self.run_turn(unknown)
+        self.assertEqual(len(self.summary_requests()), 1)
+        self.assertEqual(self.store.summaries(unknown), [])
+        # A last completed turn without a reported prompt size never triggers.
+        self.set_context(400)
+        silent = self.store.create_conversation().id
+        accepted = self.store.accept_turn(silent, 'silent', 'q ' + 'u' * 4000, model='example-model')
+        self.store.set_turn_state(accepted.turn_id, 'running')
+        self.store.finish(accepted.turn_id, {})
+        await self.run_turn(silent)
+        self.assertEqual(len(self.summary_requests()), 1)
+
+    async def test_kept_turns_never_fewer_than_two_and_size_bounds_the_rest(self):
+        from roost import compaction
+        self.assertEqual(compaction.split([100] * 6, 400), (4, 2))
+        self.assertEqual(compaction.split([10] * 6, 400), (0, 6))
+        self.assertEqual(compaction.split([10] * 11, 400), (1, 10))
+        self.assertEqual(compaction.split([500] * 3, 400), (1, 2))
+        self.assertEqual(compaction.split([1], 400), (0, 1))
+        self.assertEqual(compaction.split([100] * 6, 400, overflow=True), (5, 1))
+        # With only two settled turns there is nothing to fold, so a due trigger changes nothing.
+        cid = self.seed(2)
+        await self.run_turn(cid)
+        self.assertEqual((self.summary_requests(), self.store.summaries(cid)), ([], []))
+
+    async def test_second_summary_extends_the_first_without_the_old_history(self):
+        cid = self.seed(6)
+        await self.run_turn(cid)
+        self.fake.completion['choices'][0]['message']['content'] = 'Second synthetic summary.'
+        self.extend(cid, 4, label='n')
+        await self.run_turn(cid, 'Again')
+        first, second = self.summary_requests()
+        self.assertIn('Synthetic running summary.', second['messages'][1]['content'])
+        self.assertIn('Previous summary:', second['messages'][1]['content'])
+        for old in ('q1 ', 'q4 ', 'a3 '):
+            self.assertNotIn(old, second['messages'][1]['content'])
+        self.assertIn('Next', second['messages'][1]['content'])
+        self.assertEqual([s['through_ordinal'] for s in self.store.summaries(cid)], [4, 9])
+        self.assertEqual(self.store.get_turn(self.store.list_turns(cid)[-1].id).summary_id, self.store.summaries(cid)[-1]['id'])
+        final = self.generations()[-1]['messages']
+        self.assertEqual(final[0]['content'].count('Summary of the earlier'), 1)
+        self.assertNotIn('Synthetic running summary.', str(final))
+
+    async def test_overflow_retry_folds_in_chunks_that_fit_and_halves_when_a_chunk_overflows(self):
+        self.set_context(None)
+        cid = self.seed(8, prompt_tokens=10)
+        # The fake rejects any request over the cap, summary calls included, like a real server.
+        self.fake.max_chars = 1500
+        tid = await self.run_turn(cid)
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        self.assertEqual(len(self.generations()), 2)
+        retry = self.generations()[1]['messages']
+        self.assertIn('Summary of the earlier', retry[0]['content'])
+        self.assertEqual(sum(m['role'] == 'user' for m in retry), 2)
+        through = [s['through_ordinal'] for s in self.store.summaries(cid)]
+        self.assertEqual(through[-1], 7)
+        self.assertEqual(len(through), 1)
+        accepted = [r for r in self.summary_requests() if sum(len(m['content']) for m in r['messages']) <= 1500]
+        self.assertGreater(len(accepted), 1)
+        self.assertGreater(len(self.summary_requests()), len(accepted))
+        self.assertLessEqual(len(self.summary_requests()), 8)
+        self.assertIn('Previous summary:\nSynthetic running summary.', accepted[-1]['messages'][1]['content'])
+        trace = self.store.trace(tid)
+        self.assertEqual([(t['name'], t['status']) for t in trace if t.get('name') == 'summarize'], [('summarize', 'completed')])
+        self.assertEqual(trace[0]['result'], 'Summarized 7 earlier turns.')
+
+    async def test_overflow_that_persists_or_cannot_be_summarized_fails_clearly(self):
+        from roost.compaction import TOO_LONG
+        self.set_context(None)
+        cid = self.seed(4, prompt_tokens=10)
+        self.fake.max_chars = 10
+        tid = await self.run_turn(cid)
+        turn = self.store.get_turn(tid)
+        self.assertEqual((turn.state, turn.error), ('failed', TOO_LONG))
+        self.assertEqual(len(self.generations()), 1)
+        self.assertEqual(self.store.summaries(cid), [])
+        self.fake.max_chars = None
+        broken = self.seed(4, prompt_tokens=10)
+        self.fake.max_chars, self.fake.fail_summary = 10, True
+        turn = self.store.get_turn(await self.run_turn(broken))
+        self.assertEqual((turn.state, turn.error), ('failed', TOO_LONG))
+        self.assertEqual(self.store.summaries(broken), [])
+        self.assertEqual(self.store.trace(turn.id)[0]['status'], 'error')
+        single = self.seed(1, prompt_tokens=10)
+        self.fake.fail_summary = False
+        turn = self.store.get_turn(await self.run_turn(single))
+        self.assertEqual((turn.state, turn.error), ('failed', TOO_LONG))
+
+    async def test_overflow_after_a_tool_round_blames_the_web_results_not_the_summary(self):
+        from roost.compaction import TOOLS_TOO_LONG
+        self.set_context(None)
+        await self.web_fixture('web')
+        self.fake.max_chars = 1200
+        tid = await self.run_turn(self.seed(1, prompt_tokens=10), 'Search the web')
+        turn = self.store.get_turn(tid)
+        self.assertEqual((turn.state, turn.error), ('failed', TOOLS_TOO_LONG))
+        self.assertEqual(self.summary_requests(), [])
+
+    async def test_a_three_chunk_compaction_leaves_one_summary_row_that_the_prompt_uses(self):
+        cid = self.seed(5, width=170)  # Three folded turns of 85 tokens against a 100 token budget: three chunks.
+        with patch('roost.compaction.budget', return_value=100):
+            tid = await self.run_turn(cid)
+        self.assertGreaterEqual(len(self.summary_requests()), 3)
+        rows = self.store.summaries(cid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.store.get_turn(tid).summary_id, rows[0]['id'])
+        view = await self.request('GET', f'/api/conversations/{cid}')
+        self.assertEqual(view['summaries'], rows)
+        self.assertIn('Synthetic running summary.', self.generations()[0]['messages'][0]['content'])
+        self.assertEqual(self.store.trace(tid)[0]['status'], 'completed')
+
+    async def test_a_single_oversize_turn_is_cut_to_the_chunk_budget(self):
+        cid = self.seed(3, width=6000)
+        await self.run_turn(cid)
+        sent = self.summary_requests()[0]['messages'][1]['content']
+        self.assertIn('[…]', sent)
+        self.assertLess(len(sent), 1200)
+        self.assertEqual([s['through_ordinal'] for s in self.store.summaries(cid)], [1])
+
+    async def test_summary_calls_are_bounded_and_partial_progress_is_kept(self):
+        from roost import compaction
+        cid = self.seed(14, width=20)
+        with patch.object(compaction, 'MAX_CALLS', 1), patch.object(compaction, 'MIN_KEPT', 1), patch.object(compaction, 'budget', return_value=40):
+            tid = await self.run_turn(cid)
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        self.assertEqual(len(self.summary_requests()), 1)
+        through = self.store.summaries(cid)[0]['through_ordinal']
+        self.assertTrue(0 < through < 13)
+        prompt = self.generations()[0]['messages']
+        self.assertEqual(sum(m['role'] == 'user' for m in prompt), 14 - through + 1)
+
+    async def test_a_summary_cut_off_at_the_token_limit_is_a_failed_summary(self):
+        self.fake.completion['choices'][0]['finish_reason'] = 'length'
+        cid = self.seed(6)
+        tid = await self.run_turn(cid)
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        self.assertEqual(self.store.summaries(cid), [])
+        self.assertEqual(self.store.trace(tid)[0]['status'], 'error')
+
+    async def test_stream_sends_summaries_on_the_first_frame_and_only_when_they_change(self):
+        cid = self.seed(2)
+        self.store.db.execute("INSERT INTO summaries (conversation_id,through_ordinal,text,model,created_at) VALUES (?,?,?,?,?)",
+                              (cid, 1, 'Earlier.', 'example-model', 1))
+        self.fake.delay = .3
+        sent = await self.send(cid, 'Slow')
+        frames = []
+        async with self.client.get(f'/api/conversations/{cid}/stream') as response:
+            async with asyncio.timeout(10):
+                while True:
+                    line = await response.content.readline()
+                    if not line:
+                        break
+                    if line.startswith(b'data: '):
+                        frames.append(json.loads(line[6:]))
+                        if frames[-1]['done']:
+                            break
+        self.assertGreaterEqual(len(frames), 2)
+        self.assertEqual([s['text'] for s in frames[0]['summaries']], ['Earlier.'])
+        self.assertTrue(all('summaries' not in frame for frame in frames[1:]))
+
+    async def test_summary_failure_on_the_threshold_path_continues_without_compacting(self):
+        self.fake.fail_summary = True
+        cid = self.seed(6)
+        tid = await self.run_turn(cid)
+        turn = self.store.get_turn(tid)
+        self.assertEqual((turn.state, turn.error, turn.summary_id), ('completed', None, None))
+        self.assertEqual(self.store.summaries(cid), [])
+        messages = self.generations()[0]['messages']
+        self.assertEqual(sum(m['role'] == 'user' for m in messages), 7)
+        self.assertEqual(self.store.trace(tid)[0]['status'], 'error')
+        self.assertEqual(self.store.trace(tid)[0]['name'], 'summarize')
+
+    async def test_edit_and_regenerate_invalidate_covered_summaries_and_delete_removes_all(self):
+        cid = self.seed(6)
+        last = await self.run_turn(cid)
+        self.assertEqual(len(self.store.summaries(cid)), 1)
+        # Regenerating a turn after the folded range keeps the summary and snapshots it again.
+        await self.control(cid, 'regenerate', last)
+        await self.settled(last)
+        self.assertEqual(self.store.get_turn(last).summary_id, self.store.summaries(cid)[0]['id'])
+        edited = await self.control(cid, 'edit', last, text='Changed', request_id=str(uuid4()))
+        self.assertEqual(len(self.store.summaries(cid)), 1)
+        await self.settled(edited['turn_id'])
+        turns = self.store.list_turns(cid)
+        second = await self.control(cid, 'edit', turns[1].id, text='Rewritten', request_id=str(uuid4()))
+        await self.settled(second['turn_id'])
+        self.assertEqual(self.store.summaries(cid), [])
+        self.assertEqual((await self.request('GET', f'/api/conversations/{cid}'))['summaries'], [])
+        self.assertTrue(all(row[0] is None for row in self.store.db.execute('SELECT summary_id FROM turns')))
+        # An earlier-turn regenerate also drops a summary that folded it.
+        cid = self.seed(6)
+        await self.run_turn(cid)
+        accepted = self.store.list_turns(cid)[-1]
+        self.store.db.execute("INSERT INTO summaries (conversation_id,through_ordinal,text,model,created_at) VALUES (?,?,?,?,?)",
+                              (cid, accepted.ordinal, 'Covers the latest', 'example-model', 1))
+        self.store.regenerate(accepted.id)
+        self.assertEqual([s['through_ordinal'] for s in self.store.summaries(cid)], [4])
+        self.assertIsNone(self.store.get_turn(accepted.id).summary_id)
+        await self.request('DELETE', f'/api/conversations/{cid}', {'confirm': True})
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM summaries WHERE conversation_id=?', (cid,)).fetchone()[0], 0)

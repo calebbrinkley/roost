@@ -250,7 +250,7 @@ function signedOut(clearLink = true) {
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -1033,6 +1033,10 @@ function fillThoughts(body, items) {
       }
       body.append(tool); continue;
     }
+    if (item.name === "summarize") {
+      const label = item.status === "running" ? "Summarizing earlier messages…" : item.status === "completed" ? "Summarized earlier messages" : item.status === "error" ? "Couldn't summarize earlier messages" : "Summarizing earlier messages was interrupted";
+      const tool = el("div", "thought-tool"); tool.append(el("div", "tool-call tool-call-plain", label)); body.append(tool); continue;
+    }
     let argument = item.arguments;
     try { const args = JSON.parse(argument); argument = args.query ?? args.url ?? argument; } catch { /* Show malformed arguments literally. */ }
     const tool = el("div", "thought-tool");
@@ -1209,6 +1213,40 @@ function conversationView({ rows, sent, current, live, server }) {
            working: Boolean(live && !live.done) || Boolean(server.working) || unsaved };
 }
 
+// A quiet note where a summary takes over; tapping it (or "Read summary") opens the read-only sheet.
+function openSummary(summary) {
+  $("summary-text").textContent = summary.text || "";
+  const written = messageTime(summary.created_at);
+  $("summary-written").textContent = written ? `Written ${written}` : "";
+  $("summary-sheet").showModal(); $("summary-title").focus();
+}
+
+function summaryDivider(summary) {
+  const divider = el("div", "summary-divider");
+  divider.append(el("span", "summary-divider-text", "Earlier messages summarized"));
+  const read = el("button", "summary-read", "Read summary"); read.type = "button";
+  divider.append(read);
+  divider.addEventListener("click", () => openSummary(summary));
+  return divider;
+}
+
+function currentSummaries() {
+  const history = state.messageHistory;
+  return history?.id === state.current && Array.isArray(history.summaries) ? history.summaries : [];
+}
+
+// Each divider follows the last loaded message at or before its boundary; none when that history is not paged in.
+function summaryDividers(visible) {
+  const placed = new Map();
+  for (const summary of currentSummaries()) {
+    if (!summary || !Number.isFinite(summary.through_ordinal)) continue;
+    let after = null;
+    for (const row of visible) if (row.ordinal != null && row.ordinal <= summary.through_ordinal) after = row;
+    if (after) placed.set(after, [...(placed.get(after) || []), summary]);
+  }
+  return placed;
+}
+
 function renderMessages(rows) {
   const transcript = $("transcript");
   state.lastRows = rows;
@@ -1239,7 +1277,7 @@ function renderMessages(rows) {
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
-    state.messageHistory?.hasOlder, state.messageHistory?.loading,
+    state.messageHistory?.hasOlder, state.messageHistory?.loading, currentSummaries(),
     [...state.shownTimes], [...state.openThoughts], state.liveThoughtsOpen !== false, state.playing,
     state.approvals, state.reasoning, state.timeZone, agent(), dayKey(new Date())]);
   // Reconciliation above still runs on every poll; Markdown and DOM work only follow a view change.
@@ -1276,6 +1314,7 @@ function renderMessages(rows) {
     if (items.length) { thoughts.push(...items); thoughtsKey ??= String(row.id ?? `at ${index}`); }
     if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
   });
+  const dividers = summaryDividers(visible);
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
     if (thoughtsBefore.has(row)) transcript.append(thoughtsBlock(...thoughtsBefore.get(row)));
@@ -1329,6 +1368,7 @@ function renderMessages(rows) {
         renderMessages(rows);
       });
     }
+    for (const summary of dividers.get(row) || []) transcript.append(summaryDivider(summary));
     if (row === liveAfter) transcript.append(...liveNodes(live));
   }
   if (thoughts.length) transcript.append(thoughtsBlock(thoughts, thoughtsKey));
@@ -1406,6 +1446,7 @@ async function loadMessages(id = state.current) {
     if (history?.id !== id) history = state.messageHistory = { id, rows: [], loaded: false, loading: false };
     history.rows = history.loaded && (!isNative() || data.has_older) ? mergeMessages(history.rows, data.messages, isNative()) : data.messages;
     if (!history.loaded) history.hasOlder = data.has_older === true;
+    if (isNative()) history.summaries = Array.isArray(data.summaries) ? data.summaries : [];
     renderMessages(history.rows);
     messagePollDelay();
     if (!isNative()) loadApprovals(id);
@@ -1550,6 +1591,7 @@ function openStream(id) {
       }
       state.live = applyStreamFrame(null, data, id);
     }
+    if (isNative() && Array.isArray(data.summaries) && state.messageHistory?.id === id) state.messageHistory.summaries = data.summaries;
     if (state.live?.id !== id) return;
     state.stream.healthy = true; state.idleSince = null;
     state.live = applyStreamFrame(state.live, data, id);
@@ -3449,6 +3491,7 @@ $("sheet-rename-form").addEventListener("submit", renameConversation);
 $("sheet-instructions").addEventListener("click", openInstructions);
 $("remember-form").addEventListener("submit", saveRemember);
 $("remember-cancel").addEventListener("click", () => $("remember-sheet").close());
+$("summary-close").addEventListener("click", () => $("summary-sheet").close());
 $("sheet-instructions-form").addEventListener("submit", saveInstructions);
 $("sheet-export").addEventListener("click", () => setTimeout(() => $("conversation-sheet").close(), 0));
 $("chat-settings").addEventListener("click", () => {
