@@ -8,7 +8,7 @@ const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", searchResults: null, searchLoading: false, searchError: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
   conversation: () => ({ current: null, currentPersona: null, rememberSource: null, rememberBusy: false, model: null, noWeb: false, webForce: false, webAvailable: false, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
-                         composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
+                         composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(), attachments: [],
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
   turn: () => ({ turn: null, working: false, live: null, liveNodes: null, liveThoughtsOpen: undefined }),
@@ -17,7 +17,7 @@ const SLICES = {
   voice: () => ({ voiceDraft: false, voiceReply: null, playing: null }),
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
-  settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
+  settings: () => ({ settings: null, voiceSettings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
                      soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, fallback: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
                     push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
@@ -107,6 +107,8 @@ const ICONS = {
   info: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 11v6M12 7.5v.01" }]],
   persona: [["circle", { cx: 12, cy: 8, r: 4 }], ["path", { d: "M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" }]],
   memory: [["path", { d: "M6 3h12v18l-6-4.5L6 21z" }]],
+  paperclip: [["path", { d: "m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" }]],
+  mic: [["rect", { x: 9, y: 3, width: 6, height: 11, rx: 3 }], ["path", { d: "M5 11a7 7 0 0 0 14 0M12 18v3" }]],
 };
 
 function svgShapes(svg, shapes) {
@@ -215,7 +217,7 @@ async function api(path, options = {}) {
   try {
     const response = await fetch("/api" + path, {
       credentials: "same-origin",
-      headers: { "X-Roost-Request": "1", ...(options.body ? { "Content-Type": "application/json" } : {}) },
+      headers: { "X-Roost-Request": "1", ...(typeof options.body === "string" ? { "Content-Type": "application/json" } : {}) },
       ...options,
       signal,
     });
@@ -249,8 +251,8 @@ function signedOut(clearLink = true) {
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
   for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
-  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail", "attach-tray"]) $(id).replaceChildren();
+  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet", "summary-sheet", "attachment-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -400,7 +402,7 @@ async function refreshIdentity() {
 function isNative() { return state.backend === "native"; }
 
 function backendSurfaces(backend) {
-  return { jobs: true, soul: backend !== "native", voice: backend !== "native",
+  return { jobs: true, soul: backend !== "native", voice: true,
     approvals: backend !== "native", hermes: backend !== "native" };
 }
 
@@ -1175,7 +1177,7 @@ function withSentMessages(rows, sent, current) {
     }
   }
   return { sent: pending, savedAs, rows: [...rows, ...pending.filter((item) => item.id === current).map((item) => ({
-    role: "user", content: item.text, timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
+    role: "user", content: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}), timestamp: item.since / 1000, id: item.key, local_sent: !item.failed, local_failed: item.failed, local_pending: item.pending,
   }))] };
 }
 
@@ -1225,6 +1227,84 @@ function openSummary(summary) {
   $("summary-sheet").showModal(); $("summary-title").focus();
 }
 
+// Attachments (native only). The server reads a file and returns its text; only that text travels with the
+// message, and it stays readable from the message's chips. Chips use one shape for the composer, sent
+// messages and the edit form.
+const ATTACH_CAP_TOKENS = 30000, ATTACH_MAX_FILES = 10, ATTACH_MAX_BYTES = 20 * 1024 * 1024;
+
+function attachmentTokens(file) { return Math.ceil((file.chars || 0) / 4); }
+function attachmentTotal(list = state.attachments) { return Math.ceil(list.filter((file) => file.status === "ready").reduce((sum, file) => sum + file.chars, 0) / 4); }
+function attachmentsBlocked() { return state.attachments.some((file) => file.status === "loading") || attachmentTotal() > ATTACH_CAP_TOKENS; }
+
+function attachmentChip(file, { open, remove } = {}) {
+  const status = file.status || "ready";
+  const chip = el("span", "attach-chip" + (status === "ready" ? "" : " " + status));
+  const label = open ? el("button", "attach-chip-main") : el("span", "attach-chip-main");
+  if (open) { label.type = "button"; label.setAttribute("aria-label", `Read ${file.name}`); label.addEventListener("click", (event) => { event.stopPropagation(); open(file); }); }
+  label.append(status === "loading" ? el("span", "attach-spinner") : icon("paperclip"), el("span", "attach-chip-name", file.name));
+  if (status !== "error") label.append(el("small", "attach-chip-meta", status === "loading" ? "Reading…" : `~${attachmentTokens(file).toLocaleString()} tokens`));
+  chip.append(label);
+  if (remove) {
+    const button = el("button", "attach-chip-remove", "×");
+    button.type = "button"; button.setAttribute("aria-label", `Remove ${file.name}`);
+    button.addEventListener("click", (event) => { event.stopPropagation(); remove(file); });
+    chip.append(button);
+  }
+  if (status === "error") chip.append(el("small", "attach-chip-error", file.error));
+  return chip;
+}
+
+function attachmentChips(list, options) {
+  const row = el("div", "attach-chips");
+  for (const file of list) row.append(attachmentChip(file, options));
+  return row;
+}
+
+function openAttachment(file) {
+  $("attachment-title").textContent = file.name;
+  $("attachment-meta").textContent = `${file.kind === "pdf" ? "PDF" : "Text"} · ~${attachmentTokens(file).toLocaleString()} tokens`;
+  $("attachment-text").textContent = file.text || "";
+  $("attachment-sheet").showModal(); $("attachment-title").focus();
+}
+
+function drawAttachments() {
+  const list = state.attachments, tray = $("attach-tray"), total = attachmentTotal(), over = total > ATTACH_CAP_TOKENS;
+  show("attach-button", isNative());
+  $("attach-button").disabled = list.length >= ATTACH_MAX_FILES;
+  show("attach-tray", isNative() && list.length > 0);
+  tray.replaceChildren();
+  if (isNative() && list.length) {
+    const removeFile = (file) => { state.attachments = state.attachments.filter((item) => item !== file); updateNativeComposer(); };
+    tray.append(attachmentChips(list, { open: (file) => file.status === "ready" && openAttachment(file), remove: removeFile }));
+    const near = total >= ATTACH_CAP_TOKENS * 0.8;
+    const note = el("p", "attach-total" + (over ? " over" : ""), over
+      ? `About ${total.toLocaleString()} tokens of files. The limit is ${ATTACH_CAP_TOKENS.toLocaleString()}. Remove one to send.`
+      : `About ${total.toLocaleString()} of ${ATTACH_CAP_TOKENS.toLocaleString()} tokens`);
+    note.setAttribute("role", "status");
+    if (near) tray.append(note);
+  }
+}
+
+async function attachFiles(files) {
+  if (!isNative()) return;
+  const scope = signInScope();
+  await Promise.all(files.map(async (file) => {
+    if (state.attachments.length >= ATTACH_MAX_FILES) { notice(`Attach at most ${ATTACH_MAX_FILES} files to a message.`); return; }
+    const entry = { name: file.name, status: "loading" };
+    state.attachments.push(entry); updateNativeComposer();
+    try {
+      if (file.size > ATTACH_MAX_BYTES) throw new Error("That file is larger than 20 MB.");
+      const form = new FormData(); form.append("file", file, file.name);
+      const data = await api("/attachments/extract", { method: "POST", body: form });
+      Object.assign(entry, { status: "ready", name: data.name, kind: data.kind, chars: data.chars, text: data.text });
+    } catch (error) {
+      if (!scope.alive()) return;
+      Object.assign(entry, { status: "error", error: error.message });
+    }
+    if (scope.alive() && state.attachments.includes(entry)) updateNativeComposer();
+  }));
+}
+
 function summaryDivider(summary) {
   const divider = el("div", "summary-divider");
   divider.append(el("span", "summary-divider-text", "Earlier messages summarized"));
@@ -1271,13 +1351,13 @@ function renderMessages(rows) {
   // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
   if (view.live && view.after != null) view.live.after = view.after;
   state.working = view.working;
-  if (!isNative()) readVoiceReply(view);
+  readVoiceReply(view);
   updateNativeComposer();
   renderContext();
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.timestamp, row.roost_usage, row.served_by, row.state, row.revision,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.attachments?.map((file) => file.name), row.timestamp, row.roost_usage, row.served_by, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -1325,7 +1405,10 @@ function renderMessages(rows) {
     const key = String(row.id ?? index), time = messageTime(row.timestamp);
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-agent"));
     const body = el("div", "message-body");
-    if (row.role === "user") addUserMessage(body, messageText(row), key);
+    if (row.role === "user") {
+      if (row.attachments?.length) body.append(attachmentChips(row.attachments, { open: openAttachment }));
+      addUserMessage(body, messageText(row), key);
+    }
     else addReply(body, messageText(row), isNative() ? row.sources || [] : []);
     if (isNative() && row.role === "assistant") wrapper.append(el("div", "persona-label", replyName(row)));
     wrapper.append(body);
@@ -1352,7 +1435,7 @@ function renderMessages(rows) {
       transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
-      if (!isNative() && row.id != null) under.append(playButton(row.id));
+      if (row.id != null) under.append(playButton(row.id));
       under.append(copyButton(messageText(row), "Copy reply"));
       if (isNative() && ["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
       if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
@@ -1402,7 +1485,7 @@ async function selectConversation(id, source) {
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
-  state.current = id; state.currentPersona = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = id; state.currentPersona = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null; state.attachments = [];
   restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -1740,7 +1823,7 @@ function newConversation() {
   if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   leaveLive();
-  state.current = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null; state.attachments = [];
   restoreComposer();
   state.draft = true;
   newDraftSeed();
@@ -1760,6 +1843,7 @@ async function submitMessage(event) {
   // Sending a voice draft is the tap that lets its reply play by itself later (Safari wants one).
   // Not the microphone tap: on iOS, audio starting while the microphone opens cuts the recording short.
   if (isNative() && !text && (runningTurn() || queuedTurn())) { await stopNativeReply(); return; }
+  if (text && attachmentsBlocked()) { notice(state.attachments.some((file) => file.status === "loading") ? "Wait for the files to finish reading." : "The attached files are over the limit. Remove one to send."); return; }
   if (text && state.voiceDraft) unlockPlayer();
   if (text) await sendText(text, { voice: Boolean(state.voiceDraft) });
 }
@@ -1893,6 +1977,8 @@ function acceptMessage(item, id, here) {
   });
 }
 
+function sentFiles(item) { return isNative() && item.attachments?.length ? { attachments: item.attachments.map(({ name, text }) => ({ name, text })) } : {}; }
+
 // Sends the composer or one failed row, without consuming a newer draft on Retry.
 async function sendText(text, { voice = false, retry = null } = {}) {
   if (state.busy) return;
@@ -1900,9 +1986,11 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
-    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined, reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
+    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined,
+    attachments: state.attachments.filter((file) => file.status === "ready").map(({ name, kind, chars, text }) => ({ name, kind, chars, text })), reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
   if (!retry) {
     state.webForce = false; updateWebToggle();
+    state.attachments = []; updateNativeComposer();
     state.voiceDraft = false; $("message").value = ""; saveComposer();
     $("composer").classList.remove("has-text");
   }
@@ -1913,8 +2001,8 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   let result, failure;
   try {
     result = oldId
-      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}) }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}) }) });
+      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}), ...sentFiles(item) }) })
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}), ...sentFiles(item) }) });
   } catch (error) { failure = error; }
   finally {
     if (scope.alive()) { state.busy = false; $("send").disabled = false; }
@@ -2330,15 +2418,16 @@ function stopNativeReply() {
 
 function updateNativeComposer() {
   updateWebToggle();
+  drawAttachments();
   if (!isNative()) return;
   const running = Boolean(runningTurn() || queuedTurn()), send = $("send");
   send.type = running ? "button" : "submit";
   send.textContent = running ? "Stop" : "↑";
   send.setAttribute("aria-label", running ? "Stop reply" : "Send message");
   send.classList.toggle("stopping", running);
-  send.disabled = state.busy || state.controlBusy;
+  send.disabled = state.busy || state.controlBusy || (!running && attachmentsBlocked());
   show("queue-send", running && Boolean($("message").value.trim()));
-  $("queue-send").disabled = state.busy;
+  $("queue-send").disabled = state.busy || attachmentsBlocked();
 }
 
 async function nativeControl(action, turnId, extra = {}) {
@@ -2377,6 +2466,14 @@ function appendTurnControls(under, row, rows, body) {
     const form = el("form", "inline-edit"), input = el("textarea");
     input.value = messageText(row); input.maxLength = 16000; input.required = true; input.rows = 4;
     input.setAttribute("aria-label", "Edit message");
+    const original = row.attachments || [];
+    let kept = [...original];
+    const files = el("div", "inline-edit-files");
+    const drawFiles = () => {
+      files.replaceChildren(); files.classList.toggle("hidden", !kept.length);
+      if (kept.length) files.append(attachmentChips(kept, { open: openAttachment, remove: file => { kept = kept.filter(item => item !== file); drawFiles(); } }));
+    };
+    drawFiles();
     const later = rows.some(next => next.turn_id !== row.turn_id && next.ordinal > row.ordinal);
     const warning = el("p", "sheet-note", later ? "Saving drops all later messages, including the queue." : "Saving sends this message again.");
     const actions = el("div", "settings-actions"), cancel = el("button", "secondary", "Cancel"), save = el("button", "primary", "Save and resend");
@@ -2386,9 +2483,9 @@ function appendTurnControls(under, row, rows, body) {
     form.addEventListener("submit", event => {
       event.preventDefault(); const text = input.value.trim(); if (!text) return;
       save.disabled = cancel.disabled = true;
-      nativeControl("edit", row.turn_id, {text, request_id: sendId()});
+      nativeControl("edit", row.turn_id, {text, request_id: sendId(), ...(kept.length !== original.length ? {attachments: kept.map(({name, text}) => ({name, text}))} : {})});
     });
-    actions.append(cancel, save); form.append(input, warning, actions); body.replaceChildren(form); input.focus();
+    actions.append(cancel, save); form.append(files, input, warning, actions); body.replaceChildren(form); input.focus();
   });
   if (controls.regenerate) button(row.state === "failed" ? "Retry" : "Regenerate", row.state === "failed" ? "Retry reply" : "Regenerate reply", () => nativeControl("regenerate", row.turn_id));
 }
@@ -2510,6 +2607,70 @@ function renderModelList(parent, server, role = "primary") {
   }
 }
 
+async function loadVoice() {
+  const scope = signInScope();
+  try {
+    const data = await api("/settings/voice");
+    if (scope.alive()) { state.voiceSettings = data; if (state.settingsGroup === "voice") renderSettings(); }
+  } catch (error) { report(error, scope); }
+}
+
+function renderVoice(detail) {
+  const section = settingsSection(detail, "Voice", "Connect an OpenAI-compatible speech server. Keys stay on the server.");
+  section.classList.add("voice-settings");
+  const saved = state.voiceSettings;
+  if (!saved) { section.append(el("p", "", "Loading voice settings…")); return; }
+  const server = el("select"); server.id = "settings-voice-server";
+  for (const [value, label] of [["model", "Same as the model server"], ["custom", "Custom speech server"]]) {
+    const option = el("option", "", label); option.value = value; server.append(option);
+  }
+  server.value = saved.same_as_model ? "model" : "custom";
+  modelField(section, "Speech server", server);
+  const custom = el("div", "model-fields"); section.append(custom);
+  const url = modelField(custom, "Speech base URL", modelInput(saved.base_url, "url"));
+  url.id = "settings-voice-url"; url.placeholder = "https://speech.example.com/v1";
+  const key = modelField(custom, "API key", modelInput("", "password"));
+  key.id = "settings-voice-key"; key.autocomplete = "new-password";
+  key.placeholder = saved.has_key ? "Key saved; leave empty to keep it" : "Optional API key";
+  const clearLabel = el("label", "voice-key-clear", "Clear saved key"), clear = modelInput("", "checkbox");
+  clear.id = "settings-voice-clear-key"; clearLabel.append(clear); custom.append(clearLabel);
+  const visibility = () => { custom.hidden = server.value !== "custom"; };
+  server.addEventListener("change", visibility); visibility();
+  const fields = {};
+  for (const [name, label] of [["transcription_model", "Transcription model"], ["speech_model", "Speech model"], ["voice", "Voice"]]) {
+    fields[name] = modelField(section, label, modelInput(saved[name]));
+    fields[name].id = "settings-voice-" + name; fields[name].maxLength = 256;
+  }
+  const save = async () => {
+    const changes = {same_as_model: server.value === "model", base_url: url.value.trim(),
+      clear_key: clear.checked, ...Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value.trim()]))};
+    if (key.value) changes.key = key.value;
+    return withSettingsBusy(async (scope) => {
+      const data = await api("/settings/voice", {method: "PUT", body: JSON.stringify(changes)});
+      if (scope.alive()) state.voiceSettings = data;
+      notice("Voice settings saved.");
+    });
+  };
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("primary", "Save", save), settingsButton("secondary", "Test", async () => {
+    unlockPlayer();
+    if (!await save()) return;
+    const scope = signInScope();
+    try {
+      const response = await fetch("/api/settings/voice/test", {method: "POST", headers: {"Content-Type": "application/json", "X-Roost-Request": "1"}, body: "{}"});
+      if (!response.ok) throw new Error((await response.json()).error || "Couldn’t test speech.");
+      const audio = await response.blob();
+      if (!scope.alive()) return;
+      const clip = URL.createObjectURL(audio), player = audioPlayer();
+      player.src = clip;
+      player.addEventListener("ended", () => URL.revokeObjectURL(clip), {once: true});
+      player.addEventListener("error", () => URL.revokeObjectURL(clip), {once: true});
+      try { await player.play(); } catch (error) { URL.revokeObjectURL(clip); throw error; }
+    } catch (error) { report(error, scope); }
+  }));
+  section.append(actions);
+}
+
 function renderWebSearch(detail) {
   const section = settingsSection(detail, "Web search", "Connect SearXNG to let models search. Leave the URL empty to turn web tools off.");
   const url = modelField(section, "SearXNG base URL", modelInput(state.settings.search_url || "", "url"));
@@ -2618,13 +2779,13 @@ function renderServer(detail, role) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ...(isNative() ? [["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", "Delete conversations or jobs"],
+          ["models", "Models", "Backend and model server"], ...(isNative() ? [["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", "Delete conversations or jobs"],
           ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
-const SETTINGS_ICONS = { personas: "persona", memory: "memory", web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+const SETTINGS_ICONS = { voice: "mic", personas: "persona", memory: "memory", web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
   const scope = signInScope();
@@ -2635,6 +2796,7 @@ async function loadSettings() {
     state.settings = data;
     applyServerSettings(data);
     renderSettings();
+    if (isNative() && state.settingsGroup === "voice") await loadVoice();
     if (isNative() && state.settingsGroup === "personas") { await loadPersonas(); renderSettings(); }
     if (isNative() && state.settingsGroup === "memory") { await loadMemory(); renderSettings(); }
   } catch (error) { report(error, scope); }
@@ -2648,6 +2810,7 @@ function selectSettingsGroup(id) {
   renderSettings();
   $("settings-detail").scrollTop = 0;
   if (id === "models") loadPrimary();
+  if (id === "voice") loadVoice();
   if (id === "personas") loadPersonas().then(renderSettings).catch(error => notice(error.message));
   if (id === "memory") loadMemory().then(renderSettings).catch(error => notice(error.message));
   if (id === "agent" && !isNative()) loadSoul();
@@ -2676,7 +2839,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ voice: renderVoice, personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -3552,6 +3715,13 @@ $("transcript").addEventListener("scroll", () => {
   if ($("transcript").scrollTop <= 0) loadEarlierMessages();
 }, { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
+$("attach-button").append(icon("paperclip"));
+$("attach-button").addEventListener("click", () => $("attach-input").click());
+$("attach-input").addEventListener("change", () => {
+  const files = [...$("attach-input").files]; $("attach-input").value = "";
+  attachFiles(files);
+});
+$("attachment-close").addEventListener("click", () => $("attachment-sheet").close());
 $("web-toggle").append(icon("globe"));
 $("web-toggle").addEventListener("click", () => { state.webForce = !state.webForce; updateWebToggle(); });
 $("sheet-model").addEventListener("change", updateSheetThinking);
@@ -3659,6 +3829,7 @@ async function startRecording() {
     recorder.start(); take.phase = "recording"; take.started = Date.now();
     const tick = () => {
       const seconds = Math.floor((Date.now() - take.started) / 1000);
+      if (isNative() && seconds >= 120) { stopRecording(false); return; }
       recordingUI(`Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · tap the mic to stop`);
     };
     tick(); take.timer = setInterval(tick, 500);
@@ -3695,6 +3866,7 @@ function finishRecording(take) {
 
 async function sendRecording(recording, take) {
   try {
+    if (isNative() && recording.size > 25 * 1024 * 1024) throw new Error("Recordings are limited to 25 MB.");
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -3702,7 +3874,7 @@ async function sendRecording(recording, take) {
       reader.readAsDataURL(recording);
     });
     if (!currentTake(take)) return;
-    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type }) });
+    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type, ...(isNative() ? {duration_seconds: Math.min(120, (Date.now() - take.started) / 1000)} : {}) }) });
     if (!currentTake(take)) return;
     const text = String(data.transcript || "").trim();
     if (!text) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
@@ -3721,7 +3893,7 @@ function audioPlayer() {
     player.addEventListener("error", () => {
       if (!state.playing || !player.src.includes("/speech/")) return;
       state.playing = null; refreshPlayButtons();
-      notice("Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
+      notice(isNative() ? "Couldn’t read that aloud. Check Settings › Voice, or try again." : "Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
     });
   }
   return state.player;

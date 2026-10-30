@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -76,6 +76,12 @@ class Message:
     state: str
     created_at: float
     updated_at: float
+    attachments: list = field(default_factory=list)
+
+
+def _message(row) -> Message:
+    values = dict(row)  # a store migrated back below version 6 has no attachments column
+    return Message(**{**values, "attachments": json.loads(values.get("attachments", "[]"))})
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,16 @@ def _summaries_down(db):
     db.execute("DROP TABLE summaries")
 
 
+def _attachments_up(db):
+    db.execute("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+
+
+def _attachments_down(db):
+    if db.execute("SELECT 1 FROM messages WHERE attachments != '[]' LIMIT 1").fetchone():
+        raise StoreError("Cannot roll back message attachments. Preserve their data first.")
+    db.execute("ALTER TABLE messages DROP COLUMN attachments")
+
+
 def _jobs_up(db):
     db.execute("ALTER TABLE conversations ADD COLUMN job_run INTEGER NOT NULL DEFAULT 0 CHECK(job_run IN (0,1))")
     db.execute("ALTER TABLE memory_facts ADD COLUMN job_id TEXT")
@@ -284,7 +300,7 @@ def _jobs_down(db):
 
 
 MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down), (_personas_up, _personas_down),
-              (_summaries_up, _summaries_down), (_jobs_up, _jobs_down))
+              (_summaries_up, _summaries_down), (_attachments_up, _attachments_down), (_jobs_up, _jobs_down))
 
 
 class Store:
@@ -512,7 +528,7 @@ class Store:
         return self.db.execute("SELECT count(*) FROM conversations WHERE job_run=0").fetchone()[0]
 
     def messages_for_turn(self, turn_id: str) -> list[Message]:
-        return [Message(**dict(row)) for row in self.db.execute(
+        return [_message(row) for row in self.db.execute(
             "SELECT * FROM messages WHERE turn_id=? ORDER BY role DESC", (turn_id,))]
 
     def delete_conversation(self, conversation_id: str) -> None:
@@ -520,7 +536,7 @@ class Store:
             self.db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
 
     def accept_turn(self, conversation_id: str, request_id: str, content: str, *, model: str,
-                    settings: dict | None = None) -> Acceptance:
+                    settings: dict | None = None, attachments: list | None = None) -> Acceptance:
         """Atomically reserve a turn and its user/assistant pair; retries return the original IDs."""
         if (not isinstance(request_id, str) or not request_id or len(request_id) > 128
                 or not isinstance(content, str) or not content.strip() or len(content) > 200000
@@ -528,16 +544,17 @@ class Store:
                 or (settings is not None and not isinstance(settings, dict))):
             raise StoreError("Invalid turn payload.")
         with self._write():
-            return self._accept_turn(conversation_id, request_id, content, model=model, settings=settings)
+            return self._accept_turn(conversation_id, request_id, content, model=model, settings=settings, attachments=attachments)
 
-    def _accept_turn(self, conversation_id, request_id, content, *, model, settings):
+    def _accept_turn(self, conversation_id, request_id, content, *, model, settings, attachments=None):
         conversation = self.get_conversation(conversation_id)
         if not conversation:
             raise StoreError("Conversation does not exist.")
         snapshot = {"thinking": conversation.thinking, "instructions": conversation.instructions,
                     "no_web": conversation.no_web, "keep_local": conversation.keep_local, **(settings or {})}
         fingerprint = payload_fingerprint({"conversation_id": conversation_id, "content": content,
-                                           "model": model, "settings": snapshot})
+                                           "model": model, "settings": snapshot,
+                                           **({"attachments": attachments} if attachments else {})})
         previous = self.db.execute("SELECT id, fingerprint FROM turns WHERE request_id=?", (request_id,)).fetchone()
         if previous:
             if previous["fingerprint"] != fingerprint:
@@ -548,8 +565,10 @@ class Store:
         self.db.execute("INSERT INTO turns (id,conversation_id,ordinal,request_id,fingerprint,state,model,settings,revision,error,created_at,updated_at) VALUES (?,?,?,?,?,'queued',?,?,0,NULL,?,?)",
                         (tid, conversation_id, ordinal, request_id, fingerprint, model, _json(snapshot), now, now))
         for role, text, state in (("user", content, "completed"), ("assistant", "", "queued")):
-            self.db.execute("INSERT INTO messages (conversation_id,turn_id,role,content,reasoning,state,created_at,updated_at) VALUES (?,?,?,?,'',?,?,?)",
-                            (conversation_id, tid, role, text, state, now, now))
+            message = self.db.execute("INSERT INTO messages (conversation_id,turn_id,role,content,reasoning,state,created_at,updated_at) VALUES (?,?,?,?,'',?,?,?)",
+                                      (conversation_id, tid, role, text, state, now, now)).lastrowid
+            if attachments and role == "user":
+                self.db.execute("UPDATE messages SET attachments=? WHERE id=?", (json.dumps(attachments, ensure_ascii=False), message))
         self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
         return self._acceptance(tid)
 
@@ -567,12 +586,12 @@ class Store:
 
     def get_message(self, message_id: int) -> Message | None:
         row = self.db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
-        return Message(**dict(row)) if row else None
+        return _message(row) if row else None
 
     def list_messages(self, conversation_id: str, *, after: int = 0, limit: int = 500) -> list[Message]:
         if after < 0 or not 1 <= limit <= 500:
             raise StoreError("Invalid message page.")
-        return [Message(**dict(row)) for row in self.db.execute(
+        return [_message(row) for row in self.db.execute(
             """SELECT messages.* FROM messages JOIN turns ON turns.id=messages.turn_id
             WHERE messages.conversation_id=? AND messages.id>? ORDER BY turns.ordinal, messages.role DESC LIMIT ?""", (conversation_id, after, limit))]
 
@@ -701,7 +720,7 @@ class Store:
         return trace
 
     def submit(self, request_id: str, content: str, *, conversation_id: str | None,
-               model: str, changes: dict, snapshot: dict, identity: dict) -> Acceptance:
+               model: str, changes: dict, snapshot: dict, identity: dict, attachments: list | None = None) -> Acceptance:
         """Accept a browser request, including first-chat creation, in one durable transaction."""
         with self._write():
             previous = self.request(request_id, identity)
@@ -714,7 +733,7 @@ class Store:
                                  changes.get('thinking', 'off'), changes.get('instructions', ''), changes.get('no_web', False), now, now))
                 conversation_id = cid
             return self._accept_turn(conversation_id, request_id, content, model=model,
-                                     settings={**snapshot, '_request': identity})
+                                     settings={**snapshot, '_request': identity}, attachments=attachments)
 
     def request(self, request_id: str, identity: dict) -> Acceptance | None:
         row = self.db.execute("SELECT id,settings FROM turns WHERE request_id=?", (request_id,)).fetchone()
@@ -791,15 +810,19 @@ class Store:
             for ordinal, item in enumerate(queued, floor + 1):
                 self.db.execute("UPDATE turns SET ordinal=?,revision=revision+1 WHERE id=?", (ordinal, item.id))
 
-    def edit_resend(self, tid: str, request_id: str, text: str, *, model: str, snapshot: dict, identity: dict) -> Acceptance:
+    def edit_resend(self, tid: str, request_id: str, text: str, *, model: str, snapshot: dict, identity: dict,
+                    attachments: list | None = None) -> Acceptance:
+        """Replace the turn and everything after it; the original attachments stay unless a list replaces them."""
         with self._write():
             turn = self._current(tid, None)
             if turn.state not in TERMINAL:
                 raise StoreError("Only settled messages can be edited.")
+            if attachments is None:
+                attachments = self.messages_for_turn(tid)[0].attachments
             self.db.execute("DELETE FROM turns WHERE conversation_id=? AND ordinal>=?", (turn.conversation_id, turn.ordinal))
             self.db.execute("DELETE FROM summaries WHERE conversation_id=? AND through_ordinal>=?", (turn.conversation_id, turn.ordinal))
             return self._accept_turn(turn.conversation_id, request_id, text, model=model,
-                                     settings={**snapshot, '_request': identity})
+                                     settings={**snapshot, '_request': identity}, attachments=attachments)
 
     def regenerate(self, tid: str) -> None:
         with self._write():
@@ -823,7 +846,7 @@ class Store:
         rows = self.db.execute("""SELECT messages.* FROM messages JOIN turns ON turns.id=messages.turn_id
             WHERE messages.conversation_id=? AND (? IS NULL OR turns.ordinal<? OR (turns.ordinal=? AND messages.role>?))
             ORDER BY turns.ordinal DESC,messages.role ASC LIMIT ?""", (cid, position, position, position, cursor.role if cursor else '', limit + 1)).fetchall()
-        return [Message(**dict(row)) for row in reversed(rows[:limit])], len(rows) > limit
+        return [_message(row) for row in reversed(rows[:limit])], len(rows) > limit
 
     def search(self, query: str) -> list[dict]:
         if not isinstance(query, str) or not query.strip() or len(query) > 200 or "\0" in query:

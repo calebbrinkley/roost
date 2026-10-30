@@ -565,6 +565,49 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   #sheet-persona, #remember-sheet button, #sheet-instructions-form .check-row { min-height: 44px; min-width: 44px; }
 }
 
+/* Attachments (native): one chip shape in the composer tray, sent messages and the edit form. */
+.attach-button { flex-shrink: 0; align-self: flex-end; border: 0; background: none; color: var(--muted); padding: 8px 4px; cursor: pointer; }
+.attach-button svg { display: block; width: 20px; height: 20px; }
+.attach-button:disabled { opacity: .4; cursor: default; }
+.attach-tray { max-height: 32vh; overflow-y: auto; padding: 10px max(24px, calc((100% - 832px) / 2)) 0; border-top: 1px solid var(--line); }
+.attach-tray:not(.hidden) + .composer { border-top: 0; padding-top: 8px; }
+.attach-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.attach-chip { display: inline-flex; flex-wrap: wrap; align-items: center; max-width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--chip); color: var(--ink); font-size: calc(13px * var(--text-scale)); line-height: 1.3; }
+.attach-chip-main { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; min-height: 32px; padding: 4px 8px 4px 10px; border: 0; border-radius: 14px; background: none; color: inherit; font: inherit; text-align: left; }
+button.attach-chip-main { cursor: pointer; }
+button.attach-chip-main:focus-visible, .attach-chip-remove:focus-visible, .attach-button:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.attach-chip svg { flex: 0 0 14px; width: 14px; height: 14px; }
+.attach-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.attach-chip-meta { flex: none; color: var(--muted); font-size: .9em; white-space: nowrap; }
+.attach-chip-remove { flex: none; min-width: 32px; min-height: 32px; border: 0; border-radius: 14px; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.attach-chip-error { flex: 1 0 100%; padding: 0 10px 6px; color: var(--danger); }
+.attach-chip.error { border-color: var(--danger); }
+.attach-chip.error .attach-chip-main svg { color: var(--danger); }
+.attach-spinner { flex: 0 0 14px; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent-text); border-radius: 50%; animation: spin .8s linear infinite; }
+.attach-total { flex: 1 0 100%; margin: 6px 0 0; color: var(--muted); font-size: calc(12px * var(--text-scale)); }
+.attach-total.over { color: var(--danger); font-weight: 600; }
+.message-body .attach-chips { margin-bottom: 7px; }
+.from-you .message-body .attach-chip { border-color: color-mix(in srgb, var(--accent-ink) 35%, transparent); background: color-mix(in srgb, var(--accent-ink) 16%, transparent); color: var(--accent-ink); }
+.from-you .message-body .attach-chip-meta, .from-you .message-body .attach-chip-remove { color: inherit; opacity: .8; }
+.inline-edit-files { margin-bottom: 8px; }
+.inline-edit-files .attach-chip { background: var(--chip); color: var(--ink); }
+#attachment-text { font-family: var(--mono); font-size: calc(13px * var(--text-scale)); }
+@media (max-width: 700px) { .attach-tray { padding: 8px 12px 0; } }
+@media (pointer: coarse) {
+  .attach-button { min-width: 44px; min-height: 44px; }
+  .attach-chip-main, .attach-chip-remove { min-height: 44px; }
+  .attach-chip-remove { min-width: 44px; }
+  #attachment-sheet button { min-height: 44px; min-width: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .attach-spinner { animation: none; } }
+.voice-settings [hidden] { display: none; }
+.voice-settings .voice-key-clear { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.voice-settings .voice-key-clear input { flex: none; width: 20px; height: 20px; min-width: 0; min-height: 0; margin: 0; }
+/* The label row is the touch target; the box itself stays checkbox-sized. */
+@media (pointer: coarse) { .voice-settings .voice-key-clear { min-height: 44px; } }
+@media (pointer: coarse) {
+  .voice-settings input, .voice-settings select, .voice-settings button { min-height: 44px; min-width: 44px; }
+}
 .job-dialog select { width: 100%; min-height: 44px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; }
 .job-interval { display: flex; gap: 12px; }
 .job-interval > * { min-width: 0; flex: 1; }
