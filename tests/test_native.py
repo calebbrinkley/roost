@@ -27,6 +27,10 @@ async def wait_for(predicate, timeout=5):
             await asyncio.sleep(.01)
 
 
+def without_clock(messages):
+    return [m for m in messages if not (m['role'] == 'system' and m['content'].startswith('Current date and time:'))]
+
+
 class NativeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -81,7 +85,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         second = await self.send(cid, 'Second')
         await self.settled(second['turn_id'])
         streamed = [entry[2] for entry in self.fake.requests if entry[2] and entry[2]['stream']]
-        self.assertEqual([r['messages'] for r in streamed], [
+        self.assertEqual([without_clock(r['messages']) for r in streamed], [
             [{'role': 'system', 'content': 'Be brief.'}, {'role': 'user', 'content': 'First'}],
             [{'role': 'system', 'content': 'Be brief.'}, {'role': 'user', 'content': 'First'},
              {'role': 'assistant', 'content': 'Hello'}, {'role': 'user', 'content': 'Second'}]])
@@ -199,7 +203,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         second = await self.send(cid, 'Second')
         await self.settled(second['turn_id'])
         payloads = [r[2] for r in self.fake.requests if r[2] and r[2]['stream']]
-        self.assertEqual(payloads[-1]['messages'], [{'role': 'user', 'content': 'First'},
+        self.assertEqual(without_clock(payloads[-1]['messages']), [{'role': 'user', 'content': 'First'},
                                                  {'role': 'user', 'content': 'Second'}])
 
     async def test_idempotent_retry_and_conflict_even_after_settings_change(self):
@@ -309,6 +313,212 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         message = self.app['push'].send.call_args.args[1]
         self.assertEqual(message['tag'], 'reply-' + second['turn_id'])
 
+    async def web_fixture(self, scenario='web'):
+        from web_fake import WebFake
+        fake = await WebFake().start()
+        self.addAsyncCleanup(fake.close)
+        self.enterContext(patch('roost.runner.WebTools', side_effect=fake.tools))
+        await self.request('PATCH', '/api/settings', {'search_url': fake.url})
+        self.fake.scenario = scenario
+        self.fake.delay = 0
+        return fake
+
+    def generations(self):
+        return [r[2] for r in self.fake.requests if r[2] and r[2]['stream']]
+
+    async def test_web_search_read_answer_fragmented_protocol_and_reload(self):
+        await self.web_fixture()
+        first = await self.create('Search for an example', reasoning='high')
+        tid, cid = first['turn_id'], first['session_id']
+        await self.settled(tid)
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        calls = self.generations()
+        self.assertEqual(len(calls), 3)
+        assistant = calls[1]['messages'][-2]
+        self.assertEqual(assistant['tool_calls'][0]['function'], {'name': 'web_search', 'arguments': '{"query": "example question"}'})
+        self.assertEqual(assistant['reasoning_content'], 'I will check a source.')
+        self.assertEqual(calls[1]['messages'][-1]['tool_call_id'], assistant['tool_calls'][0]['id'])
+        search = json.loads(calls[1]['messages'][-1]['content'])
+        page = json.loads(calls[2]['messages'][-1]['content'])
+        self.assertEqual([source['n'] for source in search['results']], [1, 1, 2])
+        self.assertEqual(page['n'], 1)
+        self.assertTrue(search['untrusted_data'] and page['untrusted_data'])
+        view = await self.request('GET', f'/api/conversations/{cid}')
+        reply = view['messages'][-1]
+        self.assertEqual(reply['content'], 'A useful answer [1].')
+        self.assertEqual([item['kind'] for item in reply['trace']], ['reasoning', 'tool', 'reasoning', 'tool', 'reasoning'])
+        self.assertEqual([item['status'] for item in reply['trace'] if item['kind'] == 'tool'], ['completed', 'completed'])
+        self.assertTrue(all(len(item.get('result', '')) <= 16000 for item in reply['trace']))
+        reloaded = Store(self.state / 'native.sqlite3')
+        try:
+            self.assertEqual(reloaded.sources(tid), reply['sources'])
+            self.assertEqual(reloaded.trace(tid), reply['trace'])
+        finally:
+            reloaded.close()
+        async with self.client.get(f'/api/conversations/{cid}/stream') as response:
+            snapshot = json.loads((await response.content.readline())[6:])
+        self.assertTrue(snapshot['reset'])
+        self.assertEqual(snapshot['sources'], reply['sources'])
+        self.assertEqual(snapshot['trace'], reply['trace'])
+        self.fake.scenario = None
+        second = await self.send(cid, 'Follow up')
+        await self.settled(second['turn_id'])
+        history = self.generations()[-1]['messages']
+        self.assertTrue(all(m['role'] != 'tool' and 'tool_calls' not in m and 'reasoning_content' not in m for m in history))
+        self.assertIn({'role': 'assistant', 'content': 'A useful answer [1].'}, history)
+
+    async def test_unknown_tool_bad_json_and_bad_argument_types_return_errors(self):
+        await self.web_fixture('invalid')
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        results = [s for s in self.store.list_steps(first['turn_id']) if s.kind == 'tool_result']
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all('error' in json.loads(s.payload['content']) for s in results))
+        self.assertTrue(all(s.payload['status'] == 'error' for s in results))
+
+    async def test_three_tool_round_cap_and_stable_sources(self):
+        await self.web_fixture('cap')
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        calls = self.generations()
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all('tools' in call for call in calls[:3]))
+        self.assertNotIn('tools', calls[3])
+        self.assertEqual([s['n'] for s in self.store.sources(first['turn_id'])], [1, 2])
+        self.assertEqual(len([s for s in self.store.list_steps(first['turn_id']) if s.kind == 'assistant_call']), 3)
+
+    async def test_force_search_rejection_fallback_and_regenerate_snapshot(self):
+        await self.web_fixture()
+        self.fake.reject_tool_choice = True
+        first = await self.create(web='force')
+        await self.settled(first['turn_id'])
+        calls = self.generations()
+        self.assertEqual(calls[0]['tool_choice'], {'type': 'function', 'function': {'name': 'web_search'}})
+        self.assertNotIn('tool_choice', calls[1])
+        self.assertIn('Search the web first', calls[1]['messages'][-1]['content'])
+        searches = [item for item in self.store.trace(first['turn_id']) if item.get('name') == 'web_search']
+        self.assertEqual(len(searches), 1)
+        self.assertEqual(json.loads(searches[0]['arguments']), {'query': 'example question'})
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        before = len(calls)
+        await self.request('PATCH', '/api/settings', {'search_url': ''})
+        await self.request('PUT', f"/api/conversations/{first['session_id']}/settings", {'no_web': True})
+        await self.control(first['session_id'], 'regenerate', first['turn_id'])
+        await self.settled(first['turn_id'])
+        self.assertIn('tool_choice', self.generations()[before])
+        self.assertTrue(self.store.get_turn(first['turn_id']).settings['tools_offered'])
+        self.assertEqual([s['n'] for s in self.store.sources(first['turn_id'])], [1, 2])
+
+    async def test_force_search_rejection_runs_synthetic_search_for_plain_answer(self):
+        web = await self.web_fixture(None)
+        self.fake.reject_tool_choice = True
+        first = await self.create('  ' + 'query ' * 500 + '  ', web='force')
+        tid = first['turn_id']
+        await self.settled(tid)
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        self.assertEqual([path for path, _ in web.requests], ['/search'])
+        calls = self.generations()
+        self.assertEqual(len(calls), 3)
+        assistant, result = calls[2]['messages'][-2:]
+        call = assistant['tool_calls'][0]
+        self.assertEqual(call['function']['name'], 'web_search')
+        self.assertEqual(json.loads(call['function']['arguments']), {'query': ('query ' * 500).strip()[:2000]})
+        self.assertEqual(result['tool_call_id'], call['id'])
+        self.assertTrue(json.loads(result['content'])['results'])
+        self.assertEqual([s.kind for s in self.store.list_steps(tid) if s.kind != 'reasoning'],
+                         ['assistant_call', 'tool_result'])
+        tools = [item for item in self.store.trace(tid) if item['kind'] == 'tool']
+        self.assertEqual([(item['name'], item['status']) for item in tools], [('web_search', 'completed')])
+        self.assertEqual(self.store.messages_for_turn(tid)[-1].content, 'Hello')
+
+    async def test_equal_length_tool_prose_replacement_saves_reasoning_trace(self):
+        await self.web_fixture()
+        frames = [frame({'content': 'Checking..'}) + frame({'tool_calls': [{'index': 0, 'id': 'check', 'type': 'function',
+                  'function': {'name': 'web_search', 'arguments': '{"query":"example"}'}}]}, finish='tool_calls'),
+                  frame({'reasoning_content': 'Think'}) + frame({'content': 'Done.'}) + frame({}, finish='stop')]
+        with patch.object(self.fake, 'tool_frames', side_effect=frames):
+            first = await self.create()
+            await self.settled(first['turn_id'])
+        tid = first['turn_id']
+        self.assertEqual(self.store.get_turn(tid).state, 'completed')
+        reply = self.store.messages_for_turn(tid)[-1]
+        self.assertEqual((reply.content, reply.reasoning), ('Done.', 'Think'))
+        self.assertEqual(self.store.trace(tid)[-1], {'kind': 'reasoning', 'text': 'Think'})
+
+    async def test_force_search_and_disabled_availability_settings(self):
+        await self.web_fixture()
+        models = await self.request('GET', '/api/models')
+        self.assertTrue(models['web_available'] and models['models'][0]['tools'])
+        test = await self.request('POST', '/api/settings/web-search/test', {'query': 'example'})
+        self.assertEqual(len(test['results']), 3)
+        first = await self.create(web='force')
+        await self.settled(first['turn_id'])
+        self.assertIn('tool_choice', self.generations()[0])
+        cid = first['session_id']
+        await self.request('PUT', f'/api/conversations/{cid}/settings', {'no_web': 'yes'}, 400)
+        saved = await self.request('PUT', f'/api/conversations/{cid}/settings', {'no_web': True})
+        self.assertTrue(saved['no_web'])
+        second = await self.send(cid, 'No web here')
+        await self.settled(second['turn_id'])
+        self.assertNotIn('tools', self.generations()[-1])
+        await self.request('POST', f'/api/conversations/{cid}/messages', {'text': 'Forced', 'web': 'force'}, 400)
+        self.assertFalse(self.store.get_turn(second['turn_id']).settings['tools_offered'])
+        servers = self.app['servers']
+        primary = servers.get('primary')
+        await self.request('PUT', '/api/settings/servers/primary/models', {'models': [{**primary['models'][0], 'tools': False}], 'default_model': primary['default_model']})
+        third = await self.create()
+        await self.settled(third['turn_id'])
+        self.assertNotIn('tools', self.generations()[-1])
+        self.assertFalse(self.store.get_turn(third['turn_id']).settings['tools_offered'])
+        await self.request('POST', '/api/conversations', {'text': 'Forced', 'web': 'force'}, 400)
+        await self.request('PATCH', '/api/settings', {'search_url': ''})
+        self.assertFalse((await self.request('GET', '/api/models'))['web_available'])
+        await self.request('POST', '/api/settings/web-search/test', {'query': 'example'}, 400)
+
+    async def test_stop_send_now_delete_during_fetch_and_live_trace(self):
+        fake = await self.web_fixture()
+        fake.delay = .5
+        first = await self.create()
+        cid, tid = first['session_id'], first['turn_id']
+        await asyncio.wait_for(fake.started.wait(), 2)
+        async with self.client.get(f'/api/conversations/{cid}/stream') as response:
+            snapshot = json.loads((await response.content.readline())[6:])
+        self.assertEqual(snapshot['trace'][-1]['status'], 'running')
+        async with asyncio.timeout(.25):
+            await self.control(cid, 'stop', tid)
+        await wait_for(lambda: fake.transports[0].is_closing(), timeout=.25)
+        self.assertEqual(self.store.trace(tid)[-1]['status'], 'interrupted')
+        self.assertEqual(self.store.get_turn(tid).state, 'interrupted')
+        self.assertFalse(self.store.sources(tid))
+        fake.started.clear()
+        second = await self.send(cid, 'Search again')
+        await asyncio.wait_for(fake.started.wait(), 2)
+        third = await self.send(cid, 'Run next')
+        async with asyncio.timeout(.25):
+            await self.control(cid, 'send-now', third['turn_id'])
+        self.assertEqual(self.store.get_turn(second['turn_id']).state, 'interrupted')
+        await wait_for(lambda: self.store.get_turn(third['turn_id']).state == 'running')
+        async with asyncio.timeout(.25):
+            await self.request('DELETE', f'/api/conversations/{cid}', {'confirm': True})
+        await asyncio.sleep(.05)
+        self.assertIsNone(self.store.get_turn(third['turn_id']))
+        self.assertIsNone(self.store.get_conversation(cid))
+
+    async def test_total_tool_time_and_current_owner_time_zone(self):
+        fake = await self.web_fixture('cap')
+        fake.delay = .2
+        await self.request('PATCH', '/api/settings', {'time_zone': 'Etc/GMT+5'})
+        with patch('roost.runner.TOTAL_SECONDS', .02):
+            first = await self.create()
+            await self.settled(first['turn_id'])
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        self.assertEqual(len(self.generations()), 2)
+        self.assertNotIn('tools', self.generations()[-1])
+        self.assertIn('Total tool time', self.store.trace(first['turn_id'])[1]['result'])
+        clock = self.generations()[0]['messages'][0]['content']
+        self.assertIn('-05:00', clock)
+
 
 class RecoveryAndSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_tokens_per_second_excludes_prefill_and_requires_token_span(self):
@@ -360,7 +570,7 @@ class RecoveryAndSearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(store.get_turn(first.turn_id).state, 'interrupted')
                     self.assertEqual(store.get_message(first.assistant_message_id).content, 'Partial')
                     payload = fake.requests[0][2]
-                    self.assertEqual(payload['messages'], [{'role': 'user', 'content': 'First'},
+                    self.assertEqual(without_clock(payload['messages']), [{'role': 'user', 'content': 'First'},
                                      {'role': 'assistant', 'content': 'Partial'}, {'role': 'user', 'content': 'Second'}])
                     self.assertEqual(len([r for r in fake.requests if r[2] and r[2]['stream']]), 1)
                 finally:
@@ -405,6 +615,26 @@ class RecoveryAndSearchTests(unittest.IsolatedAsyncioTestCase):
                     store.migrate(1)
                 self.assertEqual(store.get_turn(accepted.turn_id).stats['usage']['prompt_tokens'], 3)
                 self.assertEqual(store.search('Hello')[0]['conversation_id'], c.id)
+            finally:
+                store.close()
+
+    async def test_sources_migration_refuses_data_loss_and_cascades(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'native.sqlite3')
+            try:
+                c = store.create_conversation()
+                accepted = store.accept_turn(c.id, 'source-test', 'Example', model='example-model')
+                tid = accepted.turn_id
+                self.assertEqual(store.add_source(tid, 'Example', 'https://example.org/page'), 1)
+                self.assertEqual(store.add_source(tid, 'Duplicate', 'https://example.org/page'), 1)
+                with self.assertRaises(StoreError):
+                    store.migrate(2)
+                self.assertEqual(store.sources(tid)[0]['n'], 1)
+                store.delete_conversation(c.id)
+                self.assertEqual(store.db.execute('SELECT count(*) FROM sources').fetchone()[0], 0)
+                store.migrate(2)
+                store.migrate()
+                self.assertEqual(store.sources(tid), [])
             finally:
                 store.close()
 

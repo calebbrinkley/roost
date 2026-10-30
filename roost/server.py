@@ -1081,7 +1081,8 @@ async def native_store(app: web.Application):
             await notify(app, {"title": await agent_name(app, ask_hermes=False), "body": preview(text),
                                "url": "/?c=" + quote(cid, safe=""), "tag": "reply-" + tid})
     app["runner"] = Runner(app["store"], app["servers"], app["provider_http"], completed=completed,
-                           limit=int(os.environ.get("ROOST_NATIVE_ADMISSION", "1")))
+                           limit=int(os.environ.get("ROOST_NATIVE_ADMISSION", "1")),
+                           preferences=lambda: settings.load(app["settings_file"]))
     app["runner"].start()
     try:
         yield
@@ -1184,6 +1185,7 @@ def create_app() -> web.Application:
     app.on_shutdown.append(shutdown)
     app.on_cleanup.append(cleanup)
     app.router.add_get("/api/models", native.models)
+    app.router.add_post("/api/settings/web-search/test", native.test_web_search)
     app.router.add_get("/api/search", native.search)
     app.router.add_post("/api/conversations/{sid}/turns/{action}", native.control)
     app.router.add_get("/api/health", health)

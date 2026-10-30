@@ -189,7 +189,7 @@ button:disabled { cursor: default; }
 .thoughts summary { width: max-content; padding: 2px 0; cursor: pointer; list-style: none; color: var(--ink); font-weight: 600; font-size: calc(13px * var(--text-scale)); }
 .thoughts summary::-webkit-details-marker { display: none; }
 .thoughts summary::before { content: "›"; display: inline-block; width: 10px; margin-right: 4px; transition: transform .15s; }
-.thoughts[open] summary::before { transform: rotate(90deg); }
+.thoughts[open] > summary::before, .thoughts details[open] > summary::before { transform: rotate(90deg); }
 .thoughts-body { margin: 4px 0 4px; padding-left: 12px; border-left: 2px solid var(--line); line-height: 1.45; overflow-wrap: anywhere; }
 .thoughts-body p { margin: 0 0 7px; white-space: pre-wrap; }
 .thoughts-body p:last-child { margin-bottom: 0; }
@@ -493,7 +493,7 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .settings-detail .model-field { margin-top: 12px; }
 .model-field input, .model-field select { display: block; margin-top: 6px; }
 .native-action { min-height: 32px; padding: 4px 8px; }
-@media (pointer: coarse) { .native-action { min-width: 44px; min-height: 44px; } }
+@media (pointer: coarse) { .native-action, .web-toggle { min-width: 44px; min-height: 44px; } }
 .native .reply-under { flex-wrap: wrap; }
 .native .reply-usage { flex-basis: 100%; font-size: 11px; }
 .composer .send-button.stopping { display: grid; width: auto; flex-basis: auto; padding: 0 12px; font-size: 14px; }
@@ -510,3 +510,16 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .native .from-agent .message-body:empty { display: none; }
 .message:has(.inline-edit) { width: min(520px, 88%); }
 .message-body.editing { color: var(--ink); background: var(--sheet); border: 1px solid var(--line); }
+
+.thought-tool { min-width: 0; margin: 7px 0; }
+.tool-call { color: var(--ink); font: calc(12px * var(--text-scale))/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Built-in tools read as sentences; unknown tools keep the raw call. */
+.tool-call-plain { font-family: inherit; font-size: calc(13px * var(--text-scale)); }
+.tool-output { margin: 3px 0 0 10px; }
+.tool-output > summary { max-width: 100%; color: var(--muted); font-weight: 500; }
+.tool-output pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.reply-sources { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: calc(11px * var(--text-scale)); }
+.citation { color: var(--accent); overflow-wrap: anywhere; }
+.web-toggle { flex-shrink: 0; align-self: flex-end; border: 0; background: none; color: var(--muted); padding: 8px 4px; cursor: pointer; }
+.web-toggle svg { display: block; width: 20px; height: 20px; }
+.web-toggle[aria-pressed="true"] { color: var(--accent); background: var(--agent); border-radius: 8px; }

@@ -23,7 +23,7 @@ function fixture(fetch = async () => ({ok: true, json: async () => ({signed_in: 
   get('app').classList.add('hidden');
   const document = { getElementById: get, createElement: tag => Object.assign(node(), {tagName: String(tag).toUpperCase()}), createElementNS: node, createTextNode: text => ({textContent: text}),
     querySelectorAll: () => [], querySelector: () => get('main'), events: {}, addEventListener(name, fn) { this.events[name] = fn; } };
-  const context = vm.createContext({ document, console, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
+  const context = vm.createContext({ document, console, URL, setTimeout: () => 1, clearTimeout() {}, setInterval() {}, navigator: {},
     window: { roostTheme: { current: () => 'dark', collapseThinking: () => false }, addEventListener() {}, matchMedia: () => ({matches: false}), getSelection: () => '' },
     fetch, AbortSignal, URLSearchParams, Date, Math, atob, btoa, crypto: require('node:crypto').webcrypto, ...globals });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../roost/static/app.js'), 'utf8'), context);
@@ -1636,13 +1636,17 @@ test('a notification received during boot survives the initial signed-out respon
 
 test('live reply chunks mark jump to latest without moving the reader', async () => {
   const f = fixture(); await tick();
-  f.run(`state.current = 'one'; state.lastRows = []; state.live = {id:'one', text:'First chunk'};
-    state.liveNodes = {shownText:'First chunk'}; fillLive = live => {state.liveNodes.shownText = live.text;};`);
+  f.run(`state.backend = 'native'; state.current = 'one'; state.lastRows = [];
+    state.live = {id:'one', text:'First chunk', thoughts:'', trace:[], sources:[]}; liveNodes(state.live);`);
   const transcript = f.get('transcript'), jump = f.get('jump-latest');
   transcript.scrollHeight = 1000; transcript.clientHeight = 200; transcript.scrollTop = 100;
   f.run('renderLive()'); assert.equal(jump.classList.contains('unread'), false);
   f.run(`state.live.text += ' next chunk'; renderLive();`);
   assert.equal(transcript.scrollTop, 100); assert.equal(jump.classList.contains('unread'), true);
+  jump.classList.remove('unread');
+  f.run('renderLive()'); assert.equal(jump.classList.contains('unread'), false);
+  f.run(`state.live.sources = [{n:1, title:'Example', url:'https://example.org'}]; renderLive();`);
+  assert.equal(jump.classList.contains('unread'), true);
 });
 
 test('failed messages stay in their conversation and Retry sends once without consuming a new draft', async () => {
@@ -2594,4 +2598,99 @@ test('model rows share switches, expose one detail panel, and keep the default e
   assert.deepEqual(picker().children.map(node => node.value),['two']);
   toggles()[1].events.click();
   assert.equal(f.run('state.primary.default_model'),null);assert.equal(picker().disabled,true);
+});
+
+test('native full snapshots replace trace and sources instead of appending', async () => {
+  const f = fixture(); await tick();
+  const result = f.run('(() => { const frame = {reset: true, user: "Search", text: "Answer [1]", thoughts: "Check", trace: [{kind: "reasoning", text: "Check"}, {kind: "tool", id: "call", name: "web_search", arguments: "{}", status: "running"}], sources: [{n: 1, title: "Example", url: "https://example.org"}]}; const first = applyStreamFrame(null, frame, "one"); return applyStreamFrame(first, {...frame, trace: [...frame.trace.slice(0, 1), {...frame.trace[1], status: "completed", result: "Untrusted"}]}, "one"); })()');
+  assert.equal(result.text, 'Answer [1]'); assert.equal(result.trace.length, 2); assert.equal(result.sources.length, 1);
+  assert.equal(result.trace[1].status, 'completed');
+});
+
+test('native Thoughts interleave tools and render bounded literal output in collapsed details', async () => {
+  const f = fixture(); await tick();
+  f.run('fillThoughts($("test-thoughts"), [{kind: "reasoning", text: "Before"}, {kind: "tool", id: "one", name: "web_search", arguments: JSON.stringify({query:"example"}), status: "completed", result: "<script>unsafe</script>" + "x".repeat(17000)}, {kind: "reasoning", text: "After"}]);');
+  const children = f.get('test-thoughts').children;
+  assert.deepEqual(children.map(node => node.tagName), ['P', 'DIV', 'P']);
+  const tool = children[1], output = tool.children[1];
+  assert.equal(tool.children[0].textContent, 'Searched the web for "example"');
+  assert.equal(output.tagName, 'DETAILS'); assert.equal(output.open, false);
+  assert.equal(output.children[1].tagName, 'PRE');
+  assert(output.children[1].textContent.startsWith('<script>unsafe</script>'));
+  assert(output.children[1].textContent.endsWith('[Output trimmed for display.]'));
+  assert(output.children[1].textContent.length < 16100);
+});
+
+test('native citations are safe turn-specific links with a source list; code stays literal', async () => {
+  const f = fixture(); await tick();
+  f.run('addReply($("test-reply"), "Answer [1] **bold [2]** \u0060[1]\u0060 [9]\\n\\n\u0060\u0060\u0060text\\n[1]\\n\u0060\u0060\u0060", [{n: 1, title: "Example", url: "https://example.org/page"}, {n: 2, title: "<b>Literal</b>", url: "http://example.com/other"}, {n: 3, title: "Unsafe", url: "javascript:alert(1)"}]);');
+  function descendants(node) { return [node, ...(node.children || []).flatMap(descendants)]; }
+  const nodes = descendants(f.get('test-reply')), links = nodes.filter(node => node.tagName === 'A');
+  assert.equal(links.length, 4);
+  assert.equal(links[0].textContent, '[1]'); assert.equal(links[0].href, 'https://example.org/page');
+  assert.equal(links[1].href, 'http://example.com/other');
+  assert.equal(links[3].textContent, '[2] <b>Literal</b>');
+  assert(links.every(link => link.rel === 'noopener noreferrer' && link.target === '_blank'));
+  assert(nodes.some(node => node.tagName === 'CODE' && node.textContent === '[1]'));
+  assert(nodes.some(node => node.textContent?.includes('[9]')));
+  assert.equal(f.run('sourceLink({url:"https://REPLACE_USER:REPLACE_PASSWORD@example.org"}, "bad")'), null);
+});
+
+test('globe follows native search, model tools and No web, and resets on send', async () => {
+  const f = fixture(); await tick();
+  f.run('state.backend = "native"; state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; state.noWeb = false; updateWebToggle();');
+  assert.equal(f.get('web-toggle').classList.contains('hidden'), false);
+  f.run('state.noWeb = true; updateWebToggle();');
+  assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
+  f.run('state.noWeb = false; state.models[0].tools = false; updateWebToggle();');
+  assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
+  f.run('state.models[0].tools = true; state.webAvailable = false; updateWebToggle();');
+  assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
+  f.run('state.webAvailable = true; state.webForce = true; state.current = "one"; globalThis.payloads = []; api = async (path, options) => { payloads.push(JSON.parse(options.body)); return {session_id:"one"}; }; loadConversations = async () => {}; loadMessages = async () => {};');
+  await f.run('sendText("Search now")');
+  assert.equal(f.run('payloads[0].web'), 'force');
+  assert.equal(f.run('state.webForce'), false);
+  assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'false');
+  f.run('state.backend = "hermes"; updateWebToggle();');
+  assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
+});
+
+
+test('built-in tool labels describe progress, failures and safe page links', async () => {
+  const f = fixture(); await tick();
+  for (const [name, argument, status, expected] of [
+    ['web_search', 'example', 'running', 'Searching the web for "example"'],
+    ['web_search', 'example', 'error', 'Search failed for "example"'],
+    ['web_search', 'example', 'interrupted', 'Search interrupted for "example"'],
+    ['read_page', 'https://example.org/page', 'running', 'Reading example.org'],
+    ['read_page', 'https://example.org/page', 'completed', 'Read example.org'],
+    ['read_page', 'https://example.org/page', 'error', 'Read failed for example.org'],
+    ['read_page', 'https://example.org/page', 'interrupted', 'Read interrupted for example.org'],
+    ['read_page', 'javascript:alert(1)', 'error', 'Read failed for javascript:alert(1)'],
+    ['custom', 'example', 'completed', 'custom · example · completed'],
+  ]) {
+    f.context.item = {kind:'tool', id:'one', name, arguments:JSON.stringify(name === 'read_page' ? {url:argument} : {query:argument}), status};
+    f.run('fillThoughts($("labels"), [item])');
+    const label = f.get('labels').children[0].children[0];
+    assert.equal(label.textContent, expected);
+    const links = label.children.filter(node => node.tagName === 'A');
+    assert.equal(links.length, name === 'read_page' && argument.startsWith('https:') ? 1 : 0);
+    if (links.length) {
+      assert.equal(links[0].href, argument); assert.equal(links[0].textContent, argument);
+      assert.equal(links[0].rel, 'noopener noreferrer');
+    }
+  }
+});
+
+test('globe has a named 44px coarse-pointer target and reflects toggle state', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8');
+  assert.match(css, /@media \(pointer: coarse\)\s*\{[^}]*\.web-toggle[^}]*min-width: 44px;[^}]*min-height: 44px;/);
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  assert.match(html, /id="web-toggle"[^>]*aria-label="[^"]+"[^>]*aria-pressed="false"/);
+  const f = fixture(); await tick();
+  f.run('state.backend = "native"; state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; updateWebToggle();');
+  f.get('web-toggle').events.click();
+  assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'true');
+  f.get('web-toggle').events.click();
+  assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'false');
 });

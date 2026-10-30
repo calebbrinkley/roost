@@ -32,7 +32,8 @@ def row(app, message):
             **({'roost_usage': {'input_tokens': usage.get('prompt_tokens'), 'output_tokens': usage.get('completion_tokens'),
                                 'model_seconds': stats.get('model_seconds'),
                                 'time_to_first_token': stats.get('time_to_first_token'),
-                                'tokens_per_second': stats.get('tokens_per_second')}, 'stats': stats}
+                                'tokens_per_second': stats.get('tokens_per_second')}, 'stats': stats,
+                'trace': app['store'].trace(turn.id), 'sources': app['store'].sources(turn.id)}
                if message.role == 'assistant' else {})}
 
 
@@ -92,12 +93,18 @@ def fields(data):
         if data['model'] is not None and (not isinstance(data['model'], str) or not data['model'] or len(data['model']) > 256):
             raise http.bad('Invalid model override.')
         changes['model'] = data['model']
+    if 'no_web' in data:
+        if type(data['no_web']) is not bool:
+            raise http.bad('no_web must be a boolean.')
+        changes['no_web'] = data['no_web']
     return changes
 
 
 def send_fields(data):
-    if set(data) - {'text', 'request_id', 'reasoning', 'instructions', 'model'}:
+    if set(data) - {'text', 'request_id', 'reasoning', 'instructions', 'model', 'web'}:
         raise http.bad('Unsupported send field.')
+    if 'web' in data and data['web'] != 'force':
+        raise http.bad('web must be force when provided.')
     text = http.body_text(data.get('text'), 'Message', 16000)
     request_id = data.get('request_id', str(uuid4()))
     if not isinstance(request_id, str) or not http.SEND_ID.fullmatch(request_id):
@@ -119,7 +126,7 @@ async def submit(request, *, new=False):
     text, request_id, changes = send_fields(data)
     cid = None if new else chat(request).id
     store, runner = request.app['store'], request.app['runner']
-    identity = {'conversation_id': cid, 'text': text, 'changes': changes}
+    identity = {'conversation_id': cid, 'text': text, 'changes': changes, **({'web': data['web']} if 'web' in data else {})}
     accepted = store.request(request_id, identity)
     if accepted is None:
         if not new and changes:
@@ -127,7 +134,7 @@ async def submit(request, *, new=False):
         if len(store.queued()) >= 500:
             raise web.HTTPTooManyRequests(text='The native turn queue is full.')
         override = changes.get('model') if new else store.get_conversation(cid).model
-        model, snapshot = runner.snapshot(override)
+        model, snapshot = runner.snapshot(override, no_web=store.get_conversation(cid).no_web if cid else False, web=data.get('web'))
         accepted = store.submit(request_id, text, conversation_id=cid, model=model,
                                 changes=changes, snapshot=snapshot, identity=identity)
         runner.notify(accepted.conversation_id)
@@ -169,7 +176,7 @@ async def delete_all_conversations(request):
 
 
 def chat_settings(c):
-    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model}
+    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model, 'no_web': c.no_web}
 
 
 async def get_chat_settings(request):
@@ -178,8 +185,8 @@ async def get_chat_settings(request):
 
 async def update_chat_settings(request):
     c, data = chat(request), await http.json_body(request)
-    if not data or set(data) - {'instructions', 'reasoning', 'model'}:
-        raise http.bad('Only instructions, reasoning and model can be changed.')
+    if not data or set(data) - {'instructions', 'reasoning', 'model', 'no_web'}:
+        raise http.bad('Only instructions, reasoning, model and no_web can be changed.')
     changes = fields(data)
     if changes.get('model') is not None:
         request.app['runner'].selected(changes['model'])
@@ -220,7 +227,8 @@ async def stream(request):
                 payload = {'reset': True, 'user': user.content, 'started': turn.created_at,
                            'thoughts': assistant.reasoning, 'text': assistant.content, 'approvals': [],
                            'turn_id': turn.id, 'revision': turn.revision, 'state': turn.state,
-                           'done': turn.state not in ('running', 'queued')}
+                           'done': turn.state not in ('running', 'queued'),
+                           'trace': store.trace(turn.id), 'sources': store.sources(turn.id)}
                 await response.write(b'data: ' + json.dumps(payload).encode() + b'\n\n')
                 previous = marker
             if turn.state not in ('running', 'queued'):
@@ -267,7 +275,24 @@ async def control(request):
 
 async def models(request):
     primary = request.app['servers'].get('primary')
-    return web.json_response({'models': [m for m in primary['models'] if m['enabled']], 'default_model': primary['default_model']})
+    return web.json_response({'models': [m for m in primary['models'] if m['enabled']], 'default_model': primary['default_model'],
+                              'web_available': bool(http.settings.load(request.app['settings_file'])['search_url'])})
+
+
+async def test_web_search(request):
+    if not enabled(request.app):
+        raise web.HTTPNotFound(text='Web search requires Native backend.')
+    data = await http.json_body(request)
+    if set(data) != {'query'} or not isinstance(data['query'], str) or not 0 < len(data['query'].strip()) <= 2000:
+        raise http.bad('Provide a search query of 1 to 2000 characters.')
+    base = http.settings.load(request.app['settings_file'])['search_url']
+    if not base:
+        raise http.bad('Configure a search URL first.')
+    from .tools import WebTools
+    result = await WebTools(base).execute('web_search', json.dumps(data))
+    if 'error' in result:
+        raise http.bad(result['error'])
+    return web.json_response(result)
 
 
 async def search(request):

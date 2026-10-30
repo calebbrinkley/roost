@@ -14,8 +14,8 @@ from roost.servers import ServerError, ServerStorageError, Servers
 from hermes_fake import fake_hermes
 from openai_fake import OpenAIFake
 
-CURATED = [{"id": "example-model", "display_name": "Example", "enabled": True, "thinking_mode": "template_flag"},
-           {"id": "manual-model", "display_name": "Manual", "enabled": False, "thinking_mode": "unsupported"}]
+CURATED = [{"id": "example-model", "display_name": "Example", "enabled": True, "thinking_mode": "template_flag", "tools": True},
+           {"id": "manual-model", "display_name": "Manual", "enabled": False, "thinking_mode": "unsupported", "tools": True}]
 
 
 class ServersTests(unittest.TestCase):
@@ -98,6 +98,17 @@ class ServersTests(unittest.TestCase):
         self.assertEqual(saved["models"], manual)
         self.servers.set_models("primary", {"models": [], "default_model": None})
 
+    def test_tools_boolean_is_strict_and_defaults_true_for_legacy_models(self):
+        model = {key: value for key, value in CURATED[0].items() if key != 'tools'}
+        self.servers.update('primary', {'base_url': 'https://example.org/v1'})
+        saved = self.servers.set_models('primary', {'models': [model], 'default_model': model['id']})
+        self.assertTrue(saved['models'][0]['tools'])
+        for value in (None, 0, 1, 'false', []):
+            with self.subTest(value=value), self.assertRaises(ServerError):
+                self.servers.set_models('primary', {'models': [{**model, 'tools': value}], 'default_model': model['id']})
+        saved = self.servers.set_models('primary', {'models': [{**model, 'tools': False}], 'default_model': model['id']})
+        self.assertFalse(saved['models'][0]['tools'])
+
     def test_failure_between_key_and_config_commit_retains_original_pair(self):
         from roost import servers
         self.servers.update("primary", {"base_url": "https://models.example.invalid/v1", "key": "original-test-key"})
@@ -179,7 +190,7 @@ class ServerEndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         models = (await response.json())["models"]
         self.assertEqual(models[:2], CURATED)
-        self.assertEqual(models[2], {"id": "another-model", "display_name": "another-model", "enabled": False, "thinking_mode": "unsupported"})
+        self.assertEqual(models[2], {"id": "another-model", "display_name": "another-model", "enabled": False, "thinking_mode": "unsupported", "tools": True})
         self.assertEqual(self.fake.requests[-1][1]["Authorization"], "Bearer example-test-key")
         response = await self.client.get(self.path, cookies=self.cookie)
         data = await response.json()

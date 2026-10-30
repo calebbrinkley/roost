@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", searchResults: null, searchLoading: false, searchError: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
-  conversation: () => ({ current: null, model: null, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
+  conversation: () => ({ current: null, model: null, noWeb: false, webForce: false, webAvailable: false, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
                          composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
@@ -623,6 +623,7 @@ async function openInstructions() {
     if (isNative()) {
       fillModelPicker($("sheet-model"), data.model);
       $("sheet-reasoning").value = data.reasoning || "none";
+      $("sheet-no-web").checked = Boolean(data.no_web);
       updateSheetThinking();
     }
     field.disabled = false; field.focus();
@@ -636,8 +637,8 @@ async function saveInstructions(event) {
   const scope = signInScope();
   state.sheetBusy = true;
   try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value} : {}) }) });
-    if (isNative() && state.current === id) { state.model = data.model; showReasoning(data.reasoning); }
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked} : {}) }) });
+    if (isNative() && state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); }
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
   } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
@@ -786,7 +787,7 @@ function finishLoadingConversations(data, rows, more) {
 
 function renderWelcome() {
   state.messageHistory = null; state.lastRows = null; state.messageSignature = null;
-  if (isNative()) { state.live = null; state.turn = null; state.model = null; state.context = null; updateNativeComposer(); renderContext(); }
+  if (isNative()) { state.live = null; state.turn = null; state.model = null; state.noWeb = false; state.webForce = false; state.context = null; updateNativeComposer(); renderContext(); }
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -855,64 +856,92 @@ function messageText(message) {
 // underscores count only at word edges, so snake_case and paths are left alone.
 const INLINE = /(\*\*[^*]+\*\*|`[^`]+`|\*(?![\s*])[^*\n]*?[^\s*]\*|\*[^\s*]\*|(?<!\w)_(?![\s_])[^_\n]*?[^\s_]_(?!\w)|(?<!\w)_[^\s_]_(?!\w))/g;
 
-function addInline(parent, value) {
+function sourceLink(source, label) {
+  if (!source || typeof source.url !== "string" || !/^https?:\/\/[^/\s@]+(?:[/?#]|$)/i.test(source.url)) return null;
+  const link = el("a", "citation", label); link.href = source.url; link.target = "_blank"; link.rel = "noopener noreferrer";
+  return link;
+}
+
+function addCitations(parent, text, sources) {
+  let at = 0;
+  for (const match of text.matchAll(/\[(\d+)\]/g)) {
+    parent.append(document.createTextNode(text.slice(at, match.index)));
+    const source = sources.find(item => item.n === Number(match[1]));
+    parent.append(sourceLink(source, match[0]) || document.createTextNode(match[0]));
+    at = match.index + match[0].length;
+  }
+  parent.append(document.createTextNode(text.slice(at)));
+}
+
+function addReply(parent, text, sources = []) {
+  addMarkdown(parent, text, sources);
+  if (!sources.length) return;
+  const list = el("div", "reply-sources");
+  for (const source of sources) {
+    const link = sourceLink(source, `[${source.n}] ${source.title || source.url}`);
+    if (link) list.append(link);
+  }
+  parent.append(list);
+}
+
+function addInline(parent, value, sources = []) {
   // split() with one capture group puts the matched markup at odd indexes and plain text at even ones.
   value.split(INLINE).forEach((piece, index) => {
     if (!piece) return;
-    if (index % 2 === 0) parent.append(document.createTextNode(piece));
-    else if (piece.startsWith("**")) parent.append(el("strong", "", piece.slice(2, -2)));
+    if (index % 2 === 0) { if (sources.length) addCitations(parent, piece, sources); else parent.append(document.createTextNode(piece)); }
+    else if (piece.startsWith("**")) { const node = el("strong"); if (sources.length) addCitations(node, piece.slice(2, -2), sources); else node.textContent = piece.slice(2, -2); parent.append(node); }
     else if (piece.startsWith("`")) parent.append(el("code", "", piece.slice(1, -1)));
-    else parent.append(el("em", "", piece.slice(1, -1)));
+    else { const node = el("em"); if (sources.length) addCitations(node, piece.slice(1, -1), sources); else node.textContent = piece.slice(1, -1); parent.append(node); }
   });
 }
 
 // Table cells take the same bold, code and italics as paragraphs. Code blocks stay literal.
-function tableCell(tag, text) {
+function tableCell(tag, text, sources) {
   const cell = el(tag);
-  addInline(cell, text.trim());
+  addInline(cell, text.trim(), sources);
   return cell;
 }
 
-function addPlainMarkdown(parent, value) {
+function addPlainMarkdown(parent, value, sources) {
   const lines = value.split("\n");
   for (let i = 0; i < lines.length;) {
     if (!lines[i].trim()) { i++; continue; }
     if (/^\s*[-*•] /.test(lines[i])) {
       const list = el("ul");
       while (i < lines.length && /^\s*[-*•] /.test(lines[i])) {
-        const item = el("li"); addInline(item, lines[i].replace(/^\s*[-*•] /, "")); list.append(item); i++;
+        const item = el("li"); addInline(item, lines[i].replace(/^\s*[-*•] /, ""), sources); list.append(item); i++;
       }
       parent.append(list); continue;
     }
     if (lines[i].includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1])) {
       const table = el("table");
       const head = el("tr");
-      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(tableCell("th", cell));
+      for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) head.append(tableCell("th", cell, sources));
       table.append(head); i += 2;
       while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
         const row = el("tr");
-        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(tableCell("td", cell));
+        for (const cell of lines[i].replace(/^\||\|$/g, "").split("|")) row.append(tableCell("td", cell, sources));
         table.append(row); i++;
       }
       parent.append(table); continue;
     }
     const paragraph = [];
     while (i < lines.length && lines[i].trim() && !/^\s*[-*•] /.test(lines[i])) paragraph.push(lines[i++]);
-    const node = el("p"); addInline(node, paragraph.join("\n")); parent.append(node);
+    const node = el("p"); addInline(node, paragraph.join("\n"), sources); parent.append(node);
   }
 }
 
-function addMarkdown(parent, value) {
+function addMarkdown(parent, value, sources = []) {
   const fence = /```[^\n]*\n([\s\S]*?)```/g;
   let last = 0;
   for (const match of value.matchAll(fence)) {
-    addPlainMarkdown(parent, value.slice(last, match.index));
+    addPlainMarkdown(parent, value.slice(last, match.index), sources);
     const code = match[1].replace(/\n$/, "");
     const block = el("div", "code-block"), pre = el("pre"); pre.append(el("code", "", code));
     block.append(copyButton(code, "Copy code"), pre); parent.append(block);
     last = match.index + match[0].length;
   }
-  addPlainMarkdown(parent, value.slice(last));
+  addPlainMarkdown(parent, value.slice(last), sources);
 }
 
 function textLines(text) { return text.split(/\r\n|\r|\n/); }
@@ -963,12 +992,44 @@ function reasoningText(row) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// Native traces use the same compact Thoughts layout for saved and live steps.
+function fillThoughts(body, items) {
+  body.replaceChildren();
+  for (const [index, item] of items.entries()) {
+    if (typeof item === "string" || item.kind === "reasoning") { addMarkdown(body, typeof item === "string" ? item : item.text); continue; }
+    let argument = item.arguments;
+    try { const args = JSON.parse(argument); argument = args.query ?? args.url ?? argument; } catch { /* Show malformed arguments literally. */ }
+    const tool = el("div", "thought-tool");
+    const value = String(argument).replace(/\s+/g, " ").slice(0, 400);
+    let label = `${item.name} · ${value} · ${item.status}`, link = null;
+    if (item.name === "web_search") {
+      const action = item.status === "running" ? "Searching the web" : item.status === "completed" ? "Searched the web" : item.status === "error" ? "Search failed" : "Search interrupted";
+      label = `${action} for "${value}"`;
+    } else if (item.name === "read_page") {
+      let host = value;
+      try { host = new URL(argument).host || value; } catch { /* Show malformed URLs literally. */ }
+      const action = item.status === "running" ? "Reading" : item.status === "completed" ? "Read" : item.status === "error" ? "Read failed for" : "Read interrupted for";
+      label = `${action} ${host}`;
+      link = sourceLink({url: argument}, argument);
+    }
+    const heading = el("div", "tool-call" + (["web_search", "read_page"].includes(item.name) ? " tool-call-plain" : ""), label);
+    if (link) heading.append(document.createTextNode(" · "), link);
+    tool.append(heading);
+    const output = el("details", "tool-output"), key = `tool:${item.id}:${index}`;
+    output.open = state.openThoughts.has(key); output.append(el("summary", "", "Output"));
+    const text = item.result === undefined ? "Waiting for output…" : item.result || "No output.";
+    output.append(el("pre", "", text.slice(0, 16000) + (text.length >= 16000 ? "\n[Output trimmed for display.]" : "")));
+    output.addEventListener("toggle", () => { if (output.open) state.openThoughts.add(key); else state.openThoughts.delete(key); });
+    tool.append(output); body.append(tool);
+  }
+}
+
 // Collapsed by default; one opened stays open across the transcript's polls.
 function thoughtsBlock(texts, key) {
   const details = el("details", "thoughts");
   details.open = state.openThoughts.has(key);
   details.append(el("summary", "", "Thoughts"));
-  const body = el("div", "thoughts-body"); addMarkdown(body, texts.join("\n\n")); details.append(body);
+  const body = el("div", "thoughts-body"); fillThoughts(body, texts); details.append(body);
   details.addEventListener("toggle", () => { if (details.open) state.openThoughts.add(key); else state.openThoughts.delete(key); });
   return details;
 }
@@ -1102,7 +1163,7 @@ function renderMessages(rows) {
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.timestamp, row.roost_usage, row.state, row.revision,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.timestamp, row.roost_usage, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -1139,7 +1200,8 @@ function renderMessages(rows) {
   let thoughts = [], thoughtsKey = null;
   all.forEach((row, index) => {
     const text = row.role === "assistant" && row.display_kind !== "hidden" ? reasoningText(row) : "";
-    if (text) { thoughts.push(text); thoughtsKey ??= String(row.id ?? `at ${index}`); }
+    const items = isNative() && Array.isArray(row.trace) ? row.trace : text ? [text] : [];
+    if (items.length) { thoughts.push(...items); thoughtsKey ??= String(row.id ?? `at ${index}`); }
     if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
   });
   for (let index = 0; index < visible.length; index++) {
@@ -1149,7 +1211,7 @@ function renderMessages(rows) {
     const wrapper = el("article", "message " + (row.role === "user" ? "from-you" : "from-agent"));
     const body = el("div", "message-body");
     if (row.role === "user") addUserMessage(body, messageText(row), key);
-    else addMarkdown(body, messageText(row));
+    else addReply(body, messageText(row), isNative() ? row.sources || [] : []);
     wrapper.append(body);
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
@@ -1223,7 +1285,7 @@ async function selectConversation(id, source) {
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
-  state.current = id; state.model = null; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = id; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
   restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -1436,6 +1498,8 @@ function applyStreamFrame(previous, data, id) {
     turn_id: data.turn_id, revision: data.revision, state: data.state, thoughts: "", text: "", done: false} : {...previous};
   if (typeof data.thoughts === "string") live.thoughts += data.thoughts;
   if (typeof data.text === "string") live.text += data.text;
+  if (Array.isArray(data.trace)) live.trace = data.trace;
+  if (Array.isArray(data.sources)) live.sources = data.sources;
   live.done = Boolean(data.done);
   return live;
 }
@@ -1493,9 +1557,11 @@ function liveNodes(live) {
 
 function fillLive(live) {
   const nodes = state.liveNodes;
-  if (nodes.shownThoughts !== live.thoughts) { nodes.thoughts.replaceChildren(); addMarkdown(nodes.thoughts, live.thoughts); nodes.shownThoughts = live.thoughts; }
-  if (nodes.shownText !== live.text) { nodes.body.replaceChildren(); addMarkdown(nodes.body, live.text); nodes.shownText = live.text; }
-  nodes.details.classList.toggle("hidden", !live.thoughts.trim());
+  const items = isNative() && Array.isArray(live.trace) ? live.trace : live.thoughts.trim() ? [live.thoughts] : [];
+  const signature = JSON.stringify(items), reply = JSON.stringify([live.text, live.sources]);
+  if (nodes.shownThoughts !== signature) { fillThoughts(nodes.thoughts, items); nodes.shownThoughts = signature; }
+  if (nodes.shownText !== reply) { nodes.body.replaceChildren(); addReply(nodes.body, live.text, live.sources || []); nodes.shownText = reply; }
+  nodes.details.classList.toggle("hidden", !items.length);
   nodes.message.classList.toggle("hidden", !live.text.trim());
 }
 
@@ -1507,7 +1573,7 @@ function renderLive() {
   if (!state.liveNodes) return renderMessages(state.lastRows);
   const transcript = $("transcript");
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-  const changed = state.liveNodes.shownText !== live.text;
+  const changed = state.liveNodes.shownText !== JSON.stringify([live.text, live.sources]);
   fillLive(live);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
   updateLatest(changed);
@@ -1525,7 +1591,7 @@ async function loadReasoning(id) {
   const scope = viewScope(id);
   try {
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
-    if (scope.alive() && typeof data.reasoning === "string") { state.model = data.model || null; showReasoning(data.reasoning); }
+    if (scope.alive() && typeof data.reasoning === "string") { state.model = data.model || null; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); }
   } catch { /* The chip keeps Default; the next send still uses what Roost stored. */ }
 }
 
@@ -1549,7 +1615,7 @@ function newConversation() {
   if (state.composerKey !== undefined) saveComposer();
   state.viewEpoch++;
   leaveLive();
-  state.current = null; state.model = null; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
   restoreComposer();
   state.draft = true;
   newDraftSeed();
@@ -1709,8 +1775,9 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   const oldId = retry ? retry.id : state.current, scope = signInScope(), here = viewScope(oldId);
   const after = Math.max(0, ...records(state.lastRows || []).filter((row) => row.role === "user" && typeof row.id === "number").map((row) => row.id));
   const item = retry || { id: oldId, text, voice, after, key: `sent-${state.sentKey = state.sentKey + 1}`,
-    request_id: sendId(), model: state.model, reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
+    request_id: sendId(), model: state.model, web: isNative() && state.webForce ? "force" : undefined, reasoning: state.reasoning || (isNative() ? "none" : "default"), since: Date.now() };
   if (!retry) {
+    state.webForce = false; updateWebToggle();
     state.voiceDraft = false; $("message").value = ""; saveComposer();
     $("composer").classList.remove("has-text");
   }
@@ -1721,8 +1788,8 @@ async function sendText(text, { voice = false, retry = null } = {}) {
   let result, failure;
   try {
     result = oldId
-      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id }) })
-      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null} : {}) }) });
+      ? await api(`/conversations/${encodeURIComponent(oldId)}/messages`, { method: "POST", body: JSON.stringify({ text, request_id: item.request_id, ...(isNative() && item.web ? {web: item.web} : {}) }) })
+      : await api("/conversations", { method: "POST", body: JSON.stringify({ text, reasoning: item.reasoning, request_id: item.request_id, ...(isNative() ? {model: item.model || null, ...(item.web ? {web: item.web} : {})} : {}) }) });
   } catch (error) { failure = error; }
   finally {
     if (scope.alive()) { state.busy = false; $("send").disabled = false; }
@@ -2038,11 +2105,20 @@ function thinkingVisible(models, selected, defaultModel) {
 
 async function loadModels() {
   const data = await api("/models");
-  state.models = data.models || []; state.defaultModel = data.default_model;
+  state.models = data.models || []; state.defaultModel = data.default_model; state.webAvailable = Boolean(data.web_available);
   if (isNative()) updateThinking();
 }
 
+function updateWebToggle() {
+  const model = state.models.find(item => item.id === (state.model || state.defaultModel));
+  const available = isNative() && state.webAvailable && model && model.tools !== false && !state.noWeb;
+  if (!available) state.webForce = false;
+  show("web-toggle", Boolean(available));
+  $("web-toggle").setAttribute("aria-pressed", String(state.webForce));
+}
+
 function updateThinking() {
+  updateWebToggle();
   show("reasoning-chip", thinkingVisible(state.models, state.model, state.defaultModel));
   $("reasoning").querySelectorAll('option[value="default"]').forEach(option => { option.hidden = true; });
 }
@@ -2086,6 +2162,7 @@ function stopNativeReply() {
 }
 
 function updateNativeComposer() {
+  updateWebToggle();
   if (!isNative()) return;
   const running = Boolean(runningTurn() || queuedTurn()), send = $("send");
   send.type = running ? "button" : "submit";
@@ -2254,12 +2331,34 @@ function renderModelList(parent, server) {
       thinking.value = model.thinking_mode;
       thinking.addEventListener("change", () => { model.thinking_mode = thinking.value; });
       modelField(fields, "Thinking mode", thinking);
+      const tools = modelField(fields, "Web tools", modelInput("", "checkbox"));
+      tools.checked = model.tools !== false; tools.addEventListener("change", () => { model.tools = tools.checked; });
       const context = modelField(fields, "Context size (optional)", modelInput(model.context_tokens ?? "", "number"));
       context.min = 1; context.max = 100000000; context.step = 1;
       context.addEventListener("input", () => { if (context.value) model.context_tokens = Number(context.value); else delete model.context_tokens; });
     }
     row.append(fields); parent.append(row);
   }
+}
+
+function renderWebSearch(detail) {
+  const section = settingsSection(detail, "Web search", "Connect SearXNG to let models search. Leave the URL empty to turn web tools off.");
+  const url = modelField(section, "SearXNG base URL", modelInput(state.settings.search_url || "", "url"));
+  url.id = "settings-search-url"; url.placeholder = "https://search.example.com"; url.autocomplete = "off";
+  const query = modelField(section, "Test query", modelInput("Roost web search")); query.id = "settings-search-query"; query.maxLength = 2000;
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("primary", "Save", async () => {
+    if (await saveSettings({search_url: url.value.trim()}, "Web search saved.")) await loadModels();
+  }), settingsButton("secondary", "Test", async () => {
+    const base = url.value.trim(), text = query.value;
+    if (!await saveSettings({search_url: base}, "Web search saved.")) return;
+    await loadModels();
+    try {
+      const result = await api("/settings/web-search/test", {method: "POST", body: JSON.stringify({query: text})});
+      notice(`Search connected: ${result.results.length} results.`);
+    } catch (error) { notice(error.message); }
+  }));
+  section.append(actions);
 }
 
 function renderModels(detail) {
@@ -2311,7 +2410,7 @@ function renderModels(detail) {
   buttons.append(settingsButton("secondary", "Add model", () => {
     const id = add.value.trim(); if (!id) return;
     if (server.models.some(model => model.id === id)) { notice("That model is already listed."); return; }
-    server.models.push({id, display_name: id, enabled: false, thinking_mode: "unsupported"});
+    server.models.push({id, display_name: id, enabled: false, thinking_mode: "unsupported", tools: true});
     list.replaceChildren(); renderModelList(list, server); add.value = "";
   }), settingsButton("primary", "Save models", () => withSettingsBusy(async () => {
     await api("/settings/servers/primary/models", {method: "PUT", body: JSON.stringify({models: server.models, default_model: server.default_model})});
@@ -2322,13 +2421,13 @@ function renderModels(detail) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ["agent", agent(), isNative() ? "Name" : "Name and instructions"], ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
+          ["models", "Models", "Backend and model server"], ...(isNative() ? [["web", "Web search", "SearXNG connection"]] : []), ["agent", agent(), isNative() ? "Name" : "Name and instructions"], ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
           ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", isNative() ? "Replies on your devices" : "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
-const SETTINGS_ICONS = { models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+const SETTINGS_ICONS = { web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
   const scope = signInScope();
@@ -2376,7 +2475,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -3145,6 +3244,8 @@ $("transcript").addEventListener("scroll", () => {
   if ($("transcript").scrollTop <= 0) loadEarlierMessages();
 }, { passive: true });
 $("reasoning").addEventListener("change", changeReasoning);
+$("web-toggle").append(icon("globe"));
+$("web-toggle").addEventListener("click", () => { state.webForce = !state.webForce; updateWebToggle(); });
 $("sheet-model").addEventListener("change", updateSheetThinking);
 $("message").addEventListener("input", updateNativeComposer);
 $("send").addEventListener("click", event => {

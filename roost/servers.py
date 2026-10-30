@@ -57,20 +57,22 @@ def _models(models, default_model) -> list[dict]:
         raise ServerError("Choose at most 200 curated models.")
     cleaned, seen = [], set()
     for model in models:
-        if not isinstance(model, dict) or (set(model) - {"context_tokens"}) != {"id", "display_name", "enabled", "thinking_mode"}:
+        if not isinstance(model, dict) or (set(model) - {"context_tokens", "tools"}) != {"id", "display_name", "enabled", "thinking_mode"}:
             raise ServerError("Each model needs an id, display_name, enabled and thinking_mode.")
         mid, name = model["id"], model["display_name"]
         if (not isinstance(mid, str) or not mid.strip() or len(mid) > 256 or not mid.isprintable()
                 or not isinstance(name, str) or not name.strip() or len(name) > 80 or not name.isprintable()
                 or type(model["enabled"]) is not bool or model["thinking_mode"] not in THINKING_MODES):
             raise ServerError("Invalid curated model.")
+        if "tools" in model and type(model["tools"]) is not bool:
+            raise ServerError("tools must be a boolean.")
         context = model.get("context_tokens")
         if "context_tokens" in model and (type(context) is not int or not 1 <= context <= 100000000):
             raise ServerError("context_tokens must be an integer from 1 to 100000000.")
         if mid in seen:
             raise ServerError("Model IDs must be unique within a server.")
         seen.add(mid)
-        cleaned.append(dict(model))
+        cleaned.append({**model, "tools": model.get("tools", True)})
     enabled = {model["id"] for model in cleaned if model["enabled"]}
     if (default_model is not None and (not isinstance(default_model, str) or default_model not in enabled)) or (enabled and default_model is None):
         raise ServerError("Choose an enabled default model, or disable every model.")
@@ -81,7 +83,7 @@ def merge_models(curated: list[dict], discovered: list[str]) -> list[dict]:
     """Keep curated names and controls, including models absent from discovery; new ones start disabled."""
     candidates = {model["id"]: dict(model) for model in curated}
     for mid in discovered:
-        candidates.setdefault(mid, {"id": mid, "display_name": mid, "enabled": False, "thinking_mode": "unsupported"})
+        candidates.setdefault(mid, {"id": mid, "display_name": mid, "enabled": False, "thinking_mode": "unsupported", "tools": True})
     return list(candidates.values())
 
 
@@ -154,7 +156,7 @@ class Servers:
     def list(self) -> list[dict]:
         config, keys = self._load()
         return [{"id": sid, **{key: value for key, value in record.items() if key != "key_id"},
-                 "has_key": bool(keys.get(record["key_id"]))} for sid, record in config["servers"].items()]
+                 "has_key": bool(keys.get(record["key_id"])), "models": _models(record["models"], record["default_model"])} for sid, record in config["servers"].items()]
 
     def get(self, server_id: str) -> dict:
         for server in self.list():
