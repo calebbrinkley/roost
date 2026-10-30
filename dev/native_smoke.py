@@ -152,10 +152,31 @@ async def run():
                 no_web = await request('POST', path + '/messages', {'text': 'No web for this chat', 'request_id': str(uuid4())})
                 await settled(no_web['turn_id'])
                 assert not app['store'].get_turn(no_web['turn_id']).settings['tools_offered']
+                # A small context makes the fourth message of a fresh chat fold its first turn into a summary.
+                from roost.servers import Servers
+                Servers(state, environ={}).set_models('primary', {'models': [{'id': 'example-model', 'display_name': 'Example', 'enabled': True,
+                                                                             'thinking_mode': 'template_flag', 'context_tokens': 24}],
+                                                                  'default_model': 'example-model'})
+                fake.scenario = None
+                long_chat = None
+                for number in range(1, 5):
+                    body = {'text': f'Compaction message {number}', 'request_id': str(uuid4())}
+                    sent = await request('POST', '/api/conversations' if long_chat is None else f'/api/conversations/{long_chat}/messages', body, 201 if long_chat is None else 200)
+                    long_chat = long_chat or sent['session_id']
+                    await settled(sent['turn_id'])
+                folded = await request('GET', '/api/conversations/' + long_chat)
+                assert [(s['through_ordinal'], s['text']) for s in folded['summaries']] == [(1, 'Native smoke title')], folded['summaries']
+                assert len(folded['messages']) == 8 and folded['messages'][-1]['trace'][0]['name'] == 'summarize'
+                assert folded['messages'][-1]['trace'][0]['status'] == 'completed'
+                async with client.get(roost.make_url('/api/conversations/' + long_chat + '/stream')) as response:
+                    assert json.loads((await response.content.readline())[6:])['summaries'] == folded['summaries']
+                last_prompt = [r[2] for r in fake.requests if r[2] and r[2]['stream']][-1]['messages']
+                assert 'Summary of the earlier conversation:' in last_prompt[0]['content']
+                assert not any('Compaction message 1' in m['content'] for m in last_prompt)
                 await request('DELETE', path, {'confirm': True})
-                assert not (await request('GET', '/api/conversations'))['sessions']
+                assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()

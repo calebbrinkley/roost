@@ -78,7 +78,7 @@ async def conversation(request):
               'live': running is not None, 'working': working,
               'after': request.app['runner'].messages(running.id)[0].id - 1 if running else None,
               'started': running.created_at if running else None, 'turn_id': running.id if running else None,
-              'revision': running.revision if running else None,
+              'revision': running.revision if running else None, 'summaries': store.summaries(c.id),
               'queue': [{'turn_id': t.id, 'position': position} for position, t in enumerate((t for t in ordered if t.state == 'queued'), 1)],
               'context': {'prompt_tokens': last.stats.get('usage', {}).get('prompt_tokens') if last else None,
                           'context_tokens': context_tokens}}
@@ -218,7 +218,7 @@ async def stream(request):
     http.harden(request, response)
     task = asyncio.current_task()
     request.app['native_streams'].add(task)
-    previous = None
+    previous = sent_summaries = None
     try:
         await response.prepare(request)
         while request.app['sessions'].valid(request.cookies.get(http.COOKIE, '')):
@@ -238,6 +238,10 @@ async def stream(request):
                            'turn_id': turn.id, 'revision': turn.revision, 'state': turn.state,
                            'done': turn.state not in ('running', 'queued'),
                            'trace': store.trace(turn.id), 'sources': store.sources(turn.id), **turn_context(turn)}
+                # Summaries ride on the first frame and whenever they change; a missing field means unchanged.
+                summaries = store.summaries(c.id)
+                if previous is None or summaries != sent_summaries:
+                    payload['summaries'], sent_summaries = summaries, summaries
                 await response.write(b'data: ' + json.dumps(payload).encode() + b'\n\n')
                 previous = marker
             if turn.state not in ('running', 'queued'):

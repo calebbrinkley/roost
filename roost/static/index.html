@@ -190,6 +190,15 @@
       <div class="dialog-actions"><button id="remember-cancel" class="secondary" type="button">Cancel</button><button id="remember-save" class="primary" type="submit">Save memory</button></div>
     </form>
   </dialog>
+  <dialog id="summary-sheet" class="sheet" aria-labelledby="summary-title">
+    <div class="sheet-view">
+      <h2 id="summary-title" class="sheet-title" tabindex="-1">Summary of earlier messages</h2>
+      <p id="summary-written" class="sheet-note"></p>
+      <div id="summary-text" class="summary-text"></div>
+      <p class="sheet-note">This is what the model sees in place of those messages. The originals stay in the chat.</p>
+      <div class="dialog-actions"><button id="summary-close" class="secondary" type="button">Close</button></div>
+    </div>
+  </dialog>
   <script src="/app.js" defer></script>
 </body>
 </html>

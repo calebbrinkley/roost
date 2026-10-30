@@ -552,7 +552,13 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .used-memories-list li { margin: 0 0 3px; white-space: pre-wrap; }
 .check-row { display: flex; align-items: center; gap: 8px; }
 .sheet .check-row input { width: auto; flex: none; margin: 0; }
+.summary-divider { align-self: stretch; display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin: 10px 6px; padding: 6px 0; color: var(--muted); font-size: calc(12px * var(--text-scale)); cursor: pointer; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.summary-read { border: 0; padding: 4px 6px; background: transparent; color: var(--accent-text); font: inherit; font-weight: 600; text-decoration: underline; }
+.summary-text { max-height: 50vh; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; font-size: calc(15px * var(--text-scale)); }
 @media (pointer: coarse) {
+  .summary-divider, .summary-read { min-height: 44px; }
+  .summary-read { min-width: 44px; }
+  #summary-sheet button { min-height: 44px; min-width: 44px; }
   .persona-add, .preset-row button, .memory-more, .preset-editor button, .preset-editor input, .memory-forget, .used-memories summary,
   #sheet-persona, #remember-sheet button { min-height: 44px; min-width: 44px; }
 }

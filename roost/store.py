@@ -61,6 +61,7 @@ class Turn:
     stats: dict
     persona: dict
     memories: list
+    summary_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -230,7 +231,25 @@ def _personas_down(db):
     db.execute("DROP TABLE personas")
 
 
-MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down), (_personas_up, _personas_down))
+def _summaries_up(db):
+    db.execute("""CREATE TABLE summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        through_ordinal INTEGER NOT NULL CHECK(through_ordinal >= 1), text TEXT NOT NULL,
+        model TEXT NOT NULL, created_at REAL NOT NULL)""")
+    db.execute("CREATE INDEX summaries_conversation ON summaries(conversation_id, through_ordinal)")
+    db.execute("ALTER TABLE turns ADD COLUMN summary_id INTEGER REFERENCES summaries(id) ON DELETE SET NULL")
+
+
+def _summaries_down(db):
+    if db.execute("SELECT 1 FROM summaries LIMIT 1").fetchone():
+        raise StoreError("Cannot roll back chat summaries. Preserve their data first.")
+    db.execute("ALTER TABLE turns DROP COLUMN summary_id")
+    db.execute("DROP TABLE summaries")
+
+
+MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down), (_personas_up, _personas_down),
+              (_summaries_up, _summaries_down))
 
 
 class Store:
@@ -387,8 +406,39 @@ class Store:
     def _snapshot_context(self, turn):
         persona = self.effective_persona(self.get_conversation(turn.conversation_id))
         memories = [{'id': f['id'], 'text': f['text']} for f in self.memories()]
-        self.db.execute("UPDATE turns SET persona=?,memories=? WHERE id=?",
-                        (_json(persona), json.dumps(memories, ensure_ascii=False), turn.id))
+        summary = self.latest_summary(turn.conversation_id, before=turn.ordinal)
+        self.db.execute("UPDATE turns SET persona=?,memories=?,summary_id=? WHERE id=?",
+                        (_json(persona), json.dumps(memories, ensure_ascii=False), summary['id'] if summary else None, turn.id))
+
+    def summaries(self, cid):
+        return [dict(row) for row in self.db.execute(
+            "SELECT id,through_ordinal,text,created_at FROM summaries WHERE conversation_id=? ORDER BY through_ordinal,id", (cid,))]
+
+    def latest_summary(self, cid, *, before=None):
+        """The current summary, or the latest one that only covers turns before an ordinal."""
+        row = self.db.execute("SELECT id,through_ordinal,text,created_at FROM summaries WHERE conversation_id=? AND (? IS NULL OR through_ordinal<?) ORDER BY through_ordinal DESC,id DESC LIMIT 1",
+                              (cid, before, before)).fetchone()
+        return dict(row) if row else None
+
+    def summary(self, sid):
+        row = self.db.execute("SELECT id,through_ordinal,text,created_at FROM summaries WHERE id=?", (sid,)).fetchone()
+        return dict(row) if row else None
+
+    def add_summary(self, tid, through_ordinal, text, model, *, replace=()):
+        """Save a summary, snapshot it onto the running turn, and drop the partial rows it supersedes."""
+        if (type(through_ordinal) is not int or not isinstance(text, str) or not text.strip()
+                or not isinstance(model, str) or not model):
+            raise StoreError("Invalid summary.")
+        with self._write():
+            turn = self._current(tid, None)
+            if turn.state != 'running' or not 1 <= through_ordinal < turn.ordinal:
+                raise StoreError("A summary can only cover earlier turns of a running turn.")
+            sid = self.db.execute("INSERT INTO summaries (conversation_id,through_ordinal,text,model,created_at) VALUES (?,?,?,?,?)",
+                                  (turn.conversation_id, through_ordinal, text.strip(), model, time.time())).lastrowid
+            self.db.execute("UPDATE turns SET summary_id=? WHERE id=?", (sid, tid))
+            for old in replace:
+                self.db.execute("DELETE FROM summaries WHERE id=? AND conversation_id=?", (old, turn.conversation_id))
+            return self.summary(sid)
 
     def create_conversation(self, title: str = "", *, title_source: str = "auto", model: str | None = None,
                             thinking: Thinking = "off", instructions: str = "", no_web: bool = False,
@@ -575,6 +625,12 @@ class Store:
                 for call in step.payload['tool_calls']:
                     trace.append({'kind': 'tool', 'id': call['id'], 'name': call['function']['name'],
                                   'arguments': call['function']['arguments'], 'status': 'running'})
+            elif step.kind == 'compaction_call':
+                trace.append({'kind': 'tool', 'id': step.payload['id'], 'name': 'summarize', 'arguments': '{}', 'status': 'running'})
+            elif step.kind == 'compaction_result':
+                tool = next((item for item in reversed(trace) if item.get('id') == step.payload['id']), None)
+                if tool:
+                    tool.update(status=step.payload['status'], result=step.payload['content'])
             elif step.kind == 'tool_result':
                 tool = next((item for item in reversed(trace) if item.get('id') == step.tool_call_id), None)
                 if tool:
@@ -665,12 +721,13 @@ class Store:
             if turn.state != 'queued':
                 raise StoreError("Only a queued turn can be sent now.")
             ordered = self.list_turns(turn.conversation_id)
-            settled = [t for t in ordered if t.state != 'queued']
+            # Settled turns keep their ordinals (summaries refer to them); only the queue is renumbered after them.
+            floor = max((t.ordinal for t in ordered if t.state != 'queued'), default=0)
             queued = [turn] + [t for t in ordered if t.state == 'queued' and t.id != tid]
             # Move out of the unique-ordinal range before assigning the execution order.
             shift = max(t.ordinal for t in ordered) + len(ordered)
-            self.db.execute("UPDATE turns SET ordinal=ordinal+? WHERE conversation_id=?", (shift, turn.conversation_id))
-            for ordinal, item in enumerate(settled + queued, 1):
+            self.db.execute("UPDATE turns SET ordinal=ordinal+? WHERE conversation_id=? AND state='queued'", (shift, turn.conversation_id))
+            for ordinal, item in enumerate(queued, floor + 1):
                 self.db.execute("UPDATE turns SET ordinal=?,revision=revision+1 WHERE id=?", (ordinal, item.id))
 
     def edit_resend(self, tid: str, request_id: str, text: str, *, model: str, snapshot: dict, identity: dict) -> Acceptance:
@@ -679,6 +736,7 @@ class Store:
             if turn.state not in TERMINAL:
                 raise StoreError("Only settled messages can be edited.")
             self.db.execute("DELETE FROM turns WHERE conversation_id=? AND ordinal>=?", (turn.conversation_id, turn.ordinal))
+            self.db.execute("DELETE FROM summaries WHERE conversation_id=? AND through_ordinal>=?", (turn.conversation_id, turn.ordinal))
             return self._accept_turn(turn.conversation_id, request_id, text, model=model,
                                      settings={**snapshot, '_request': identity})
 
@@ -689,10 +747,11 @@ class Store:
             if latest.id != tid or turn.state not in TERMINAL:
                 raise StoreError("Only the latest settled reply can be regenerated.")
             now = time.time()
-            self.db.execute("UPDATE turns SET state='queued',stats='{}',persona='{}',memories='[]',error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
+            self.db.execute("UPDATE turns SET state='queued',stats='{}',persona='{}',memories='[]',summary_id=NULL,error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
             self.db.execute("UPDATE messages SET content='',reasoning='',state='queued',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
             self.db.execute("DELETE FROM turn_steps WHERE turn_id=?", (tid,))
             self.db.execute("DELETE FROM sources WHERE turn_id=?", (tid,))
+            self.db.execute("DELETE FROM summaries WHERE conversation_id=? AND through_ordinal>=?", (turn.conversation_id, turn.ordinal))
 
     def history(self, cid: str, *, before: int | None = None, limit: int = 500) -> tuple[list[Message], bool]:
         # Cursor IDs stay stable, but their order follows turn ordinals after Send now.

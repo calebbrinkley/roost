@@ -2788,3 +2788,78 @@ test('Thoughts show collapsed memory snapshots and friendly remembered and forgo
   const frame = f.run(`applyStreamFrame(null,{reset:true,text:'Reply',thoughts:'',persona_name:'Guide',memories:[{id:1,text:'Snapshot'}]},'chat')`);
   assert.equal(frame.persona_name, 'Guide'); assert.equal(frame.memories[0].text, 'Snapshot');
 });
+
+function summaryRows() {
+  return `globalThis.rows=[
+    {id:1,turn_id:'a',role:'user',ordinal:1,state:'completed',content:'one'},{id:2,turn_id:'a',role:'assistant',ordinal:1,state:'completed',content:'reply one'},
+    {id:3,turn_id:'b',role:'user',ordinal:2,state:'completed',content:'two'},{id:4,turn_id:'b',role:'assistant',ordinal:2,state:'completed',content:'reply two'},
+    {id:5,turn_id:'c',role:'user',ordinal:3,state:'completed',content:'three'},{id:6,turn_id:'c',role:'assistant',ordinal:3,state:'completed',content:'reply three'}]`;
+}
+const dividerIndexes = f => f.get('transcript').children.map((node, index) => node.className === 'summary-divider' ? index : -1).filter(index => index >= 0);
+const afterMessage = (f, index) => f.get('transcript').children.slice(0, index).filter(node => node.className?.startsWith('message ')).length;
+
+test('summary divider follows the last loaded message at or before its boundary and never repeats', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+    state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[{id:1,through_ordinal:2,text:'First summary',created_at:'2026-10-01T10:00:00Z'}]};renderMessages(rows)`);
+  const [index] = dividerIndexes(f);
+  assert.equal(dividerIndexes(f).length, 1);
+  assert.equal(afterMessage(f, index), 4);
+  const divider = f.get('transcript').children[index];
+  assert.equal(divider.children[0].textContent, 'Earlier messages summarized');
+  assert.equal(divider.children[1].textContent, 'Read summary');
+  assert.equal(f.get('transcript').children[index - 1].className.startsWith('under'), true);
+  f.run('renderMessages(rows)');
+  assert.equal(dividerIndexes(f).length, 1);
+});
+
+test('summary dividers: several summaries, and none without a qualifying loaded message', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+    state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[
+      {id:1,through_ordinal:1,text:'S1',created_at:'2026-10-01T10:00:00Z'},{id:2,through_ordinal:3,text:'S2',created_at:'2026-10-02T10:00:00Z'}]};renderMessages(rows)`);
+  assert.deepEqual(dividerIndexes(f).map(index => afterMessage(f, index)), [2, 6]);
+  // Older history not paged in: the loaded rows start after the boundary.
+  f.run(`state.messageHistory.summaries=[{id:3,through_ordinal:0,text:'Old',created_at:'2026-10-01T10:00:00Z'}];renderMessages(rows)`);
+  assert.equal(dividerIndexes(f).length, 0);
+  f.run(`state.messageHistory.summaries=[];renderMessages(rows)`);
+  assert.equal(dividerIndexes(f).length, 0);
+});
+
+test('summary snapshots from the transcript response and stream frames update dividers', async () => {
+  const f = fixture(async () => ({ok: true, json: async () => ({})})); await tick();
+  f.run(`state.backend='native';state.current='chat';${summaryRows()};state.messageHistory={id:'chat',rows,loaded:false,loading:false};
+    api=async()=>({messages:rows,working:false,summaries:[{id:4,through_ordinal:1,text:'Saved',created_at:'2026-10-01T10:00:00Z'}]});`);
+  await f.run(`loadMessages('chat')`);
+  assert.equal(f.run('state.messageHistory.summaries[0].id'), 4);
+  assert.deepEqual(dividerIndexes(f).map(index => afterMessage(f, index)), [2]);
+  f.run(`globalThis.sources=[];globalThis.EventSource=function(){sources.push(this);this.close=()=>{};this.readyState=1};openStream('chat');loadMessages=async()=>{}`);
+  f.run(`sources[0].onmessage({data:JSON.stringify({reset:true,turn_id:'t',started:1,summaries:[{id:4,through_ordinal:1,text:'Saved'},{id:9,through_ordinal:2,text:'Live'}]})})`);
+  assert.equal(f.run('state.messageHistory.summaries.length'), 2);
+  assert.deepEqual(dividerIndexes(f).map(index => afterMessage(f, index)), [2, 4]);
+});
+
+test('summary sheet is read-only, shows the text and written time, and closes', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+    state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[{id:1,through_ordinal:1,text:'Line one\\nLine two',created_at:'2026-10-01T10:00:00Z'}]};renderMessages(rows)`);
+  const divider = f.get('transcript').children[dividerIndexes(f)[0]];
+  divider.events.click();
+  assert.equal(f.get('summary-sheet').open, true);
+  assert.equal(f.get('summary-text').textContent, 'Line one\nLine two');
+  assert.match(f.get('summary-written').textContent, /^Written .*Oct/);
+  f.get('summary-close').events.click();
+  assert.equal(f.get('summary-sheet').open, false);
+});
+
+test('summarize trace items use plain sentences for running, completed and error', async () => {
+  const f = fixture(); await tick();
+  const labels = ['running', 'completed', 'error'].map(status => {
+    f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'compaction-1',name:'summarize',arguments:'{}',status:'${status}',result:'ignored'}])`);
+    const tool = f.get('thoughts').children[0];
+    assert.equal(tool.children.length, 1);
+    assert.equal(tool.children[0].className, 'tool-call tool-call-plain');
+    return tool.children[0].textContent;
+  });
+  assert.deepEqual(labels, ['Summarizing earlier messages…', 'Summarized earlier messages', "Couldn't summarize earlier messages"]);
+});

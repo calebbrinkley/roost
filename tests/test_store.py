@@ -182,6 +182,49 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.memory_fact(fact['id'])['text'], 'Keep this fact')
         self.assertEqual(self.store.db.execute('SELECT version FROM schema_version').fetchone()[0], 4)
 
+    def test_summaries_migration_preserves_history_and_refuses_to_drop_summaries(self):
+        self.store.migrate(4)
+        self.store.db.execute("INSERT INTO conversations VALUES ('legacy','Existing','auto',NULL,'off','',0,0,1,1,NULL)")
+        self.store.db.execute("INSERT INTO turns (id,conversation_id,ordinal,request_id,fingerprint,state,model,settings,revision,error,created_at,updated_at) VALUES ('old','legacy',1,'old','fingerprint','completed','example-model','{}',0,NULL,1,1)")
+        self.store.db.execute("INSERT INTO messages VALUES (1,'legacy','old','user','Keep history','','completed',1,1)")
+        self.store.migrate(5)
+        self.assertIsNone(self.store.get_turn('old').summary_id)
+        self.assertEqual(self.store.get_message(1).content, 'Keep history')
+        self.store.migrate(4)
+        self.assertEqual(self.store.get_message(1).content, 'Keep history')
+        self.assertFalse(self.store.db.execute("SELECT name FROM sqlite_master WHERE name='summaries'").fetchone())
+        self.store.migrate(5)
+        self.store.db.execute("UPDATE turns SET state='running' WHERE id='old'")
+        self.store.db.execute("INSERT INTO turns (id,conversation_id,ordinal,request_id,fingerprint,state,model,settings,revision,error,created_at,updated_at) VALUES ('new','legacy',2,'new','fingerprint','running','example-model','{}',0,NULL,1,1)")
+        summary = self.store.add_summary('new', 1, 'Earlier chat.', 'example-model')
+        self.assertEqual(self.store.get_turn('new').summary_id, summary['id'])
+        with self.assertRaises(StoreError):
+            self.store.migrate(4)
+        self.assertEqual(self.store.summaries('legacy'), [summary])
+        with self.assertRaises(StoreError):
+            self.store.add_summary('new', 2, 'Covers itself.', 'example-model')
+        self.store.delete_conversation('legacy')
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM summaries").fetchone()[0], 0)
+
+    def test_send_now_never_renumbers_settled_turns_so_summaries_stay_aligned(self):
+        cid = self.store.create_conversation().id
+        def settle(tid):
+            self.store.set_turn_state(tid, 'running')
+            self.store.finish(tid, {})
+        turns = [self.store.accept_turn(cid, f'r{n}', f'Question {n}', model='example-model').turn_id for n in range(1, 7)]
+        for tid in turns[:3]:
+            settle(tid)
+        self.store.cancel_queued(turns[3])            # leaves a gap at ordinal 4
+        settle(turns[4])
+        self.store.set_turn_state(turns[5], 'running')
+        summary = self.store.add_summary(turns[5], 5, 'Covers 1 to 5.', 'example-model')
+        self.store.finish(turns[5], {})
+        queued = [self.store.accept_turn(cid, f'q{n}', f'Queued {n}', model='example-model').turn_id for n in (1, 2)]
+        self.store.send_now(queued[1])
+        self.assertEqual([(t.id, t.ordinal) for t in self.store.list_turns(cid)],
+                         [(turns[0], 1), (turns[1], 2), (turns[2], 3), (turns[4], 5), (turns[5], 6), (queued[1], 7), (queued[0], 8)])
+        self.assertEqual(self.store.summaries(cid)[0]['id'], summary['id'])
+
     def test_persona_default_delete_fallback_and_turn_snapshot(self):
         default = self.store.default_persona_id()
         persona = self.store.save_persona('Guide', 'You explain clearly.')
