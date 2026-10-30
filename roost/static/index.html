@@ -158,11 +158,12 @@
       <textarea id="sheet-instructions-text" maxlength="4000" rows="6" placeholder="How the agent should work in this conversation" data-agent-placeholder="How {agent} should work in this conversation"></textarea>
       <p id="sheet-hermes-note" class="sheet-note"><span data-agent-text="Sent to {agent} once, with your next message after you change them.">Sent to the agent once, with your next message after you change them.</span></p>
       <div id="sheet-native-settings" class="sheet-view hidden">
+        <label for="sheet-persona">Persona</label><select id="sheet-persona"></select>
         <label for="sheet-model">Model</label><select id="sheet-model"></select>
         <div id="sheet-thinking"><label for="sheet-reasoning">Thinking</label><select id="sheet-reasoning">
           <option value="none">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
         </select></div>
-        <label><input id="sheet-no-web" type="checkbox"> No web</label>
+        <label class="check-row"><input id="sheet-no-web" type="checkbox"> No web</label>
       </div>
       <p id="sheet-instructions-error" class="error" role="alert"></p>
       <div class="dialog-actions"><button id="sheet-instructions-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
@@ -179,6 +180,15 @@
       <p id="sheet-confirm-error" class="error" role="alert"></p>
       <div class="dialog-actions"><button id="sheet-confirm-cancel" class="secondary" type="button">Cancel</button><button id="sheet-confirm-delete" class="danger-button" type="button">Delete</button></div>
     </div>
+  </dialog>
+  <dialog id="remember-sheet" class="sheet" aria-labelledby="remember-title">
+    <form id="remember-form" class="sheet-view">
+      <label id="remember-title" class="sheet-title" for="remember-text">Remember across chats</label>
+      <textarea id="remember-text" maxlength="500" rows="4" required></textarea>
+      <p class="sheet-note">Keep a durable fact, preference, or project detail. You can edit or forget it in Settings › Memory.</p>
+      <p id="remember-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button id="remember-cancel" class="secondary" type="button">Cancel</button><button id="remember-save" class="primary" type="submit">Save memory</button></div>
+    </form>
   </dialog>
   <script src="/app.js" defer></script>
 </body>

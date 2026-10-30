@@ -30,7 +30,7 @@ test-ui:
 
 # The demo and its smoke check need aiohttp: run with a venv that has Roost installed.
 smoke:
-	$(PYTHON) dev/smoke.py
+	PYTHONPATH=. $(PYTHON) dev/smoke.py
 
 # Requires a running Docker engine and Compose v2; uses disposable containers and state.
 smoke-compose:

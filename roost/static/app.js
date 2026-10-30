@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 const SLICES = {
   conversations: () => ({ conversations: [], conversationOffset: 0, conversationsMore: false, loadingMore: false, refreshing: false,
                           search: "", searchResults: null, searchLoading: false, searchError: "", swipeOpenId: null, sheetItem: null, sheetBusy: false, listSignature: null }),
-  conversation: () => ({ current: null, model: null, noWeb: false, webForce: false, webAvailable: false, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
+  conversation: () => ({ current: null, currentPersona: null, rememberSource: null, rememberBusy: false, model: null, noWeb: false, webForce: false, webAvailable: false, editTurn: null, controlBusy: false, context: null, draft: false, draftSeed: undefined, reasoning: undefined, busy: false, sentMessages: [],
                          composerDrafts: null, composerKey: undefined, expandedUserMessages: new Set(),
                          lastRows: null, messageHistory: null, renderedConversation: null, messageSignature: null, lastMessagePoll: null, idleSince: null,
                          shownTimes: new Set(), openThoughts: new Set(), selectionDeferred: false, latestContent: "" }),
@@ -18,7 +18,7 @@ const SLICES = {
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
   settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
-                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, openModel: null, modelsError: "", modelsLoading: false }),
+                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
                     push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
 };
@@ -48,7 +48,12 @@ function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
 
 // The agent's name comes from the server: Roost's own setting, else Hermes's name for it, else "Agent".
 // The markup holds templates for it.
-function agent() { return state.agentName || "Agent"; }
+function agent() {
+  if (isNative()) return state.currentPersona || state.personaData?.personas.find(item => item.id === state.personaData.default_persona_id)?.name || state.agentName || "Assistant";
+  return state.agentName || "Agent";
+}
+
+function replyName(row) { return isNative() ? row.persona_name || agent() : agent(); }
 
 function applyAgentName(name) {
   if (name) state.agentName = name;
@@ -100,6 +105,8 @@ const ICONS = {
   data: [["ellipse", { cx: 12, cy: 6, rx: 8, ry: 3 }], ["path", { d: "M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" }]],
   server: [["rect", { x: 3, y: 4, width: 18, height: 7, rx: 2 }], ["rect", { x: 3, y: 13, width: 18, height: 7, rx: 2 }], ["path", { d: "M7 7.5h.01M7 16.5h.01" }]],
   info: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 11v6M12 7.5v.01" }]],
+  persona: [["circle", { cx: 12, cy: 8, r: 4 }], ["path", { d: "M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" }]],
+  memory: [["path", { d: "M6 3h12v18l-6-4.5L6 21z" }]],
 };
 
 function svgShapes(svg, shapes) {
@@ -241,9 +248,9 @@ function signedOut(clearLink = true) {
   renderApprovals();
   show("app", false); show("login", true);
   $("app").classList.remove("chat-open", "job-open", "settings-open", "peek");
-  for (const id of ["password", "message", "search", "sheet-name", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
+  for (const id of ["password", "message", "search", "sheet-name", "remember-text", "job-name", "job-prompt", "job-schedule", "job-deliver"]) $(id).value = "";
   for (const id of ["transcript", "conversation-list", "sidebar-jobs-list", "job-detail", "sidebar-settings-list", "settings-detail"]) $(id).replaceChildren();
-  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet"]) if ($(id).open) $(id).close();
+  for (const id of ["job-dialog", "conversation-sheet", "delivery-sheet", "remember-sheet"]) if ($(id).open) $(id).close();
   for (const id of ["chat-title", "job-detail-title", "job-detail-subtitle", "sheet-title", "sheet-confirm-title", "presence"]) $(id).textContent = "";
   $("send").disabled = false;
   $("composer").classList.remove("has-text");
@@ -616,12 +623,13 @@ async function openInstructions() {
   show("sheet-native-settings", isNative());
   show("sheet-hermes-note", !isNative());
   try {
-    if (isNative()) await loadModels();
+    if (isNative()) await Promise.all([loadModels(), loadPersonas()]);
     const data = await api(`/conversations/${encodeURIComponent(id)}/settings`);
     if (state.sheetItem !== item) return;
     field.value = typeof data.instructions === "string" ? data.instructions : "";
     if (isNative()) {
       fillModelPicker($("sheet-model"), data.model);
+      fillPersonaPicker($("sheet-persona"), data.persona_id);
       $("sheet-reasoning").value = data.reasoning || "none";
       $("sheet-no-web").checked = Boolean(data.no_web);
       updateSheetThinking();
@@ -637,8 +645,8 @@ async function saveInstructions(event) {
   const scope = signInScope();
   state.sheetBusy = true;
   try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked} : {}) }) });
-    if (isNative() && state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); }
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked, persona_id: $("sheet-persona").value || null} : {}) }) });
+    if (isNative() && state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); await loadMessages(id); }
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
   } catch (error) { if (scope.alive()) $("sheet-instructions-error").textContent = error.message; }
@@ -787,7 +795,7 @@ function finishLoadingConversations(data, rows, more) {
 
 function renderWelcome() {
   state.messageHistory = null; state.lastRows = null; state.messageSignature = null;
-  if (isNative()) { state.live = null; state.turn = null; state.model = null; state.noWeb = false; state.webForce = false; state.context = null; updateNativeComposer(); renderContext(); }
+  if (isNative()) { state.currentPersona = null; applyAgentName(); state.live = null; state.turn = null; state.model = null; state.noWeb = false; state.webForce = false; state.context = null; updateNativeComposer(); renderContext(); }
   if (state.composerKey === undefined) restoreComposer();
   if (state.sentMessages.some((item) => item.id === null && item.failed)) {
     $("chat-title").textContent = "New conversation";
@@ -997,6 +1005,34 @@ function fillThoughts(body, items) {
   body.replaceChildren();
   for (const [index, item] of items.entries()) {
     if (typeof item === "string" || item.kind === "reasoning") { addMarkdown(body, typeof item === "string" ? item : item.text); continue; }
+    if (item.kind === "memories") {
+      const used = el("details", "used-memories");
+      const key = `memories:${item.turn_id}`; used.open = state.openThoughts.has(key);
+      used.append(el("summary", "", `Used ${item.facts.length} ${item.facts.length === 1 ? "memory" : "memories"}`));
+      const list = el("ul", "used-memories-list");
+      for (const fact of item.facts) list.append(el("li", "", fact.text));
+      used.append(list);
+      used.addEventListener("toggle", () => { if (used.open) state.openThoughts.add(key); else state.openThoughts.delete(key); });
+      body.append(used); continue;
+    }
+    if (item.name === "remember") {
+      const tool = el("div", "thought-tool memory-step");
+      let result = {}; try { result = JSON.parse(item.result || "{}"); } catch { /* A partial result has no saved fact yet. */ }
+      let fact = item.fact;
+      try { fact ??= JSON.parse(item.arguments).fact; } catch { /* Keep incomplete arguments literal. */ }
+      const label = item.forgotten ? `Forgotten: ${fact}` : item.fact_id ? `Remembered: ${fact}` : item.status === "running" ? `Remembering: ${fact || "…"}` : `Memory not saved: ${result.error || item.status}`;
+      tool.append(el("div", "tool-call tool-call-plain", label));
+      if (item.fact_id && !item.forgotten) {
+        const remove = el("button", "send-action native-action memory-forget", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Forget this memory"); remove.title = "Forget this memory";
+        remove.addEventListener("click", async () => {
+          remove.disabled = true;
+          try { await api(`/memory/${item.fact_id}`, {method: "DELETE"}); state.memoryData = null; item.forgotten = true; fillThoughts(body, items); }
+          catch (error) { remove.disabled = false; notice(error.message); }
+        });
+        tool.append(remove);
+      }
+      body.append(tool); continue;
+    }
     let argument = item.arguments;
     try { const args = JSON.parse(argument); argument = args.query ?? args.url ?? argument; } catch { /* Show malformed arguments literally. */ }
     const tool = el("div", "thought-tool");
@@ -1022,6 +1058,42 @@ function fillThoughts(body, items) {
     output.addEventListener("toggle", () => { if (output.open) state.openThoughts.add(key); else state.openThoughts.delete(key); });
     tool.append(output); body.append(tool);
   }
+}
+
+function nativeThoughts(row) {
+  return [...(Array.isArray(row.memories) && row.memories.length ? [{kind: "memories", turn_id: row.turn_id, facts: row.memories}] : []), ...(row.trace || [])];
+}
+
+function rememberPrefill(row, body) {
+  const selection = window.getSelection?.();
+  const selected = selection && !selection.isCollapsed && body.contains(selection.anchorNode) && body.contains(selection.focusNode) ? String(selection) : "";
+  return (selected || messageText(row)).slice(0, 500);
+}
+
+function appendRemember(parent, row, body) {
+  if (!row.turn_id || !["completed", "failed", "interrupted"].includes(row.state)) return;
+  const button = el("button", "send-action native-action", "Remember…"); button.type = "button";
+  button.addEventListener("pointerdown", event => event.preventDefault());
+  button.addEventListener("click", () => {
+    state.rememberSource = {source_message_id: row.id, conversation_id: state.current};
+    $("remember-text").value = rememberPrefill(row, body); $("remember-error").textContent = "";
+    $("remember-sheet").showModal(); $("remember-text").focus();
+  });
+  parent.append(button);
+}
+
+async function saveRemember(event) {
+  event.preventDefault();
+  if (state.rememberBusy || !state.rememberSource) return;
+  const scope = signInScope(), data = {text: $("remember-text").value, ...state.rememberSource};
+  state.rememberBusy = true; $("remember-save").disabled = true;
+  try {
+    const result = await api("/memory", {method: "POST", body: JSON.stringify(data)});
+    if (!scope.alive()) return;
+    state.memoryData = result; $("remember-sheet").close();
+    notice(result.used_tokens > result.budget_tokens ? "Memory saved. Over budget; model saves are paused." : "Memory saved.");
+  } catch (error) { if (scope.alive()) $("remember-error").textContent = error.message; }
+  finally { if (scope.alive()) { state.rememberBusy = false; $("remember-save").disabled = false; } }
 }
 
 // Collapsed by default; one opened stays open across the transcript's polls.
@@ -1163,7 +1235,7 @@ function renderMessages(rows) {
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.timestamp, row.roost_usage, row.state, row.revision,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.timestamp, row.roost_usage, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -1200,7 +1272,7 @@ function renderMessages(rows) {
   let thoughts = [], thoughtsKey = null;
   all.forEach((row, index) => {
     const text = row.role === "assistant" && row.display_kind !== "hidden" ? reasoningText(row) : "";
-    const items = isNative() && Array.isArray(row.trace) ? row.trace : text ? [text] : [];
+    const items = isNative() && Array.isArray(row.trace) ? nativeThoughts(row) : text ? [text] : [];
     if (items.length) { thoughts.push(...items); thoughtsKey ??= String(row.id ?? `at ${index}`); }
     if (shownRows.has(row) && thoughts.length) { thoughtsBefore.set(row, [thoughts, thoughtsKey]); thoughts = []; thoughtsKey = null; }
   });
@@ -1212,6 +1284,7 @@ function renderMessages(rows) {
     const body = el("div", "message-body");
     if (row.role === "user") addUserMessage(body, messageText(row), key);
     else addReply(body, messageText(row), isNative() ? row.sources || [] : []);
+    if (isNative() && row.role === "assistant") wrapper.append(el("div", "persona-label", replyName(row)));
     wrapper.append(body);
     transcript.append(wrapper);
     const shown = time && state.shownTimes.has(key);
@@ -1232,14 +1305,14 @@ function renderMessages(rows) {
         });
         under.append(retry, remove);
       }
-      if (isNative()) appendTurnControls(under, row, all, body);
+      if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
       transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
       if (!isNative() && row.id != null) under.append(playButton(row.id));
       under.append(copyButton(messageText(row), "Copy reply"));
       if (isNative() && ["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
-      if (isNative()) appendTurnControls(under, row, all, body);
+      if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
       if (shown || (isNative() && row.state === "completed")) {
         const details = el("span", "reply-usage", `${shown ? time + " · " : ""}${replyUsage(row)}`);
         details.title = isNative() ? "Measured output tokens per second and time to first token. — means no recorded measurement." : "Whole reply: input/output tokens across completed model calls, including thinking and tool rounds. TPS is output tokens per model-call second, including prompt processing; tool execution is excluded. — means no recorded measurement.";
@@ -1285,7 +1358,7 @@ async function selectConversation(id, source) {
   stopRecording(true);
   if (state.current !== id) { state.voiceDraft = false; leaveLive(); }
   state.messageHistory = null; state.lastRows = null;
-  state.current = id; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
+  state.current = id; state.currentPersona = null; state.model = null; state.noWeb = false; state.webForce = false; state.editTurn = null; state.controlBusy = false; state.context = null;
   restoreComposer();
   state.draft = false;
   $("app").classList.add("chat-open");
@@ -1324,7 +1397,7 @@ async function loadMessages(id = state.current) {
     state.messageApplied = serial;
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, turn_id: data.turn_id, at };
-    if (isNative()) state.context = data.context;
+    if (isNative()) { state.context = data.context; state.currentPersona = data.persona_name || null; applyAgentName(); }
     if (data.live === true) openStream(id);
     else if (!state.turn.working && state.stream?.id === id && state.stream.healthy) {
       state.stream.healthy = false; resetMessagePolling();
@@ -1500,6 +1573,8 @@ function applyStreamFrame(previous, data, id) {
   if (typeof data.text === "string") live.text += data.text;
   if (Array.isArray(data.trace)) live.trace = data.trace;
   if (Array.isArray(data.sources)) live.sources = data.sources;
+  if (Array.isArray(data.memories)) live.memories = data.memories;
+  if (typeof data.persona_name === "string") live.persona_name = data.persona_name;
   live.done = Boolean(data.done);
   return live;
 }
@@ -1557,10 +1632,10 @@ function liveNodes(live) {
 
 function fillLive(live) {
   const nodes = state.liveNodes;
-  const items = isNative() && Array.isArray(live.trace) ? live.trace : live.thoughts.trim() ? [live.thoughts] : [];
-  const signature = JSON.stringify(items), reply = JSON.stringify([live.text, live.sources]);
+  const items = isNative() && Array.isArray(live.trace) ? nativeThoughts(live) : live.thoughts.trim() ? [live.thoughts] : [];
+  const signature = JSON.stringify(items), reply = JSON.stringify([live.text, live.sources, live.persona_name]);
   if (nodes.shownThoughts !== signature) { fillThoughts(nodes.thoughts, items); nodes.shownThoughts = signature; }
-  if (nodes.shownText !== reply) { nodes.body.replaceChildren(); addReply(nodes.body, live.text, live.sources || []); nodes.shownText = reply; }
+  if (nodes.shownText !== reply) { nodes.body.replaceChildren(); if (isNative()) nodes.body.append(el("div", "persona-label", replyName(live))); addReply(nodes.body, live.text, live.sources || []); nodes.shownText = reply; }
   nodes.details.classList.toggle("hidden", !items.length);
   nodes.message.classList.toggle("hidden", !live.text.trim());
 }
@@ -1573,7 +1648,7 @@ function renderLive() {
   if (!state.liveNodes) return renderMessages(state.lastRows);
   const transcript = $("transcript");
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
-  const changed = state.liveNodes.shownText !== JSON.stringify([live.text, live.sources]);
+  const changed = state.liveNodes.shownText !== JSON.stringify([live.text, live.sources, live.persona_name]);
   fillLive(live);
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
   updateLatest(changed);
@@ -2421,13 +2496,13 @@ function renderModels(detail) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ...(isNative() ? [["web", "Web search", "SearXNG connection"]] : []), ["agent", agent(), isNative() ? "Name" : "Name and instructions"], ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
+          ["models", "Models", "Backend and model server"], ...(isNative() ? [["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
           ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", isNative() ? "Replies on your devices" : "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
-const SETTINGS_ICONS = { web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+const SETTINGS_ICONS = { personas: "persona", memory: "memory", web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
   const scope = signInScope();
@@ -2438,6 +2513,8 @@ async function loadSettings() {
     state.settings = data;
     applyServerSettings(data);
     renderSettings();
+    if (isNative() && state.settingsGroup === "personas") { await loadPersonas(); renderSettings(); }
+    if (isNative() && state.settingsGroup === "memory") { await loadMemory(); renderSettings(); }
   } catch (error) { report(error, scope); }
   if (state.settingsGroup === "agent" && !isNative()) loadSoul();
 }
@@ -2449,6 +2526,8 @@ function selectSettingsGroup(id) {
   renderSettings();
   $("settings-detail").scrollTop = 0;
   if (id === "models") loadPrimary();
+  if (id === "personas") loadPersonas().then(renderSettings).catch(error => notice(error.message));
+  if (id === "memory") loadMemory().then(renderSettings).catch(error => notice(error.message));
   if (id === "agent" && !isNative()) loadSoul();
   if (id === "about") loadAbout();
   if (id === "account") loadPasskeys();
@@ -2475,7 +2554,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -2493,6 +2572,112 @@ function settingsButton(className, text, action) {
   button.disabled = state.settingsBusy;
   button.addEventListener("click", action);
   return button;
+}
+
+async function loadPersonas() {
+  const scope = signInScope(), data = await api("/personas");
+  if (scope.alive()) state.personaData = data;
+}
+
+async function loadMemory() {
+  const scope = signInScope(), data = await api("/memory");
+  if (scope.alive()) state.memoryData = data;
+}
+
+function fillPersonaPicker(picker, selected) {
+  picker.replaceChildren();
+  const data = state.personaData;
+  const name = data.personas.find(item => item.id === data.default_persona_id)?.name || "Assistant";
+  const defaultOption = el("option", "", `Default (${name})`); defaultOption.value = ""; picker.append(defaultOption);
+  for (const persona of data.personas) { const option = el("option", "", persona.name); option.value = persona.id; picker.append(option); }
+  picker.value = selected || "";
+}
+
+function renderPersonas(detail) {
+  if (!state.personaData) { detail.append(el("p", "", "Loading personas…")); return; }
+  const data = state.personaData;
+  const list = settingsSection(detail, "Personas", "Choose a voice for each chat. Changes apply when the next reply starts.");
+  for (const persona of data.personas) {
+    const row = el("div", "preset-row"), actions = el("div", "settings-actions");
+    row.append(el("strong", "", persona.name + (persona.id === data.default_persona_id ? " · Default" : "")));
+    actions.append(settingsButton("secondary", "Edit", () => { state.editPersona = {...persona}; renderSettings(); }));
+    if (persona.id !== data.default_persona_id) {
+      actions.append(settingsButton("secondary", "Set as default", () => withSettingsBusy(async scope => {
+        await api("/personas/default", {method: "PUT", body: JSON.stringify({default_persona_id: persona.id})});
+        if (scope.alive()) { await loadPersonas(); if (state.current) await loadMessages(); else { applyAgentName(); renderWelcome(); } }
+      })));
+      actions.append(settingsButton("danger-button", "Delete", () => withSettingsBusy(async scope => {
+        await api(`/personas/${persona.id}`, {method: "DELETE"});
+        if (scope.alive()) { if (state.editPersona?.id === persona.id) state.editPersona = null; await loadPersonas(); if (state.current) await loadMessages(); }
+      })));
+    }
+    row.append(actions); list.append(row);
+  }
+  if (!state.editPersona) { list.append(settingsButton("primary persona-add", "Add persona", () => { state.editPersona = {name: "", prompt: ""}; renderSettings(); })); return; }
+  const draft = state.editPersona, form = el("form", "preset-editor");
+  const nameLabel = el("label", "", "Name"); nameLabel.htmlFor = "persona-name";
+  const name = el("input"); name.id = "persona-name"; name.maxLength = 60; name.required = true; name.value = draft.name;
+  name.addEventListener("input", () => { draft.name = name.value; });
+  const promptLabel = el("label", "", "Persona prompt"); promptLabel.htmlFor = "persona-prompt";
+  const prompt = el("textarea"); prompt.id = "persona-prompt"; prompt.maxLength = 8000; prompt.rows = 8; prompt.value = draft.prompt;
+  prompt.addEventListener("input", () => { draft.prompt = prompt.value; });
+  const actions = el("div", "settings-actions"), save = el("button", "primary", "Save persona"); save.type = "submit"; save.disabled = state.settingsBusy;
+  actions.append(save, settingsButton("secondary", "Cancel", () => { state.editPersona = null; renderSettings(); }));
+  form.append(nameLabel, name, promptLabel, prompt, actions);
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const payload = {name: name.value, prompt: prompt.value};
+    withSettingsBusy(async scope => {
+      await api(draft.id ? `/personas/${draft.id}` : "/personas", {method: draft.id ? "PUT" : "POST", body: JSON.stringify(payload)});
+      if (scope.alive()) { state.editPersona = null; await loadPersonas(); if (state.current) await loadMessages(); else { applyAgentName(); renderWelcome(); } }
+    });
+  });
+  list.append(form);
+}
+
+function renderMemory(detail) {
+  const data = state.memoryData;
+  if (!data) { detail.append(el("p", "", "Loading memory…")); return; }
+  const section = settingsSection(detail, "Memory", "Every fact is included in every reply. Keep the things you want remembered across chats.");
+  const over = data.used_tokens > data.budget_tokens;
+  section.append(el("p", "memory-meter" + (over ? " over-budget" : ""), `~${data.used_tokens.toLocaleString()} / ${data.budget_tokens.toLocaleString()} tokens`));
+  const meter = el("progress", "memory-progress" + (over ? " over-budget" : "")); meter.max = data.budget_tokens; meter.value = data.used_tokens; meter.setAttribute("aria-label", "Memory tokens"); section.append(meter);
+  if (over) section.append(el("p", "memory-warning", "Over budget. You can still save facts; model saves are paused until memory fits."));
+  for (const fact of data.facts) {
+    const row = el("div", "preset-row memory-row"), head = el("div", "memory-row-head");
+    const actions = el("div", "memory-actions");
+    actions.append(settingsButton("secondary", "Edit", () => { state.editMemory = {...fact}; renderSettings(); }),
+      settingsButton("danger-button", "Delete", () => withSettingsBusy(async scope => {
+        const result = await api(`/memory/${fact.id}`, {method: "DELETE"});
+        if (scope.alive()) { state.memoryData = result; if (state.editMemory?.id === fact.id) state.editMemory = null; }
+      })));
+    head.append(el("span", "memory-origin", fact.origin === "model" ? "Model" : "You"), actions);
+    const text = el("p", "memory-text clamped", fact.text); row.append(head, text);
+    if (fact.text.length > 160 || fact.text.split("\n").length > 3) {
+      const more = el("button", "memory-more", "Show all"); more.type = "button"; more.setAttribute("aria-expanded", "false");
+      more.addEventListener("click", () => {
+        const open = text.classList.toggle("clamped") === false;
+        more.textContent = open ? "Show less" : "Show all"; more.setAttribute("aria-expanded", String(open));
+      });
+      row.append(more);
+    }
+    section.append(row);
+  }
+  const draft = state.editMemory || {text: ""}, form = el("form", "preset-editor");
+  const label = el("label", "", draft.id ? "Edit fact" : "Add a fact"); label.htmlFor = "memory-text";
+  const text = el("textarea"); text.id = "memory-text"; text.maxLength = 500; text.rows = 3; text.required = true; text.value = draft.text;
+  text.addEventListener("input", () => { state.editMemory = {...draft, text: text.value}; });
+  const actions = el("div", "settings-actions"), save = el("button", "primary", draft.id ? "Save fact" : "Add fact"); save.type = "submit"; save.disabled = state.settingsBusy;
+  actions.append(save);
+  if (draft.id) actions.append(settingsButton("secondary", "Cancel", () => { state.editMemory = null; renderSettings(); }));
+  form.append(label, text, actions); section.append(form);
+  form.addEventListener("submit", event => {
+    event.preventDefault(); const payload = {text: text.value};
+    withSettingsBusy(async scope => {
+      const result = await api(draft.id ? `/memory/${draft.id}` : "/memory", {method: draft.id ? "PUT" : "POST", body: JSON.stringify(payload)});
+      if (scope.alive()) { state.memoryData = result; state.editMemory = null; }
+    });
+  });
 }
 
 function renderAppearance(detail) {
@@ -2673,6 +2858,7 @@ function renderAbout(detail) {
 }
 
 function renderAgentSettings(detail) {
+  if (isNative()) return;
   const hermesName = state.settings.hermes_agent_name;
   const name = settingsSection(detail, "Name", hermesName ?
     `Leave empty to use the name Hermes gives it: ${hermesName}.` :
@@ -3261,6 +3447,8 @@ $("sheet-delete").addEventListener("click", () => {
 });
 $("sheet-rename-form").addEventListener("submit", renameConversation);
 $("sheet-instructions").addEventListener("click", openInstructions);
+$("remember-form").addEventListener("submit", saveRemember);
+$("remember-cancel").addEventListener("click", () => $("remember-sheet").close());
 $("sheet-instructions-form").addEventListener("submit", saveInstructions);
 $("sheet-export").addEventListener("click", () => setTimeout(() => $("conversation-sheet").close(), 0));
 $("chat-settings").addEventListener("click", () => {

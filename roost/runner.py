@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import suppress
 
 from .provider import Provider, ProviderError, ProviderHTTPError, ToolCall
-from .tools import WebTools, DEFINITIONS, TOTAL_SECONDS
+from .tools import WebTools, DEFINITIONS, TOTAL_SECONDS, REMEMBER_DEFINITION, REMEMBER_GUIDANCE, remember
 from .store import StoreError
 
 
@@ -56,7 +56,7 @@ class Runner:
         except ZoneInfoNotFoundError:
             zone = ZoneInfo('UTC')
         return item['id'], {'thinking_mode': item['thinking_mode'], 'context_tokens': item.get('context_tokens'),
-                            'tools_offered': offered, 'search_url': preferences.get('search_url', '') if offered else '',
+                            'remember_offered': item.get('tools', True), 'tools_offered': offered, 'search_url': preferences.get('search_url', '') if offered else '',
                             'web': web, 'current_time': datetime.now(zone).isoformat()}
 
     def client(self):
@@ -102,6 +102,13 @@ class Runner:
 
     def prompt(self, turn):
         messages = []
+        if turn.persona and turn.persona.get('prompt'):
+            messages.append({'role': 'system', 'content': turn.persona['prompt']})
+        memory = 'Memory facts:\n' + '\n'.join(f"[{f['id']}] {f['text']}" for f in turn.memories) if turn.memories else ''
+        if turn.settings.get('remember_offered'):
+            memory += ('\n\n' if memory else '') + REMEMBER_GUIDANCE
+        if memory:
+            messages.append({'role': 'system', 'content': memory})
         if turn.settings['instructions']:
             messages.append({'role': 'system', 'content': turn.settings['instructions']})
         now = turn.settings.get('current_time') or datetime.now(ZoneInfo('UTC')).isoformat()
@@ -150,10 +157,18 @@ class Runner:
             messages = self.prompt(turn)
             offered = turn.settings.get('tools_offered', False) and not turn.settings['no_web']
             web = WebTools(turn.settings.get('search_url', ''))
-            for round_index in range(4):
-                definitions = DEFINITIONS if offered and round_index < 3 and tool_seconds < TOTAL_SECONDS else None
+            web_rounds = remember_calls = 0
+            searched = False
+            assistant_id = self.messages(tid)[1].id
+            for round_index in range(7):
+                web_allowed = offered and web_rounds < 3 and tool_seconds < TOTAL_SECONDS
+                memory_allowed = turn.settings.get('remember_offered', False) and remember_calls < 3
+                definitions = ([*DEFINITIONS] if web_allowed else []) + ([REMEMBER_DEFINITION] if memory_allowed else [])
+                definitions = definitions or None
+                if round_index == 6:
+                    definitions = None
                 choice = ({'type': 'function', 'function': {'name': 'web_search'}}
-                          if definitions and round_index == 0 and turn.settings.get('web') == 'force' else None)
+                          if web_allowed and not searched and turn.settings.get('web') == 'force' else None)
                 calls, call_text, call_reasoning, call_usage = [], '', '', {}
                 force_fallback = False
                 while True:
@@ -191,7 +206,7 @@ class Runner:
                         force_fallback = True
                         messages = [*messages, {'role': 'system', 'content':
                                     'Search the web first for this message. Call web_search before answering.'}]
-                if force_fallback and not any(call.name == 'web_search' for call in calls):
+                if (force_fallback or choice is not None) and not any(call.name == 'web_search' for call in calls):
                     query = self.messages(tid)[0].content.strip()[:2000]
                     calls.insert(0, ToolCall(0, 'forced-web-search', 'web_search', json.dumps({'query': query})))
                 for key, value in call_usage.items():
@@ -211,10 +226,19 @@ class Runner:
                 messages.append(assistant)
                 self.store.checkpoint_assistant(tid, text, reasoning)
                 self.notify(turn.conversation_id)
+                has_web = any(c.name in ('web_search', 'read_page') for c in calls)
                 for index, call in enumerate(calls):
                     start = asyncio.get_running_loop().time()
                     remaining = TOTAL_SECONDS - tool_seconds
-                    if remaining <= 0 or index >= 8:
+                    if call.name == 'remember':
+                        if not memory_allowed or remember_calls >= 3:
+                            result = {'error': 'Remember limit reached (3 per reply).'}
+                        else:
+                            remember_calls += 1
+                            result = remember(self.store, call.arguments, assistant_id, turn.conversation_id)
+                    elif call.name in ('web_search', 'read_page') and not web_allowed:
+                        result = {'error': 'Web tools are unavailable.'}
+                    elif remaining <= 0 or index >= 8:
                         result = {'error': 'Tool budget exhausted. Answer with the sources already available.'}
                     else:
                         try:
@@ -222,6 +246,8 @@ class Runner:
                                 result = await web.execute(call.name, call.arguments)
                         except TimeoutError:
                             result = {'error': 'Total tool time exhausted.'}
+                    if call.name == 'web_search':
+                        searched = True
                     tool_seconds += asyncio.get_running_loop().time() - start
                     for source in result.get('results', [result] if result.get('url') else []):
                         source['n'] = self.store.add_source(tid, source['title'], source['url'])
@@ -231,6 +257,8 @@ class Runner:
                     messages.append({'role': 'tool', 'tool_call_id': call.id, 'content': content})
                     self.store.checkpoint_assistant(tid, text, reasoning)
                     self.notify(turn.conversation_id)
+                if has_web:
+                    web_rounds += 1
             self.store.checkpoint_assistant(tid, text, reasoning)
             ended = time.monotonic()
             duration = max(0, ended - began - tool_seconds)

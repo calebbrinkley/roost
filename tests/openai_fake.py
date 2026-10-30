@@ -77,10 +77,16 @@ class OpenAIFake:
         return stream
 
     def tool_frames(self, payload):
+        if self.scenario == 'remember':
+            if not any(m['role'] == 'tool' for m in payload['messages']):
+                return frame({'reasoning_content': 'I will keep this writing preference for future chats.'}) + frame({
+                    'tool_calls': [{'index': 0, 'id': 'save-preference', 'type': 'function', 'function': {
+                        'name': 'remember', 'arguments': json.dumps({'fact': 'The user prefers short paragraphs.'})}}]}, finish='tool_calls')
+            return frame({'content': 'I will keep that in mind.'}) + frame({}, finish='stop')
         if self.scenario == 'capture' and not any('Search the web' in m.get('content', '') for m in payload['messages'] if m['role'] == 'user'):
             return self.frames
         results = [m for m in payload['messages'] if m['role'] == 'tool']
-        if not payload.get('tools') or (len(results) >= (1 if self.scenario == 'capture' else 2) and self.scenario != 'cap'):
+        if not any(t['function']['name'] == 'web_search' for t in payload.get('tools', [])) or (len(results) >= (1 if self.scenario == 'capture' else 2) and self.scenario != 'cap'):
             return frame({'reasoning_content': 'The sources agree.'}) + frame({'content': 'A useful answer [1].'}) + frame({}, finish='stop', usage={'prompt_tokens': 128, 'completion_tokens': 64})
         if self.scenario == 'invalid' and not results:
             return tool_frames([('unknown', '{}'), ('web_search', '{broken'), ('read_page', '{"url": 3}')])

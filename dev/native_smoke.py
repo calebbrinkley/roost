@@ -115,6 +115,25 @@ async def run():
                 assert (await request('GET', '/api/conversations'))['sessions'][0]['title'] == 'My title'
                 assert (await request('GET', '/api/jobs')) == {'jobs': []}
                 assert (await request('GET', '/api/settings/soul')) == {'content': ''}
+                # Persona and global memory use the same authenticated browser contracts.
+                persona = await request('POST', '/api/personas', {'name': 'Guide', 'prompt': 'You explain warmly in short paragraphs.'}, 201)
+                await request('PUT', path + '/settings', {'persona_id': persona['id'], 'no_web': True})
+                manual = await request('POST', '/api/memory', {'text': 'The user likes concrete examples.',
+                                       'source_message_id': view['messages'][0]['id'], 'conversation_id': cid}, 201)
+                fake.scenario, fake.chunk_delay = 'remember', 0
+                remembered = await request('POST', path + '/messages', {'text': 'Keep my writing preference', 'request_id': str(uuid4())})
+                await settled(remembered['turn_id'])
+                reply = (await request('GET', path))['messages'][-1]
+                assert reply['persona_name'] == 'Guide'
+                assert reply['memories'] == [{'id': manual['fact']['id'], 'text': 'The user likes concrete examples.'}]
+                saved = next(item for item in reply['trace'] if item.get('name') == 'remember')
+                assert saved['fact'] == 'The user prefers short paragraphs.' and not saved['forgotten']
+                facts = (await request('GET', '/api/memory'))['facts']
+                assert [fact['origin'] for fact in facts] == ['user', 'model']
+                assert facts[-1]['source_message_id'] == remembered['assistant_message_id']
+                await request('DELETE', '/api/memory/' + str(saved['fact_id']))
+                assert next(item for item in (await request('GET', path))['messages'][-1]['trace'] if item.get('name') == 'remember')['forgotten']
+                await request('PUT', path + '/settings', {'no_web': False})
                 # Real local HTTP tools, with only the page resolver redirected to the test listener.
                 await request('PATCH', '/api/settings', {'search_url': search.url})
                 assert (await request('POST', '/api/settings/web-search/test', {'query': 'example'}))['results']
@@ -136,7 +155,7 @@ async def run():
                 await request('DELETE', path, {'confirm': True})
                 assert not (await request('GET', '/api/conversations'))['sessions']
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, web search/read/answer, forced search, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, citations, trace snapshots, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()

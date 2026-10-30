@@ -146,3 +146,38 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         parser = Readable()
         parser.feed('<p>' + 'word ' * 10000 + '</p>')
         self.assertEqual(len(parser.text()), 20000)
+
+
+class RememberTests(unittest.TestCase):
+    def test_save_duplicate_length_validation_and_budget(self):
+        import tempfile
+        from pathlib import Path
+        from roost.store import Store
+        from roost.tools import remember
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'native.sqlite3')
+            try:
+                cid = store.create_conversation().id
+                turn = store.accept_turn(cid, 'remember', 'Remember this', model='example-model')
+                def call(fact):
+                    return remember(store, json.dumps({'fact': fact}), turn.assistant_message_id, cid)
+                saved = call('  The user likes short answers.  ')
+                self.assertEqual(saved['status'], 'saved')
+                self.assertEqual(saved['fact'], 'The user likes short answers.')
+                self.assertEqual(store.memory_fact(saved['id'])['origin'], 'model')
+                self.assertIn('Duplicate', call('the USER likes SHORT answers.')['error'])
+                self.assertEqual(call('x' * 501)['error'], 'Too long.')
+                for arguments in ('{broken', '[]', '{}', '{"fact":3}', '{"fact":""}', '{"fact":"Fact","extra":true}'):
+                    self.assertIn('error', remember(store, arguments, turn.assistant_message_id, cid))
+                store.delete_memory(saved['id'])
+                for n in range(16):
+                    store.save_memory(str(n).zfill(3) + 'x' * 497)
+                self.assertEqual(store.memory_view()['used_tokens'], 2000)
+                self.assertEqual(call('New fact')['error'], 'Memory full.')
+                # Manual adds may cross the limit; model saves may not.
+                store.save_memory('Manual addition')
+                self.assertGreater(store.memory_view()['used_tokens'], 2000)
+                self.assertEqual(call('Another fact')['error'], 'Memory full.')
+                self.assertEqual(store.memory_view()['budget_tokens'], 2000)
+            finally:
+                store.close()
