@@ -1,5 +1,7 @@
 # Native chat API (Phases 2–3)
 
+[Attachments](native-attachments.md) add text and PDF context to a message (a send field, one extract route, and a message column).
+
 Phase 4a adds [personas and memory](native-phase4.md), including new routes, prompt ordering, and turn snapshots. That contract supersedes the Phase 2–3 details below where extended.
 
 The [fallback model server](native-fallback.md) can answer a turn when the primary server cannot start a reply; it adds `keep_local` to the chat settings and `served_by` to assistant rows and stream frames.

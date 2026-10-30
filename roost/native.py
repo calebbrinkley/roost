@@ -4,12 +4,21 @@ import asyncio
 import json
 import re
 import time
+from email import policy
+from email.parser import BytesParser
 from uuid import uuid4
 
 from aiohttp import web
 
+from . import attachments as files
 from . import server as http
 from .servers import ServerError
+from .store import payload_fingerprint
+
+
+# Attachment text rides in the JSON body: the cap is 120,000 characters, which can escape to 12 bytes each.
+SEND_LIMIT = 2 * 1024 * 1024
+UPLOAD_SECONDS = 20
 
 
 def enabled(app):
@@ -52,6 +61,7 @@ def row(app, message, names=None):
     return {'id': message.id, 'role': message.role, 'content': message.content, 'reasoning': message.reasoning,
             'timestamp': message.created_at, 'turn_id': turn.id, 'ordinal': turn.ordinal, 'revision': turn.revision,
             'state': turn.state, 'client_request_id': turn.request_id, 'error': turn.error,
+            **({'attachments': message.attachments} if message.attachments else {}),
             **({'roost_usage': {'input_tokens': usage.get('prompt_tokens'), 'output_tokens': usage.get('completion_tokens'),
                                 'model_seconds': stats.get('model_seconds'),
                                 'time_to_first_token': stats.get('time_to_first_token'),
@@ -134,7 +144,7 @@ def fields(data):
 
 
 def send_fields(data):
-    if set(data) - {'text', 'request_id', 'reasoning', 'instructions', 'model', 'web'}:
+    if set(data) - {'text', 'request_id', 'reasoning', 'instructions', 'model', 'web', 'attachments'}:
         raise http.bad('Unsupported send field.')
     if 'web' in data and data['web'] != 'force':
         raise http.bad('web must be force when provided.')
@@ -143,6 +153,21 @@ def send_fields(data):
     if not isinstance(request_id, str) or not http.SEND_ID.fullmatch(request_id):
         raise http.bad('Invalid send request identifier.')
     return text, request_id, fields(data)
+
+
+def attached(data):
+    """The validated attachments of a send or edit, or None when the request has no attachments field."""
+    if 'attachments' not in data:
+        return None
+    try:
+        return files.validate(data['attachments'])
+    except files.AttachmentError as exc:
+        raise http.bad(str(exc)) from None
+
+
+def digest(attachments):
+    """A short retry-identity for a send's attachments; the text itself is stored with the message."""
+    return payload_fingerprint({'attachments': [{'name': a['name'], 'text': a['text']} for a in attachments]})
 
 
 def acceptance(app, accepted):
@@ -155,11 +180,13 @@ def acceptance(app, accepted):
 
 
 async def submit(request, *, new=False):
-    data = await http.json_body(request)
+    data = await http.json_body(request, SEND_LIMIT)
     text, request_id, changes = send_fields(data)
+    attachments = attached(data)
     cid = None if new else chat(request).id
     store, runner = request.app['store'], request.app['runner']
-    identity = {'conversation_id': cid, 'text': text, 'changes': changes, **({'web': data['web']} if 'web' in data else {})}
+    identity = {'conversation_id': cid, 'text': text, 'changes': changes, **({'web': data['web']} if 'web' in data else {}),
+                **({'attachments': digest(attachments)} if attachments else {})}
     accepted = store.request(request_id, identity)
     if accepted is None:
         if not new and changes:
@@ -169,7 +196,7 @@ async def submit(request, *, new=False):
         override = changes.get('model') if new else store.get_conversation(cid).model
         model, snapshot = runner.snapshot(override, no_web=store.get_conversation(cid).no_web if cid else False, web=data.get('web'))
         accepted = store.submit(request_id, text, conversation_id=cid, model=model,
-                                changes=changes, snapshot=snapshot, identity=identity)
+                                changes=changes, snapshot=snapshot, identity=identity, attachments=attachments)
         runner.notify(accepted.conversation_id)
     http.sent_from_here(request, accepted.conversation_id)
     return web.json_response(acceptance(request.app, accepted), status=201 if new else 200)
@@ -289,7 +316,7 @@ async def control(request):
     c, action = chat(request), request.match_info['action']
     if action not in ('stop', 'cancel', 'send-now', 'edit', 'regenerate'):
         raise web.HTTPNotFound(text='Unknown turn control.')
-    data = await http.json_body(request)
+    data = await http.json_body(request, SEND_LIMIT)
     tid = data.get('turn_id')
     runner = request.app['runner']
     if action == 'stop':
@@ -297,12 +324,14 @@ async def control(request):
             raise http.bad('Stop needs a turn_id.')
         await runner.control(c.id, action, tid)
     elif action == 'edit':
-        if set(data) != {'turn_id', 'text', 'request_id'} or not isinstance(tid, str):
+        if set(data) - {'attachments'} != {'turn_id', 'text', 'request_id'} or not isinstance(tid, str):
             raise http.bad('Edit needs turn_id, text and request_id.')
         text, request_id, _ = send_fields({key: value for key, value in data.items() if key != 'turn_id'})
-        identity = {'edit': tid, 'conversation_id': c.id, 'text': text}
-        accepted = await runner.control(c.id, 'edit', tid, request_id=request_id, text=text,
-                                        identity=identity)
+        replacement = attached(data)
+        identity = {'edit': tid, 'conversation_id': c.id, 'text': text,
+                    **({'attachments': digest(replacement)} if replacement is not None else {})}
+        accepted = await runner.control(c.id, 'edit', tid, request_id=request_id, text=text, identity=identity,
+                                        **({'attachments': replacement} if replacement is not None else {}))
         http.sent_from_here(request, c.id)
         return web.json_response(acceptance(request.app, accepted))
     else:
@@ -406,6 +435,45 @@ async def memory_fact(request):
             raise http.bad('Send only memory text.')
         store.save_memory(data['text'], fid=int(fid))
     return web.json_response(store.memory_view())
+
+
+async def extract_attachment(request):
+    require_native(request)
+    if request.content_type != 'multipart/form-data':
+        raise http.bad('Send the file as multipart form data.')
+    too_large = {'error': f'That file is larger than {files.MAX_UPLOAD // 1024 // 1024} MB.'}
+    budget = files.MAX_UPLOAD + 65536
+    if (request.content_length or 0) > budget:
+        return web.json_response(too_large, status=413)
+    body = bytearray()
+    try:
+        async with asyncio.timeout(UPLOAD_SECONDS):
+            async for chunk in request.content.iter_chunked(65536):
+                if len(body) + len(chunk) > budget:
+                    return web.json_response(too_large, status=413)
+                body.extend(chunk)
+    except TimeoutError:
+        return web.json_response({'error': 'Uploading this file took too long. Try again.'}, status=408)
+    try:
+        # Parse only after bounding the entire body, including preamble, headers and epilogue.
+        header = ('Content-Type: ' + request.headers['Content-Type'] + '\r\n\r\n').encode()
+        message = BytesParser(policy=policy.default).parsebytes(header + body)
+        parts = list(message.iter_parts())
+        if message.defects or len(parts) != 1:
+            raise ValueError
+        part = parts[0]
+        if (part.defects or part.is_multipart() or part.get_content_disposition() != 'form-data'
+                or part.get_param('name', header='content-disposition') != 'file' or not part.get_filename()):
+            raise ValueError
+        data = part.get_payload(decode=True)
+        if data is None or part.defects:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise http.bad('Send one file as valid multipart form data.') from None
+    try:
+        return web.json_response(await files.extract(part.get_filename(), data))
+    except files.AttachmentError as exc:
+        return web.json_response({'error': str(exc)}, status=exc.status)
 
 
 def speech_client(app):

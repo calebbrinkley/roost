@@ -11,7 +11,7 @@ from .provider import Provider, ProviderConnectionError, ProviderError, Provider
 from .tools import WebTools, DEFINITIONS, TOTAL_SECONDS, REMEMBER_DEFINITION, REMEMBER_GUIDANCE, remember
 from .servers import ServerError
 from .store import StoreError
-from . import compaction
+from . import attachments, compaction
 
 # HTTP statuses that mean "not now" rather than "your request is wrong".
 RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504)
@@ -187,11 +187,15 @@ class Runner:
             if summary and prior.ordinal <= summary['through_ordinal']:
                 continue
             if prior.state in ('completed', 'interrupted'):
-                messages.extend({'role': row.role, 'content': row.content} for row in self.messages(prior.id)
+                messages.extend({'role': row.role, 'content': self.text(row)} for row in self.messages(prior.id)
                                 if row.role != 'assistant' or row.content)
-        user = self.messages(turn.id)[0]
-        messages.append({'role': 'user', 'content': user.content})
+        messages.append({'role': 'user', 'content': self.text(self.messages(turn.id)[0])})
         return messages
+
+    @staticmethod
+    def text(row):
+        """What the model reads for a message: a user message's attachments come before its typed text."""
+        return attachments.render(row.content, row.attachments)
 
     def messages(self, tid):
         return self.store.messages_for_turn(tid)
@@ -202,7 +206,7 @@ class Runner:
         ordered = self.store.list_turns(turn.conversation_id)
         last = next((t for t in reversed(ordered) if t.ordinal < turn.ordinal and t.state == 'completed'), None)
         reported = last.stats.get('usage', {}).get('prompt_tokens') if last else None
-        if compaction.due(route.context, reported, self.messages(turn.id)[0].content):
+        if compaction.due(route.context, reported, self.text(self.messages(turn.id)[0])):
             with suppress(ProviderError, StoreError):  # The reply can still try the full history.
                 return await self.compact(turn, route=route)
         return self.store.get_turn(turn.id)
@@ -215,7 +219,7 @@ class Runner:
         after = previous['through_ordinal'] if previous else 0
         older = [(t, self.messages(t.id)) for t in self.store.list_turns(cid)
                  if after < t.ordinal < turn.ordinal and t.state in ('completed', 'interrupted')]
-        pairs = [(rows[0].content, rows[1].content) for _, rows in older]
+        pairs = [(self.text(rows[0]), rows[1].content) for _, rows in older]
         context = route.context
         count, _ = compaction.split([compaction.estimate(u + a) for u, a in pairs], context or 0, overflow=overflow)
         if count == 0:

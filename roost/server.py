@@ -1218,6 +1218,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/models", native.models)
     app.router.add_post("/api/settings/web-search/test", native.test_web_search)
     app.router.add_get("/api/search", native.search)
+    app.router.add_post("/api/attachments/extract", native.extract_attachment)
     app.router.add_post("/api/conversations/{sid}/turns/{action}", native.control)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/me", me)
