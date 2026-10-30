@@ -190,11 +190,23 @@ async def run():
                 assert reply['content'] == 'Answered by the fallback.', reply
                 assert reply['served_by'] == {'server': 'fallback', 'model': 'backup-model', 'display_name': 'Backup'}
                 assert reply['trace'][-1]['name'] == 'fallback' and reply['trace'][-1]['status'] == 'completed'
+                # Native schedules use the same runner, with a durable run and notification.
+                job = await request('POST', '/api/jobs', {'name': 'Garden report', 'prompt': 'Report on the garden',
+                    'schedule': {'kind': 'every', 'value': 1, 'unit': 'hours'}, 'web': False}, 201)
+                await request('POST', '/api/jobs/' + job['id'] + '/trigger')
+                async with asyncio.timeout(5):
+                    while not (runs := (await request('GET', '/api/jobs/' + job['id'] + '/runs'))['runs']) or runs[0]['state'] != 'completed' or runs[0]['changed'] is None:
+                        await asyncio.sleep(.01)
+                run = runs[0]
+                assert run['conversation_id'] and run['turn_id']
+                assert app['store'].db.execute('SELECT 1 FROM push_outbox WHERE id=?', ('job-' + run['run_id'],)).fetchone()
+                assert not app['store'].get_turn(run['turn_id']).settings['remember_offered']
+                assert not app['store'].fallback_step(run['turn_id'])
                 await request('DELETE', '/api/conversations/' + spare_turn['session_id'], {'confirm': True})
                 await request('DELETE', path, {'confirm': True})
                 assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, fallback reply on a 503, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, fallback reply on a 503, native job trigger/run/outbox, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()

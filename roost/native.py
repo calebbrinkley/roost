@@ -102,6 +102,10 @@ async def conversation(request):
               'queue': [{'turn_id': t.id, 'position': position} for position, t in enumerate((t for t in ordered if t.state == 'queued'), 1)],
               'context': {'prompt_tokens': last.stats.get('usage', {}).get('prompt_tokens') if last else None,
                           'context_tokens': context_tokens}}
+    job = store.db.execute('''SELECT jobs.id,jobs.name,job_runs.scheduled_for FROM job_runs
+        JOIN jobs ON jobs.id=job_runs.job_id WHERE job_runs.conversation_id=?''', (c.id,)).fetchone()
+    if job:
+        result['job'] = dict(job)
     return web.json_response(result)
 
 
@@ -434,12 +438,66 @@ async def neutral(request):
     return web.json_response(result)
 
 
+async def jobs(request):
+    return web.json_response({'jobs': request.app['jobs'].listing()})
+
+
+def native_job(request):
+    job = request.app['jobs'].get(http.item_id(request, 'jid'))
+    if not job:
+        raise web.HTTPNotFound(text='Job does not exist.')
+    return job
+
+
+async def create_job(request):
+    return web.json_response(request.app['jobs'].save(await http.json_body(request)), status=201)
+
+
+async def get_job(request):
+    return web.json_response(native_job(request))
+
+
+async def job_runs(request):
+    return web.json_response({'runs': request.app['jobs'].runs(native_job(request)['id'])})
+
+
+async def update_job(request):
+    return web.json_response(request.app['jobs'].save(await http.json_body(request), native_job(request)['id']))
+
+
+async def job_action(request):
+    job, action = native_job(request), request.match_info['action']
+    service = request.app['jobs']
+    if action in ('pause', 'resume'):
+        return web.json_response(service.save({'enabled': action == 'resume'}, job['id']))
+    if action != 'trigger':
+        raise web.HTTPNotFound(text='Unknown job action.')
+    async with service.lock:
+        service.claim(job, service.clock())
+    return web.json_response(service.get(job['id']))
+
+
+async def delete_job(request):
+    job, data = native_job(request), await http.json_body(request)
+    if set(data) != {'confirm'} or data['confirm'] is not True:
+        raise http.bad('Confirm job deletion.')
+    await request.app['jobs'].delete(job['id'])
+    return web.json_response({'ok': True})
+
+
+async def delete_all_jobs(request):
+    http.confirmed_everything(await http.json_body(request))
+    jobs = request.app['jobs'].listing()
+    for job in jobs:
+        await request.app['jobs'].delete(job['id'])
+    return web.json_response({'deleted': len(jobs)})
+
+
 HANDLERS = {handler.__name__: handler for handler in (
     conversations, conversation, create_conversation, send_message, rename_conversation,
     delete_conversation, delete_all_conversations, get_chat_settings, update_chat_settings,
-    export_conversation, stream)}
+    export_conversation, stream, jobs, create_job, get_job, job_runs, update_job, job_action, delete_job, delete_all_jobs)}
 HANDLERS.update({name: neutral for name in (
-    'jobs', 'create_job', 'get_job', 'job_runs', 'update_job', 'job_action', 'delete_job', 'delete_all_jobs',
     'pending_approvals', 'respond_approval', 'get_soul', 'update_soul', 'restart_agent',
     'receive_delivery', 'receive_reply_usage', 'get_delivery', 'hermes_link', 'rotate_delivery_token', 'hermes_plugin',
     'transcribe', 'speech')})

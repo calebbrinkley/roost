@@ -322,10 +322,14 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await wait_for(lambda: cid not in self.app['runner'].active)
         self.assertEqual(self.store.get_conversation(cid).title, 'Mine')
         self.app['push'].send.assert_not_called()
+        self.assertFalse(self.store.db.execute('SELECT 1 FROM push_outbox').fetchone())
+        self.app['push'].list = lambda: [{'id': 'test-device'}]
         second = await self.send(cid, 'Notify me')
         self.app['presence'].clear()
         await self.settled(second['turn_id'])
-        await wait_for(lambda: self.app['push'].send.call_count == 1)
+        await wait_for(lambda: self.store.db.execute('SELECT 1 FROM push_outbox').fetchone())
+        await self.app['outbox'].tick()
+        self.assertEqual(self.app['push'].send.call_count, 1)
         message = self.app['push'].send.call_args.args[1]
         self.assertEqual(message['tag'], 'reply-' + second['turn_id'])
 

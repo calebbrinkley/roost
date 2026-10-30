@@ -507,7 +507,6 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .inline-edit .sheet-note { font-size: 13px; margin-top: 8px; }
 .inline-edit button { min-height: 44px; padding: 8px 12px; }
 @media (max-width: 700px) {
-  .native .mobile-tabbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-detail select { font-size: max(16px, calc(16px * var(--text-scale))); }
 }
 .native .from-agent .message-body:empty { display: none; }
@@ -564,4 +563,19 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   #summary-sheet button { min-height: 44px; min-width: 44px; }
   .persona-add, .preset-row button, .memory-more, .preset-editor button, .preset-editor input, .memory-forget, .used-memories summary,
   #sheet-persona, #remember-sheet button, #sheet-instructions-form .check-row { min-height: 44px; min-width: 44px; }
+}
+
+.job-dialog select { width: 100%; min-height: 44px; padding: 10px 12px; color: var(--ink); background: var(--frame); border: 1px solid var(--line); border-radius: 10px; }
+.job-interval { display: flex; gap: 12px; }
+.job-interval > * { min-width: 0; flex: 1; }
+.job-dialog .job-option { display: flex; align-items: center; gap: 12px; min-height: 44px; }
+.job-dialog .job-option input { width: 20px; height: 20px; }
+@media (pointer: coarse) {
+  .job-dialog input, .job-dialog button, .job-dialog select, .run-row button { min-height: 44px; }
+  .job-dialog .job-option input { min-height: 20px; }
+  .job-dialog button, .native .job-history-heading button { min-width: 44px; }
+  .native .job-history-heading button { min-height: 44px; }
+  .native .job-enabled .job-toggle { height: 44px; border-radius: 22px; }
+  .native .job-enabled .job-toggle::after { top: 8px; }
+  .job-dialog select { font-size: 16px; }
 }

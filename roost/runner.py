@@ -143,7 +143,7 @@ class Runner:
                         turn = ready[0]
                         self.store.set_turn_state(turn.id, 'running')
                         self.notify(turn.conversation_id)
-                        self.launch(turn.conversation_id, turn.id, self.generate(turn.id))
+                        self.launch(turn.conversation_id, turn.id, self.generate(turn.id, fallback=not turn.settings.get('job_run', False)))
                     else:
                         title = next((item for item in self.titles if item[0] not in self.active), None)
                         if title is None:
@@ -269,7 +269,7 @@ class Runner:
     async def generate(self, tid, *, fallback=True):
         """Run one turn. `fallback=False` keeps it on the primary server whatever the settings say."""
         turn = self.store.get_turn(tid)
-        route = Route(turn, allow=fallback)
+        route = Route(turn, allow=fallback and not turn.settings.get('job_run', False))
         text = reasoning = ''
         usage, first = {}, None
         began = checkpoint = time.monotonic()
@@ -465,6 +465,8 @@ class Runner:
             if current and current.state == 'running':
                 save()
                 self.store.checkpoint_assistant(tid, text, reasoning)
+                if turn.settings.get('job_run') and isinstance(exc, ProviderError) and starting_failure(exc) and not text and not reasoning and not self.store.list_steps(tid):
+                    self.store.db.execute("UPDATE turns SET stats=json_set(stats,'$.retryable_start',1) WHERE id=?", (tid,))
                 error = str(exc) if isinstance(exc, ProviderError) else 'Reply could not be completed.'
                 if route.role == 'fallback' and isinstance(exc, ProviderError):
                     error = (f"The primary server could not start this reply ({route.reason}), "

@@ -130,8 +130,19 @@
       <div class="dialog-heading"><h2 id="job-dialog-title">New job</h2><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
       <label for="job-name">Name</label><input id="job-name" maxlength="500" required placeholder="Morning briefing">
       <label for="job-prompt" data-agent-text="What should {agent} do?">What should the agent do?</label><textarea id="job-prompt" rows="5" maxlength="16000" required placeholder="Give me a clear overview of today's priorities."></textarea>
-      <label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00 AM.</p>
-      <label for="job-deliver">Delivery</label><input id="job-deliver" maxlength="500" value="local" required><p class="field-help">“local” saves the result in Hermes.</p>
+      <div id="native-job-kind" class="hidden"><label for="job-kind">Schedule kind</label><select id="job-kind"><option value="cron">Cron</option><option value="every">Every</option><option value="once">Once</option></select></div>
+      <div id="job-cron-fields"><label for="job-schedule">Schedule</label><input id="job-schedule" maxlength="500" required placeholder="0 8 * * *"><p id="job-schedule-preview" class="field-help">Example: 0 8 * * * runs daily at 8:00 AM.</p></div>
+      <div id="native-job-fields" class="hidden">
+        <div id="job-every-fields" class="hidden"><label for="job-every">Repeat every</label><div class="job-interval"><input id="job-every" type="number" min="1" max="525600" value="1" aria-label="Interval"><select id="job-unit" aria-label="Interval unit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></div></div>
+        <div id="job-once-fields" class="hidden"><label for="job-once">Run at (local time)</label><input id="job-once" type="datetime-local"></div>
+        <label for="job-zone">Time zone</label><select id="job-zone"></select>
+        <label for="job-model">Model</label><select id="job-model"></select>
+        <label for="job-persona">Persona</label><select id="job-persona"></select>
+        <label class="job-option"><input id="job-web" type="checkbox" checked> Allow web search</label>
+        <label class="job-option"><input id="job-changed" type="checkbox"> Notify only if changed</label>
+        <label class="job-option"><input id="job-memory" type="checkbox"> Allow memory saves</label>
+      </div>
+      <div id="job-delivery-fields"><label for="job-deliver">Delivery</label><input id="job-deliver" maxlength="500" value="local" required><p class="field-help">“local” saves the result in Hermes.</p></div>
       <div id="job-management" class="job-management hidden"><button id="delete-job" class="danger" type="button">Delete job</button></div>
       <div class="dialog-actions"><button id="cancel-job" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>

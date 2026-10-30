@@ -42,6 +42,7 @@ class Conversation:
     persona_id: str | None
     created_at: float
     updated_at: float
+    job_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -248,8 +249,42 @@ def _summaries_down(db):
     db.execute("DROP TABLE summaries")
 
 
+def _jobs_up(db):
+    db.execute("ALTER TABLE conversations ADD COLUMN job_run INTEGER NOT NULL DEFAULT 0 CHECK(job_run IN (0,1))")
+    db.execute("ALTER TABLE memory_facts ADD COLUMN job_id TEXT")
+    db.execute("ALTER TABLE memory_facts ADD COLUMN job_name TEXT")
+    db.execute("""CREATE TABLE jobs (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL, schedule TEXT NOT NULL,
+        time_zone TEXT NOT NULL, enabled INTEGER NOT NULL, model TEXT, persona TEXT REFERENCES personas(id) ON DELETE SET NULL,
+        web INTEGER NOT NULL, notify TEXT NOT NULL, allow_memory INTEGER NOT NULL,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL, next_due REAL)""")
+    db.execute("""CREATE TABLE job_runs (
+        run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        scheduled_for REAL NOT NULL, conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL, state TEXT NOT NULL,
+        result TEXT NOT NULL DEFAULT '', changed INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry REAL, deadline REAL NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        UNIQUE(job_id,scheduled_for))""")
+    db.execute("""CREATE TABLE push_outbox (
+        id TEXT PRIMARY KEY, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry REAL NOT NULL, created_at REAL NOT NULL, sent_at REAL, pending TEXT)""")
+    db.execute("CREATE INDEX push_outbox_due ON push_outbox(sent_at,next_retry)")
+
+
+def _jobs_down(db):
+    if (any(db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in ('jobs', 'job_runs', 'push_outbox'))
+            or db.execute("SELECT 1 FROM conversations WHERE job_run=1 LIMIT 1").fetchone()
+            or db.execute("SELECT 1 FROM memory_facts WHERE job_id IS NOT NULL LIMIT 1").fetchone()):
+        raise StoreError('Cannot roll back jobs or push outbox. Preserve their data first.')
+    for table in ('push_outbox', 'job_runs', 'jobs'):
+        db.execute(f"DROP TABLE {table}")
+    db.execute("ALTER TABLE memory_facts DROP COLUMN job_name")
+    db.execute("ALTER TABLE memory_facts DROP COLUMN job_id")
+    db.execute("ALTER TABLE conversations DROP COLUMN job_run")
+
+
 MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down), (_personas_up, _personas_down),
-              (_summaries_up, _summaries_down))
+              (_summaries_up, _summaries_down), (_jobs_up, _jobs_down))
 
 
 class Store:
@@ -389,6 +424,9 @@ class Store:
                     (text,origin,source_message_id,conversation_id,created_at,updated_at) VALUES (?,?,?,?,?,?)""",
                     (text, origin, source_message_id, conversation_id, now, now))
                 fid = cursor.lastrowid
+                job = self.db.execute("SELECT job_id FROM job_runs WHERE turn_id=(SELECT turn_id FROM messages WHERE id=?)", (source_message_id,)).fetchone() if source_message_id is not None else None
+                if job:
+                    self.db.execute("UPDATE memory_facts SET job_id=?,job_name=(SELECT name FROM jobs WHERE id=?) WHERE id=?", (job[0], job[0], fid))
             else:
                 self.db.execute("UPDATE memory_facts SET text=?,updated_at=? WHERE id=?", (text, now, fid))
         return self.memory_fact(fid)
@@ -464,14 +502,14 @@ class Store:
     def list_conversations(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
         if not 1 <= limit <= 500 or offset < 0:
             raise StoreError("Invalid conversation page.")
-        rows = self.db.execute("SELECT id FROM conversations ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (limit, offset))
+        rows = self.db.execute("SELECT id FROM conversations WHERE job_run=0 ORDER BY updated_at DESC, id LIMIT ? OFFSET ?", (limit, offset))
         return [self.get_conversation(row[0]) for row in rows]
 
     def conversation_ids(self) -> list[str]:
-        return [row[0] for row in self.db.execute("SELECT id FROM conversations")]
+        return [row[0] for row in self.db.execute("SELECT id FROM conversations WHERE job_run=0")]
 
     def count_conversations(self) -> int:
-        return self.db.execute("SELECT count(*) FROM conversations").fetchone()[0]
+        return self.db.execute("SELECT count(*) FROM conversations WHERE job_run=0").fetchone()[0]
 
     def messages_for_turn(self, turn_id: str) -> list[Message]:
         return [Message(**dict(row)) for row in self.db.execute(
@@ -725,6 +763,11 @@ class Store:
             self.db.execute("UPDATE turns SET stats=?,state='completed',revision=revision+1,updated_at=? WHERE id=?", (_json(stats), now, tid))
             self.db.execute("UPDATE messages SET state='completed',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, turn.conversation_id))
+            if turn.settings.get('job_run'):
+                # Claims see settlement immediately; changed=NULL leaves notification work durable.
+                self.db.execute("""UPDATE job_runs SET state='completed',
+                    result=(SELECT content FROM messages WHERE turn_id=? AND role='assistant'),updated_at=?
+                    WHERE turn_id=? AND state IN ('running','retrying')""", (tid, now, tid))
 
     def cancel_queued(self, tid: str) -> None:
         with self._write():
