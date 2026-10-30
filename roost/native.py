@@ -23,6 +23,11 @@ def chat(request):
     return result
 
 
+def turn_context(turn):
+    return {'persona_id': turn.persona.get('id'), 'persona_name': turn.persona.get('name'),
+            'memories': turn.memories}
+
+
 def row(app, message):
     turn = app['store'].get_turn(message.turn_id)
     stats, usage = turn.stats, turn.stats.get('usage', {})
@@ -33,7 +38,7 @@ def row(app, message):
                                 'model_seconds': stats.get('model_seconds'),
                                 'time_to_first_token': stats.get('time_to_first_token'),
                                 'tokens_per_second': stats.get('tokens_per_second')}, 'stats': stats,
-                'trace': app['store'].trace(turn.id), 'sources': app['store'].sources(turn.id)}
+                'trace': app['store'].trace(turn.id), 'sources': app['store'].sources(turn.id), **turn_context(turn)}
                if message.role == 'assistant' else {})}
 
 
@@ -69,7 +74,7 @@ async def conversation(request):
     working = any(t.state in ('queued', 'running') for t in ordered)
     last = next((t for t in reversed(ordered) if t.stats), None)
     context_tokens = last.settings.get('context_tokens') if last else None
-    result = {'session_id': c.id, 'messages': [row(request.app, m) for m in messages], 'has_older': older,
+    result = {'session_id': c.id, 'persona_name': store.effective_persona(c)['name'], 'messages': [row(request.app, m) for m in messages], 'has_older': older,
               'live': running is not None, 'working': working,
               'after': request.app['runner'].messages(running.id)[0].id - 1 if running else None,
               'started': running.created_at if running else None, 'turn_id': running.id if running else None,
@@ -97,6 +102,10 @@ def fields(data):
         if type(data['no_web']) is not bool:
             raise http.bad('no_web must be a boolean.')
         changes['no_web'] = data['no_web']
+    if 'persona_id' in data:
+        if data['persona_id'] is not None and (not isinstance(data['persona_id'], str) or not http.plain_id(data['persona_id'])):
+            raise http.bad('Invalid persona identifier.')
+        changes['persona_id'] = data['persona_id']
     return changes
 
 
@@ -176,7 +185,7 @@ async def delete_all_conversations(request):
 
 
 def chat_settings(c):
-    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model, 'no_web': c.no_web}
+    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model, 'no_web': c.no_web, 'persona_id': c.persona_id}
 
 
 async def get_chat_settings(request):
@@ -185,8 +194,8 @@ async def get_chat_settings(request):
 
 async def update_chat_settings(request):
     c, data = chat(request), await http.json_body(request)
-    if not data or set(data) - {'instructions', 'reasoning', 'model', 'no_web'}:
-        raise http.bad('Only instructions, reasoning, model and no_web can be changed.')
+    if not data or set(data) - {'instructions', 'reasoning', 'model', 'no_web', 'persona_id'}:
+        raise http.bad('Only instructions, reasoning, model, no_web and persona_id can be changed.')
     changes = fields(data)
     if changes.get('model') is not None:
         request.app['runner'].selected(changes['model'])
@@ -228,7 +237,7 @@ async def stream(request):
                            'thoughts': assistant.reasoning, 'text': assistant.content, 'approvals': [],
                            'turn_id': turn.id, 'revision': turn.revision, 'state': turn.state,
                            'done': turn.state not in ('running', 'queued'),
-                           'trace': store.trace(turn.id), 'sources': store.sources(turn.id)}
+                           'trace': store.trace(turn.id), 'sources': store.sources(turn.id), **turn_context(turn)}
                 await response.write(b'data: ' + json.dumps(payload).encode() + b'\n\n')
                 previous = marker
             if turn.state not in ('running', 'queued'):
@@ -303,6 +312,70 @@ async def search(request):
         c = request.app['store'].get_conversation(match['conversation_id'])
         results.append({**listing(request.app, c), 'snippet': match['snippet']})
     return web.json_response({'sessions': results})
+
+
+def require_native(request):
+    if not enabled(request.app):
+        raise web.HTTPNotFound(text='This feature requires Native backend.')
+    return request.app['store']
+
+
+async def personas(request):
+    store = require_native(request)
+    if request.method == 'POST':
+        data = await http.json_body(request)
+        if set(data) != {'name', 'prompt'}:
+            raise http.bad('Send a name and prompt.')
+        return web.json_response(store.save_persona(data['name'], data['prompt']), status=201)
+    return web.json_response({'personas': store.personas(), 'default_persona_id': store.default_persona_id()})
+
+
+async def persona(request):
+    store, pid = require_native(request), request.match_info['pid']
+    if request.method == 'DELETE':
+        store.delete_persona(pid)
+        return web.json_response({'ok': True})
+    data = await http.json_body(request)
+    if set(data) != {'name', 'prompt'}:
+        raise http.bad('Send a name and prompt.')
+    return web.json_response(store.save_persona(data['name'], data['prompt'], pid=pid))
+
+
+async def default_persona(request):
+    store, data = require_native(request), await http.json_body(request)
+    if set(data) != {'default_persona_id'}:
+        raise http.bad('Send a default_persona_id.')
+    store.set_default_persona(data['default_persona_id'])
+    return web.json_response({'default_persona_id': store.default_persona_id()})
+
+
+async def memory(request):
+    store = require_native(request)
+    if request.method == 'POST':
+        data = await http.json_body(request)
+        if 'text' not in data or set(data) - {'text', 'source_message_id', 'conversation_id'}:
+            raise http.bad('Send memory text and optional source message and conversation.')
+        fact = store.save_memory(data['text'], source_message_id=data.get('source_message_id'),
+                                 conversation_id=data.get('conversation_id'))
+        return web.json_response({'fact': fact, **store.memory_view()}, status=201)
+    return web.json_response(store.memory_view())
+
+
+async def memory_fact(request):
+    store = require_native(request)
+    fid = request.match_info['fid']
+    if not re.fullmatch(r'[0-9]{1,16}', fid) or not 1 <= int(fid) <= 9007199254740991:
+        raise http.bad('Invalid memory identifier.')
+    if request.method == 'DELETE':
+        store.delete_memory(int(fid))
+        for cid in store.conversation_ids():
+            request.app['runner'].notify(cid)
+    else:
+        data = await http.json_body(request)
+        if set(data) != {'text'}:
+            raise http.bad('Send only memory text.')
+        store.save_memory(data['text'], fid=int(fid))
+    return web.json_response(store.memory_view())
 
 
 async def neutral(request):

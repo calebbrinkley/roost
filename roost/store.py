@@ -39,6 +39,7 @@ class Conversation:
     instructions: str
     no_web: bool
     keep_local: bool
+    persona_id: str | None
     created_at: float
     updated_at: float
 
@@ -58,6 +59,8 @@ class Turn:
     created_at: float
     updated_at: float
     stats: dict
+    persona: dict
+    memories: list
 
 
 @dataclass(frozen=True)
@@ -182,7 +185,52 @@ def _sources_down(db):
     db.execute("DROP TABLE sources")
 
 
-MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down))
+DEFAULT_PERSONA_PROMPT = (
+    "You are a thoughtful AI assistant. You have no human life or body. Speak warmly and plainly, "
+    "with a little wit when it fits. Take an interest in what the user is trying to do and help them "
+    "make real progress.\n\n"
+    "Use short paragraphs and concrete language. Share your judgment, explain uncertainty, and ask "
+    "when a missing detail matters. For example: ‘Here is where I would start.’ Or: ‘That could work; "
+    "the tricky part is keeping it simple.’"
+)
+MEMORY_BUDGET = 2000
+
+
+def _personas_up(db):
+    db.execute("""CREATE TABLE personas (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 60),
+        prompt TEXT NOT NULL CHECK(length(prompt)<=8000), created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+    db.execute("CREATE TABLE native_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL REFERENCES personas(id))")
+    pid, now = str(uuid4()), time.time()
+    db.execute("INSERT INTO personas VALUES (?,?,?,?,?)", (pid, 'Assistant', DEFAULT_PERSONA_PROMPT, now, now))
+    db.execute("INSERT INTO native_settings VALUES ('default_persona_id',?)", (pid,))
+    db.execute("ALTER TABLE conversations ADD COLUMN persona_id TEXT REFERENCES personas(id) ON DELETE SET NULL")
+    db.execute("ALTER TABLE turns ADD COLUMN persona TEXT NOT NULL DEFAULT '{}'")
+    db.execute("ALTER TABLE turns ADD COLUMN memories TEXT NOT NULL DEFAULT '[]'")
+    db.execute("""CREATE TABLE memory_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 500),
+        origin TEXT NOT NULL CHECK(origin IN ('user','model')),
+        source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+
+
+def _personas_down(db):
+    if (db.execute("SELECT 1 FROM memory_facts LIMIT 1").fetchone()
+            or db.execute("SELECT count(*) FROM personas").fetchone()[0] != 1
+            or db.execute("SELECT name,prompt FROM personas").fetchone()[:] != ('Assistant', DEFAULT_PERSONA_PROMPT)
+            or db.execute("SELECT 1 FROM conversations WHERE persona_id IS NOT NULL LIMIT 1").fetchone()
+            or db.execute("SELECT 1 FROM turns WHERE persona != '{}' OR memories != '[]' LIMIT 1").fetchone()):
+        raise StoreError("Cannot roll back personas or memories. Preserve their data first.")
+    db.execute("DROP TABLE memory_facts")
+    db.execute("ALTER TABLE turns DROP COLUMN memories")
+    db.execute("ALTER TABLE turns DROP COLUMN persona")
+    db.execute("ALTER TABLE conversations DROP COLUMN persona_id")
+    db.execute("DROP TABLE native_settings")
+    db.execute("DROP TABLE personas")
+
+
+MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up, _sources_down), (_personas_up, _personas_down))
 
 
 class Store:
@@ -236,6 +284,112 @@ class Store:
     def close(self) -> None:
         self.db.close()
 
+    def personas(self):
+        return [dict(row) for row in self.db.execute("SELECT * FROM personas ORDER BY created_at,id")]
+
+    def persona(self, pid):
+        if not isinstance(pid, str):
+            return None
+        row = self.db.execute("SELECT * FROM personas WHERE id=?", (pid,)).fetchone()
+        return dict(row) if row else None
+
+    def default_persona_id(self):
+        return self.db.execute("SELECT value FROM native_settings WHERE key='default_persona_id'").fetchone()[0]
+
+    def effective_persona(self, conversation=None):
+        return self.persona(conversation.persona_id if conversation and conversation.persona_id else self.default_persona_id())
+
+    def save_persona(self, name, prompt, *, pid=None):
+        if (not isinstance(name, str) or not 0 < len(name.strip()) <= 60 or not name.strip().isprintable()
+                or not isinstance(prompt, str) or len(prompt) > 8000 or "\0" in prompt):
+            raise StoreError('Persona needs a name of 1 to 60 characters and a prompt of at most 8000 characters.')
+        with self._write():
+            now = time.time()
+            if pid is None:
+                pid = str(uuid4())
+                self.db.execute("INSERT INTO personas VALUES (?,?,?,?,?)", (pid, name.strip(), prompt, now, now))
+            elif not self.persona(pid):
+                raise StoreError('Persona does not exist.')
+            else:
+                self.db.execute("UPDATE personas SET name=?,prompt=?,updated_at=? WHERE id=?", (name.strip(), prompt, now, pid))
+        return self.persona(pid)
+
+    def set_default_persona(self, pid):
+        with self._write():
+            if not self.persona(pid):
+                raise StoreError('Persona does not exist.')
+            self.db.execute("UPDATE native_settings SET value=? WHERE key='default_persona_id'", (pid,))
+
+    def delete_persona(self, pid):
+        with self._write():
+            if pid == self.default_persona_id():
+                raise StoreError('The default persona cannot be deleted.')
+            if not self.persona(pid):
+                raise StoreError('Persona does not exist.')
+            self.db.execute("DELETE FROM personas WHERE id=?", (pid,))
+
+    def memory_fact(self, fid):
+        row = self.db.execute("SELECT * FROM memory_facts WHERE id=?", (fid,)).fetchone()
+        return dict(row) if row else None
+
+    def memories(self):
+        return [dict(row) for row in self.db.execute("SELECT * FROM memory_facts ORDER BY id")]
+
+    def memory_view(self):
+        facts = self.memories()
+        return {'facts': facts, 'used_tokens': sum((len(f['text']) + 3) // 4 for f in facts),
+                'budget_tokens': MEMORY_BUDGET}
+
+    def save_memory(self, text, *, origin='user', source_message_id=None, conversation_id=None, fid=None):
+        if isinstance(text, str):
+            # A fact is one prompt line: newlines must not forge extra fact lines.
+            text = ' '.join(text.split())
+        if not isinstance(text, str) or not 0 < len(text) <= 500 or "\0" in text:
+            raise StoreError('Memory must be 1 to 500 characters.')
+        if origin not in ('user', 'model'):
+            raise StoreError('Invalid memory origin.')
+        with self._write():
+            if fid is not None and not self.memory_fact(fid):
+                raise StoreError('Memory does not exist.')
+            if any(f['id'] != fid and f['text'].casefold() == text.casefold() for f in self.memories()):
+                raise StoreError('Duplicate memory.')
+            if origin == 'model' and self.memory_view()['used_tokens'] + (len(text) + 3) // 4 > MEMORY_BUDGET:
+                raise StoreError('Memory full.')
+            if conversation_id is not None and (not isinstance(conversation_id, str) or not self.get_conversation(conversation_id)):
+                raise StoreError('Conversation does not exist.')
+            if source_message_id is not None:
+                if type(source_message_id) is not int:
+                    raise StoreError('Invalid source message.')
+                message = self.get_message(source_message_id)
+                if not message or (conversation_id is not None and message.conversation_id != conversation_id):
+                    raise StoreError('Source message does not belong to this conversation.')
+                conversation_id = message.conversation_id
+            now = time.time()
+            if fid is None:
+                cursor = self.db.execute("""INSERT INTO memory_facts
+                    (text,origin,source_message_id,conversation_id,created_at,updated_at) VALUES (?,?,?,?,?,?)""",
+                    (text, origin, source_message_id, conversation_id, now, now))
+                fid = cursor.lastrowid
+            else:
+                self.db.execute("UPDATE memory_facts SET text=?,updated_at=? WHERE id=?", (text, now, fid))
+        return self.memory_fact(fid)
+
+    def delete_memory(self, fid):
+        with self._write():
+            if not self.memory_fact(fid):
+                raise StoreError('Memory does not exist.')
+            self.db.execute("DELETE FROM memory_facts WHERE id=?", (fid,))
+            # SSE observers must see the forgotten state even for a settled turn.
+            for row in self.db.execute("""SELECT DISTINCT turn_id FROM turn_steps WHERE kind='tool_result'
+                    AND json_extract(json_extract(payload,'$.content'),'$.id')=?""", (fid,)).fetchall():
+                self.db.execute("UPDATE turns SET revision=revision+1 WHERE id=?", (row[0],))
+
+    def _snapshot_context(self, turn):
+        persona = self.effective_persona(self.get_conversation(turn.conversation_id))
+        memories = [{'id': f['id'], 'text': f['text']} for f in self.memories()]
+        self.db.execute("UPDATE turns SET persona=?,memories=? WHERE id=?",
+                        (_json(persona), json.dumps(memories, ensure_ascii=False), turn.id))
+
     def create_conversation(self, title: str = "", *, title_source: str = "auto", model: str | None = None,
                             thinking: Thinking = "off", instructions: str = "", no_web: bool = False,
                             keep_local: bool = False) -> Conversation:
@@ -247,7 +401,7 @@ class Store:
             raise StoreError("Invalid conversation settings.")
         cid, now = str(uuid4()), time.time()
         with self._write():
-            self.db.execute("INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?,?,?)",
+            self.db.execute("INSERT INTO conversations (id,title,title_source,model,thinking,instructions,no_web,keep_local,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (cid, title, title_source, model, thinking, instructions, no_web, keep_local, now, now))
         return self.get_conversation(cid)
 
@@ -255,7 +409,7 @@ class Store:
         row = self.db.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
         if not row:
             return None
-        return Conversation(**{**dict(row), "no_web": bool(row["no_web"]), "keep_local": bool(row["keep_local"])})
+        return Conversation(**{"persona_id": None, **dict(row), "no_web": bool(row["no_web"]), "keep_local": bool(row["keep_local"])})
 
     def list_conversations(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
         if not 1 <= limit <= 500 or offset < 0:
@@ -317,7 +471,7 @@ class Store:
 
     def get_turn(self, turn_id: str) -> Turn | None:
         row = self.db.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone()
-        return Turn(**{**dict(row), "settings": json.loads(row["settings"]), "stats": json.loads(row["stats"])}) if row else None
+        return Turn(**{**dict(row), "settings": json.loads(row["settings"]), "stats": json.loads(row["stats"]), "persona": json.loads(dict(row).get("persona", "{}")), "memories": json.loads(dict(row).get("memories", "[]"))}) if row else None
 
     def list_turns(self, conversation_id: str) -> list[Turn]:
         rows = self.db.execute("SELECT id FROM turns WHERE conversation_id=? ORDER BY ordinal", (conversation_id,))
@@ -373,6 +527,8 @@ class Store:
                 return turn.revision
             if turn.state in TERMINAL or state == "queued":
                 raise StoreError("Invalid turn state transition.")
+            if state == 'running':
+                self._snapshot_context(turn)
             now = time.time()
             self.db.execute("UPDATE turns SET state=?, error=?, revision=revision+1, updated_at=? WHERE id=?", (state, error, now, turn_id))
             self.db.execute("UPDATE messages SET state=?, updated_at=? WHERE turn_id=? AND role='assistant'", (state, now, turn_id))
@@ -423,6 +579,11 @@ class Store:
                 tool = next((item for item in reversed(trace) if item.get('id') == step.tool_call_id), None)
                 if tool:
                     tool.update(status=step.payload['status'], result=step.payload['content'][:16000])
+                    if tool['name'] == 'remember':
+                        result = json.loads(step.payload['content'])
+                        if result.get('id'):
+                            tool.update(fact_id=result['id'], fact=result['fact'],
+                                        forgotten=self.memory_fact(result['id']) is None)
         if self.get_turn(tid).state not in ('queued', 'running'):
             for item in trace:
                 if item.get('status') == 'running':
@@ -438,7 +599,7 @@ class Store:
                 return previous
             if conversation_id is None:
                 cid, now = str(uuid4()), time.time()
-                self.db.execute("INSERT INTO conversations VALUES (?,?, 'auto',?,?,?,?,0,?,?)",
+                self.db.execute("INSERT INTO conversations (id,title,title_source,model,thinking,instructions,no_web,keep_local,created_at,updated_at) VALUES (?,?, 'auto',?,?,?,?,0,?,?)",
                                 (cid, content.splitlines()[0][:60], changes.get('model'),
                                  changes.get('thinking', 'off'), changes.get('instructions', ''), changes.get('no_web', False), now, now))
                 conversation_id = cid
@@ -454,7 +615,9 @@ class Store:
         return None
 
     def update_conversation(self, cid: str, changes: dict, *, auto_title: bool = False) -> None:
-        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions', 'no_web'}
+        allowed = {'title', 'title_source', 'model', 'thinking', 'instructions', 'no_web', 'persona_id'}
+        if 'persona_id' in changes and changes['persona_id'] is not None and not self.persona(changes['persona_id']):
+            raise StoreError('Persona does not exist.')
         if "no_web" in changes and type(changes["no_web"]) is not bool:
             raise StoreError("no_web must be a boolean.")
         if not changes or set(changes) - allowed:
@@ -526,7 +689,7 @@ class Store:
             if latest.id != tid or turn.state not in TERMINAL:
                 raise StoreError("Only the latest settled reply can be regenerated.")
             now = time.time()
-            self.db.execute("UPDATE turns SET state='queued',stats='{}',error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
+            self.db.execute("UPDATE turns SET state='queued',stats='{}',persona='{}',memories='[]',error=NULL,revision=revision+1,updated_at=? WHERE id=?", (now, tid))
             self.db.execute("UPDATE messages SET content='',reasoning='',state='queued',updated_at=? WHERE turn_id=? AND role='assistant'", (now, tid))
             self.db.execute("DELETE FROM turn_steps WHERE turn_id=?", (tid,))
             self.db.execute("DELETE FROM sources WHERE turn_id=?", (tid,))

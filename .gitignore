@@ -1,8 +1,10 @@
 .roost-state/
 .roost-demo-state/
-.venv/
+.venv
 __pycache__/
 *.pyc
 *.egg-info/
 .env
 compose.env
+
+/captures/

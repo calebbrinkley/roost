@@ -16,9 +16,10 @@ from roost import server, settings
 from roost.auth import make_password_hash
 from roost.provider import Event
 from roost.runner import Runner
-from roost.store import Store, StoreError
+from roost.store import Store, StoreError, DEFAULT_PERSONA_PROMPT
 from roost.servers import Servers, ServerError
-from openai_fake import OpenAIFake, frame
+from openai_fake import OpenAIFake, frame, tool_frames
+from roost.tools import REMEMBER_GUIDANCE
 
 
 async def wait_for(predicate, timeout=5):
@@ -28,7 +29,7 @@ async def wait_for(predicate, timeout=5):
 
 
 def without_clock(messages):
-    return [m for m in messages if not (m['role'] == 'system' and m['content'].startswith('Current date and time:'))]
+    return [m for m in messages if not (m['role'] == 'system' and (m['content'].startswith('Current date and time:') or m['content'] in (DEFAULT_PERSONA_PROMPT, REMEMBER_GUIDANCE)))]
 
 
 class NativeTests(unittest.IsolatedAsyncioTestCase):
@@ -384,7 +385,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         calls = self.generations()
         self.assertEqual(len(calls), 4)
         self.assertTrue(all('tools' in call for call in calls[:3]))
-        self.assertNotIn('tools', calls[3])
+        self.assertEqual([t['function']['name'] for t in calls[3]['tools']], ['remember'])
         self.assertEqual([s['n'] for s in self.store.sources(first['turn_id'])], [1, 2])
         self.assertEqual(len([s for s in self.store.list_steps(first['turn_id']) if s.kind == 'assistant_call']), 3)
 
@@ -461,7 +462,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(saved['no_web'])
         second = await self.send(cid, 'No web here')
         await self.settled(second['turn_id'])
-        self.assertNotIn('tools', self.generations()[-1])
+        self.assertEqual([t['function']['name'] for t in self.generations()[-1]['tools']], ['remember'])
         await self.request('POST', f'/api/conversations/{cid}/messages', {'text': 'Forced', 'web': 'force'}, 400)
         self.assertFalse(self.store.get_turn(second['turn_id']).settings['tools_offered'])
         servers = self.app['servers']
@@ -514,10 +515,213 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             await self.settled(first['turn_id'])
         self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
         self.assertEqual(len(self.generations()), 2)
-        self.assertNotIn('tools', self.generations()[-1])
+        self.assertEqual([t['function']['name'] for t in self.generations()[-1]['tools']], ['remember'])
         self.assertIn('Total tool time', self.store.trace(first['turn_id'])[1]['result'])
-        clock = self.generations()[0]['messages'][0]['content']
+        clock = next(m['content'] for m in self.generations()[0]['messages'] if m['content'].startswith('Current date and time:'))
         self.assertIn('-05:00', clock)
+
+
+    async def test_persona_and_memory_prompt_order_queued_edits_and_deleted_snapshot(self):
+        persona = await self.request('POST', '/api/personas', {'name': 'Guide', 'prompt': 'You are a patient guide.'}, 201)
+        memory = await self.request('POST', '/api/memory', {'text': 'The user prefers examples.'}, 201)
+        fid = memory['fact']['id']
+        self.fake.delay = .3
+        first = await self.create('First', instructions='Keep it concrete.')
+        cid = first['session_id']
+        await wait_for(lambda: self.store.get_turn(first['turn_id']).state == 'running')
+        queued = await self.send(cid, 'Second')
+        await self.request('PUT', f'/api/conversations/{cid}/settings', {'persona_id': persona['id']})
+        await self.request('PUT', f'/api/memory/{fid}', {'text': 'The user prefers diagrams.'})
+        await self.settled(queued['turn_id'])
+        first_turn, second_turn = self.store.get_turn(first['turn_id']), self.store.get_turn(queued['turn_id'])
+        self.assertEqual(first_turn.persona['name'], 'Assistant')
+        self.assertEqual(second_turn.persona['name'], 'Guide')
+        self.assertEqual(first_turn.memories, [{'id': fid, 'text': 'The user prefers examples.'}])
+        self.assertEqual(second_turn.memories, [{'id': fid, 'text': 'The user prefers diagrams.'}])
+        prompt = self.generations()[1]['messages']
+        self.assertEqual(prompt[0], {'role': 'system', 'content': 'You are a patient guide.'})
+        self.assertTrue(prompt[1]['content'].startswith(f'Memory facts:\n[{fid}] The user prefers diagrams.'))
+        self.assertIn(REMEMBER_GUIDANCE, prompt[1]['content'])
+        self.assertEqual(prompt[2], {'role': 'system', 'content': 'Keep it concrete.'})
+        self.assertTrue(prompt[3]['content'].startswith('Current date and time:'))
+        await self.request('DELETE', f'/api/memory/{fid}')
+        view = await self.request('GET', f'/api/conversations/{cid}')
+        reply = view['messages'][-1]
+        self.assertEqual(view['persona_name'], 'Guide')
+        self.assertEqual(reply['persona_name'], 'Guide')
+        self.assertEqual(reply['memories'], second_turn.memories)
+        async with self.client.get(f'/api/conversations/{cid}/stream') as response:
+            event = json.loads((await response.content.readline())[6:])
+        self.assertEqual(event['memories'], second_turn.memories)
+        self.assertEqual(event['persona_name'], 'Guide')
+        await self.request('DELETE', f"/api/personas/{persona['id']}")
+        self.assertIsNone(self.store.get_conversation(cid).persona_id)
+        self.assertEqual((await self.request('GET', f'/api/conversations/{cid}'))['persona_name'], 'Assistant')
+
+    async def test_memory_empty_prompt_and_tools_false_still_injects_facts(self):
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        prompt = self.generations()[0]['messages']
+        self.assertEqual(prompt[0]['content'], DEFAULT_PERSONA_PROMPT)
+        self.assertEqual(prompt[1]['content'], REMEMBER_GUIDANCE)
+        self.assertNotIn('Memory facts:', prompt[1]['content'])
+        primary = self.app['servers'].get('primary')
+        self.app['servers'].set_models('primary', {'models': [{**primary['models'][0], 'tools': False}], 'default_model': primary['default_model']})
+        fact = self.store.save_memory('A durable preference.')
+        second = await self.create()
+        await self.settled(second['turn_id'])
+        payload = self.generations()[-1]
+        self.assertNotIn('tools', payload)
+        self.assertEqual(payload['messages'][1]['content'], f"Memory facts:\n[{fact['id']}] A durable preference.")
+        self.assertNotIn(REMEMBER_GUIDANCE, str(payload))
+
+    async def test_empty_persona_prompt_adds_no_system_message(self):
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        turn = self.store.get_turn(first['turn_id'])
+        runner = self.app['runner']
+        self.assertEqual(runner.prompt(turn)[0]['content'], DEFAULT_PERSONA_PROMPT)
+        blank = SimpleNamespace(**{**vars(turn), 'persona': {'name': 'Blank', 'prompt': ''}})
+        self.assertNotIn('', [m['content'] for m in runner.prompt(blank) if m['role'] == 'system'])
+
+    async def test_regenerate_clears_persona_and_memory_snapshot_while_queued(self):
+        self.store.save_memory('A durable preference.')
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        self.assertTrue(self.store.get_turn(first['turn_id']).memories)
+        self.store.regenerate(first['turn_id'])
+        queued = self.store.get_turn(first['turn_id'])
+        self.assertEqual((queued.persona, queued.memories), ({}, []))
+
+    async def test_remember_save_duplicate_no_web_and_forget_trace(self):
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        cid = first['session_id']
+        await self.request('PUT', f'/api/conversations/{cid}/settings', {'no_web': True})
+        self.fake.scenario = 'remember'
+        second = await self.send(cid, 'Keep my preference')
+        await self.settled(second['turn_id'])
+        turn = self.store.get_turn(second['turn_id'])
+        self.assertEqual(turn.state, 'completed')
+        fact = self.store.memories()[0]
+        self.assertEqual(fact['origin'], 'model')
+        self.assertEqual(fact['source_message_id'], second['assistant_message_id'])
+        self.assertEqual(fact['conversation_id'], cid)
+        self.assertEqual([t['function']['name'] for t in self.generations()[-1]['tools']], ['remember'])
+        third = await self.send(cid, 'Again')
+        await self.settled(third['turn_id'])
+        self.assertEqual(len(self.store.memories()), 1)
+        self.assertIn('Duplicate', self.store.trace(third['turn_id'])[1]['result'])
+        edited = await self.request('PUT', f"/api/memory/{fact['id']}", {'text': 'An edited writing preference.'})
+        self.assertEqual(edited['facts'][0]['origin'], 'model')
+        self.assertEqual(edited['facts'][0]['source_message_id'], second['assistant_message_id'])
+        self.assertEqual(self.store.trace(second['turn_id'])[1]['fact'], fact['text'])
+        await self.request('DELETE', f"/api/memory/{fact['id']}")
+        self.assertTrue(self.store.trace(second['turn_id'])[1]['forgotten'])
+        self.assertEqual(self.store.get_turn(third['turn_id']).memories[0]['text'], fact['text'])
+
+    async def test_remember_cap_three_and_web_rounds_are_independent(self):
+        await self.web_fixture('scripted')
+        scripted = [tool_frames([('remember', json.dumps({'fact': f'Durable fact {n}.'}))], prefix=str(n)) for n in range(3)]
+        scripted += [tool_frames([('web_search', '{"query":"example"}')], prefix='web' + str(n)) for n in range(3)]
+        scripted += [frame({'content': 'Finished.'}) + frame({}, finish='stop')]
+        with patch.object(self.fake, 'tool_frames', side_effect=scripted):
+            first = await self.create()
+            await self.settled(first['turn_id'])
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        self.assertEqual(len(self.store.memories()), 3)
+        calls = self.generations()
+        self.assertEqual(len(calls), 7)
+        self.assertEqual([t['function']['name'] for t in calls[3]['tools']], ['web_search', 'read_page'])
+        self.assertNotIn('tools', calls[-1])
+        self.assertEqual(len([t for t in self.store.trace(first['turn_id']) if t.get('name') == 'web_search']), 3)
+        # A fourth call in the same batch is refused even if the provider ignores the advertised limit.
+        scripted = [tool_frames([('remember', json.dumps({'fact': f'Batch fact {n}.'})) for n in range(4)]),
+                    frame({'content': 'Done'}) + frame({}, finish='stop')]
+        with patch.object(self.fake, 'tool_frames', side_effect=scripted):
+            second = await self.create()
+            await self.settled(second['turn_id'])
+        trace = [t for t in self.store.trace(second['turn_id']) if t.get('name') == 'remember']
+        self.assertEqual(len(trace), 4)
+        self.assertIn('limit reached', trace[-1]['result'])
+        self.assertEqual(len(self.store.memories()), 6)
+
+    async def test_remember_cannot_satisfy_forced_search(self):
+        fake = await self.web_fixture('scripted')
+        scripted = [tool_frames([('remember', '{"fact":"The user likes examples."}')]),
+                    frame({'content': 'Searched and saved.'}) + frame({}, finish='stop')]
+        with patch.object(self.fake, 'tool_frames', side_effect=scripted):
+            first = await self.create('Look up an example', web='force')
+            await self.settled(first['turn_id'])
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        self.assertEqual([path for path, _ in fake.requests], ['/search'])
+        names = [t['name'] for t in self.store.trace(first['turn_id']) if t['kind'] == 'tool']
+        self.assertEqual(names, ['web_search', 'remember'])
+        self.assertEqual(len(self.store.memories()), 1)
+
+    async def test_default_persona_edit_and_new_chat_selection(self):
+        persona = await self.request('POST', '/api/personas', {'name': 'Guide', 'prompt': 'You guide.'}, 201)
+        await self.request('PUT', '/api/personas/default', {'default_persona_id': persona['id']})
+        await self.request('PUT', f"/api/personas/{persona['id']}", {'name': 'Builder', 'prompt': 'You build carefully.'})
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        self.assertIsNone(self.store.get_conversation(first['session_id']).persona_id)
+        turn = self.store.get_turn(first['turn_id'])
+        self.assertEqual(turn.persona['name'], 'Builder')
+        self.assertEqual(self.generations()[0]['messages'][0]['content'], 'You build carefully.')
+        self.assertEqual((await self.request('GET', '/api/settings'))['agent'], 'Builder')
+        await self.request('DELETE', f"/api/personas/{persona['id']}", status=400)
+
+    async def test_runner_returns_memory_full_while_manual_adds_remain_allowed(self):
+        for n in range(16):
+            await self.request('POST', '/api/memory', {'text': str(n).zfill(3) + 'x' * 497}, 201)
+        result = await self.request('POST', '/api/memory', {'text': 'One extra manual fact.'}, 201)
+        self.assertGreater(result['used_tokens'], result['budget_tokens'])
+        self.fake.scenario = 'remember'
+        first = await self.create()
+        await self.settled(first['turn_id'])
+        self.assertEqual(self.store.get_turn(first['turn_id']).state, 'completed')
+        self.assertEqual(len(self.store.memories()), 17)
+        trace = next(item for item in self.store.trace(first['turn_id']) if item.get('name') == 'remember')
+        self.assertEqual(trace['status'], 'error')
+        self.assertIn('Memory full.', trace['result'])
+        self.assertNotIn('fact_id', trace)
+
+    async def test_persona_memory_validation_origin_auth_and_hermes_isolation(self):
+        personas = await self.request('GET', '/api/personas')
+        pid = personas['default_persona_id']
+        await self.request('DELETE', f'/api/personas/{pid}', status=400)
+        for data in ({'name': '', 'prompt': ''}, {'name': 'x' * 61, 'prompt': ''}, {'name': 'Name', 'prompt': 'x' * 8001},
+                     {'name': [], 'prompt': ''}, {'name': 'Name', 'prompt': None}, {'name': 'Name', 'prompt': '', 'extra': True}):
+            await self.request('POST', '/api/personas', data, 400)
+        for data in ({'text': ''}, {'text': 'x' * 501}, {'text': []}, {'text': 'Fact', 'origin': 'model'},
+                     {'text': 'Fact', 'source_message_id': True}, {'text': 'Fact', 'conversation_id': []},
+                     {'text': 'Fact', 'source_message_id': 999999}):
+            await self.request('POST', '/api/memory', data, 400)
+        await self.request('PUT', '/api/personas/default', {'default_persona_id': []}, 400)
+        first, second = await self.create(), await self.create()
+        await self.settled(second['turn_id'])
+        await self.request('PUT', f"/api/conversations/{first['session_id']}/settings", {'persona_id': []}, 400)
+        await self.request('PUT', f"/api/conversations/{first['session_id']}/settings", {'persona_id': 'missing'}, 400)
+        await self.request('POST', '/api/memory', {'text': 'Fact', 'source_message_id': first['message_id'], 'conversation_id': second['session_id']}, 400)
+        memory = await self.request('POST', '/api/memory', {'text': '  A preference.  ', 'source_message_id': first['message_id']}, 201)
+        fid = memory['fact']['id']
+        self.assertEqual(memory['fact']['origin'], 'user')
+        await self.request('POST', '/api/memory', {'text': 'a PREFERENCE.'}, 400)
+        await self.request('PUT', f'/api/memory/{fid}', {'text': ''}, 400)
+        await self.request('DELETE', '/api/memory/nope', status=400)
+        for path, payload in (('/api/memory', {'text': 'Fact'}), ('/api/personas', {'name': 'Name', 'prompt': ''})):
+            async with self.client.post(path, json=payload) as response:
+                self.assertEqual(response.status, 403)
+        self.app['hermes'].profile.return_value = {'display_name': 'Remote assistant'}
+        await self.request('PATCH', '/api/settings', {'backend': 'hermes'})
+        for path in ('/api/memory', '/api/personas'):
+            await self.request('GET', path, status=404)
+        self.assertEqual(len(self.store.memories()), 1)
+        self.client.session.cookie_jar.clear()
+        for path in ('/api/memory', '/api/personas'):
+            await self.request('GET', path, status=401)
+            await self.request('POST', path, {}, 401)
 
 
 class RecoveryAndSearchTests(unittest.IsolatedAsyncioTestCase):

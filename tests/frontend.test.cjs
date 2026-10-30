@@ -2694,3 +2694,97 @@ test('globe has a named 44px coarse-pointer target and reflects toggle state', a
   f.get('web-toggle').events.click();
   assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'false');
 });
+
+test('native persona names label the header and each reply while Hermes keeps its agent name', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.agentName='Old name';state.currentPersona='Guide';`);
+  assert.equal(f.run('agent()'), 'Guide');
+  assert.equal(f.run(`replyName({persona_name:'Builder'})`), 'Builder');
+  f.run(`state.current='chat';state.turn={id:'chat',working:false};renderMessages([
+    {id:1,turn_id:'turn',ordinal:1,role:'user',state:'completed',content:'Question'},
+    {id:2,turn_id:'turn',ordinal:1,role:'assistant',state:'completed',content:'Answer',persona_name:'Builder',trace:[],memories:[]}
+  ])`);
+  const walk = node => [node, ...(node.children || []).flatMap(walk)];
+  assert.equal(walk(f.get('transcript')).find(node => node.className === 'persona-label').textContent, 'Builder');
+  assert.equal(walk(f.get('transcript')).filter(node => node.textContent === 'Remember…').length, 2);
+  f.run(`state.backend='hermes';state.agentName='Remote assistant'`);
+  assert.equal(f.run('agent()'), 'Remote assistant');
+  assert.equal(f.run(`replyName({persona_name:'Builder'})`), 'Remote assistant');
+});
+
+test('native settings offer Persona and Memory and hide the agent-name field', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';state.settings={};renderAgentSettings($('agent-settings'));`);
+  assert.equal(f.get('agent-settings').children.length, 0);
+  assert.ok(f.run(`settingsGroups().some(row=>row[0]==='personas')`));
+  assert.ok(f.run(`settingsGroups().some(row=>row[0]==='memory')`));
+  assert.ok(!f.run(`settingsGroups().some(row=>row[0]==='agent')`));
+  f.run(`state.personaData={default_persona_id:'default',personas:[{id:'default',name:'Assistant'},{id:'guide',name:'Guide'}]};fillPersonaPicker($('picker'),'guide')`);
+  assert.deepEqual(f.get('picker').children.map(node => node.textContent), ['Default (Assistant)', 'Assistant', 'Guide']);
+  assert.equal(f.get('picker').value, 'guide');
+  f.run(`state.backend='hermes'`);
+  assert.ok(!f.run(`settingsGroups().some(row=>['personas','memory'].includes(row[0]))`));
+});
+
+test('memory meter uses server counts and warns only above budget with origin tags', async () => {
+  const f = fixture(); await tick();
+  const walk = node => [node, ...(node.children || []).flatMap(walk)];
+  for (const count of [2000, 2001]) {
+    f.context.count = count;
+    f.run(`state.memoryData={facts:[{id:1,text:'A fact',origin:'model'},{id:2,text:'Another fact',origin:'user'}],used_tokens:count,budget_tokens:2000};$('memory-detail').replaceChildren();renderMemory($('memory-detail'))`);
+    const nodes = walk(f.get('memory-detail'));
+    assert.equal(nodes.find(node => node.className?.includes('memory-meter')).textContent, `~${count.toLocaleString()} / 2,000 tokens`);
+    assert.equal(nodes.filter(node => node.className === 'memory-warning').length, count > 2000 ? 1 : 0);
+    assert.deepEqual(nodes.filter(node => node.className === 'memory-origin').map(node => node.textContent), ['Model', 'You']);
+  }
+});
+
+test('Remember sheet prefills selection only from its message, caps text, and saves user source links', async () => {
+  const f = fixture(); await tick();
+  f.run(`globalThis.row={id:7,turn_id:'turn',role:'assistant',state:'completed',content:'Full message'};
+    globalThis.body={contains: node=>node==='inside'};state.current='chat';
+    window.getSelection=()=>({isCollapsed:false,anchorNode:'inside',focusNode:'inside',toString:()=> 'Selected fact'});
+    appendRemember($('actions'),row,body)`);
+  assert.equal(f.run('rememberPrefill(row, body)'), 'Selected fact');
+  f.run(`window.getSelection=()=>({isCollapsed:false,anchorNode:'outside',focusNode:'inside',toString:()=> 'Wrong fact'})`);
+  assert.equal(f.run('rememberPrefill(row, body)'), 'Full message');
+  f.run(`window.getSelection=()=>'';row.content='x'.repeat(600)`);
+  assert.equal(f.run('rememberPrefill(row, body).length'), 500);
+  f.get('actions').children[0].events.click();
+  assert.equal(f.get('remember-sheet').open, true);
+  assert.equal(f.get('remember-text').value.length, 500);
+  f.run(`globalThis.saved=null;api=async(path,options)=>{saved=JSON.parse(options.body);return {facts:[],used_tokens:2001,budget_tokens:2000};}`);
+  f.get('remember-text').value = 'Edited fact';
+  await f.run('saveRemember({preventDefault(){}})');
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(saved)')), {text:'Edited fact',source_message_id:7,conversation_id:'chat'});
+  assert.equal(f.get('remember-sheet').open, false);
+  assert.equal(f.run('state.rememberBusy'), false);
+  f.run(`$('pending-actions').replaceChildren();appendRemember($('pending-actions'),{...row,state:'running'},body)`);
+  assert.equal(f.get('pending-actions').children.length, 0);
+});
+
+test('Thoughts omit an empty memory snapshot and pluralise the used-memories summary', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';globalThis.none=nativeThoughts({turn_id:'t',memories:[],trace:[]});globalThis.two=nativeThoughts({turn_id:'t',memories:[{id:1,text:'A'},{id:2,text:'B'}],trace:[]});fillThoughts($('thoughts'),two)`);
+  assert.equal(f.run(`none.length`), 0);
+  assert.equal(f.get('thoughts').children[0].children[0].textContent, 'Used 2 memories');
+});
+
+test('Thoughts show collapsed memory snapshots and friendly remembered and forgotten steps', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native';globalThis.items=nativeThoughts({turn_id:'turn',memories:[{id:1,text:'Deleted later'}],trace:[
+    {kind:'tool',id:'save',name:'remember',arguments:'{"fact":"A lasting preference"}',status:'completed',fact_id:2,fact:'A lasting preference',forgotten:false}
+  ]});fillThoughts($('thoughts'),items);api=async()=>({facts:[],used_tokens:0,budget_tokens:2000})`);
+  const children = f.get('thoughts').children;
+  assert.equal(children[0].tagName, 'DETAILS'); assert.equal(children[0].open, false);
+  assert.equal(children[0].children[0].textContent, 'Used 1 memory');
+  assert.equal(children[0].children[1].tagName, 'UL'); assert.equal(children[0].children[1].children[0].textContent, 'Deleted later');
+  assert.equal(children[1].children[1].getAttribute('aria-label'), 'Forget this memory');
+  assert.equal(children[1].children[0].textContent, 'Remembered: A lasting preference');
+  assert.equal(children[1].children[1].textContent, '×');
+  await children[1].children[1].events.click();
+  assert.equal(f.get('thoughts').children[1].children[0].textContent, 'Forgotten: A lasting preference');
+  assert.equal(f.get('thoughts').children[1].children.length, 1);
+  const frame = f.run(`applyStreamFrame(null,{reset:true,text:'Reply',thoughts:'',persona_name:'Guide',memories:[{id:1,text:'Snapshot'}]},'chat')`);
+  assert.equal(frame.persona_name, 'Guide'); assert.equal(frame.memories[0].text, 'Snapshot');
+});

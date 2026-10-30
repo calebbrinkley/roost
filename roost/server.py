@@ -307,6 +307,8 @@ async def hermes_agent_name(app: web.Application, *, ask: bool) -> str:
 
 async def agent_name(app: web.Application, *, ask_hermes: bool) -> str:
     """Roost's own setting wins; then the name Hermes shows for its profile; then "Agent"."""
+    if native.enabled(app) and "store" in app:
+        return app["store"].effective_persona()["name"]
     return settings.load(app["settings_file"])["agent_name"] or await hermes_agent_name(app, ask=ask_hermes) or "Agent"
 
 
@@ -1184,6 +1186,15 @@ def create_app() -> web.Application:
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
     app.on_cleanup.append(cleanup)
+    app.router.add_get("/api/personas", native.personas)
+    app.router.add_post("/api/personas", native.personas)
+    app.router.add_put("/api/personas/default", native.default_persona)
+    app.router.add_put("/api/personas/{pid}", native.persona)
+    app.router.add_delete("/api/personas/{pid}", native.persona)
+    app.router.add_get("/api/memory", native.memory)
+    app.router.add_post("/api/memory", native.memory)
+    app.router.add_put("/api/memory/{fid}", native.memory_fact)
+    app.router.add_delete("/api/memory/{fid}", native.memory_fact)
     app.router.add_get("/api/models", native.models)
     app.router.add_post("/api/settings/web-search/test", native.test_web_search)
     app.router.add_get("/api/search", native.search)
