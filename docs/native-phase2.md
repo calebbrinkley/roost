@@ -4,6 +4,8 @@ Phase 4a adds [personas and memory](native-phase4.md), including new routes, pro
 
 The [fallback model server](native-fallback.md) can answer a turn when the primary server cannot start a reply; it adds `keep_local` to the chat settings and `served_by` to assistant rows and stream frames.
 
+Phase 5 adds [native voice](native-voice.md), connecting directly to an OpenAI-compatible speech server from Settings › Voice.
+
 Hermes remains the default. Select Native with `PATCH /api/settings` and `{"backend":"native"}`. Existing native history and Hermes history remain separate. Switching the view does not cancel accepted native turns. Native starts without Hermes configuration or connectivity.
 
 All endpoints below require the existing owner cookie, except `/api/me` which retains its public signed-out shape. Mutations retain the existing matching `Origin` and `X-Roost-Request: 1` checks. JSON errors are `{"error":"safe explanation"}`: invalid input/state 400, unauthenticated 401, rejected origin 403, missing conversation 404, conflicting request ID 409, full native queue 429. Existing model-configuration/provider error mappings remain in place. An accepted generation's upstream failure is recorded on its turn, rather than changing the already returned send status.
