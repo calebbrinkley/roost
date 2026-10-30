@@ -19,7 +19,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from . import __version__, live, native, provider, servers, settings, turns
+from . import __version__, live, native, provider, servers, settings, speech as speech_client, turns
 from .runner import Runner
 
 from .auth import Sessions, verify_password
@@ -119,6 +119,8 @@ async def guard(request: web.Request, handler):
                     raise web.HTTPUnauthorized(text="Sign in to Roost.")
         selected = native.HANDLERS.get(handler.__name__, handler) if native.enabled(request.app) else handler
         response = await selected(request)
+    except speech_client.SpeechError as exc:
+        response = web.json_response({"error": exc.message}, status=exc.status)
     except HermesError as exc:
         response = web.json_response({"error": exc.message}, status=exc.status)
     except StoreError as exc:
@@ -691,6 +693,12 @@ async def transcribe(request: web.Request):
 
 
 async def synthesize(app: web.Application, sid: str, mid: str) -> tuple[str, bytes]:
+    if native.enabled(app):
+        row = app['store'].get_message(int(mid)) if re.fullmatch(r'[0-9]{1,16}', mid) else None
+        text = speakable(re.sub(r'\[\d+\]', '', row.content)) if row and row.conversation_id == sid and row.role == 'assistant' else ''
+        if not text:
+            raise web.HTTPNotFound(text="There is nothing to read aloud there.")
+        return await native.speech_client(app).speak(text)
     rows = (await app["hermes"].messages(sid))["messages"]
     row = next((row for row in rows if isinstance(row, dict) and str(row.get("id")) == mid), None)
     text = speakable(turns.message_text(row)) if row and row.get("role") == "assistant" else ""
@@ -1179,6 +1187,7 @@ def create_app() -> web.Application:
     app["login_inflight"] = {}
     app["sessions"] = Sessions(state / "sessions.sqlite3")
     app["servers"] = model_servers
+    app["voice_settings"] = speech_client.VoiceSettings(state)
     # Passkeys are bound to the browser origin's host name (the WebAuthn relying party ID).
     app["passkeys"] = Passkeys(app["sessions"].db, origin, URL(origin).host)
     # VAPID's subject must be an https: or mailto: URL; a local HTTP preview can't receive pushes anyway.
@@ -1258,6 +1267,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/conversations/{sid}/speech/{mid}", speech)
     app.router.add_get("/api/settings", get_settings)
     app.router.add_patch("/api/settings", update_settings)
+    app.router.add_get("/api/settings/voice", native.voice_settings)
+    app.router.add_put("/api/settings/voice", native.voice_settings)
+    app.router.add_post("/api/settings/voice/test", native.voice_test)
     app.router.add_get("/api/settings/servers", get_servers)
     app.router.add_put("/api/settings/servers/{server_id}", update_server)
     app.router.add_post("/api/settings/servers/{server_id}/discover", discover_server_models)

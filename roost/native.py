@@ -476,6 +476,34 @@ async def extract_attachment(request):
         return web.json_response({'error': str(exc)}, status=exc.status)
 
 
+def speech_client(app):
+    from .speech import Speech
+    return Speech(app['provider_http'], app['voice_settings'], app['servers'])
+
+
+async def transcribe(request):
+    from .speech import MAX_RECORDING
+    data = await http.json_body(request, ((MAX_RECORDING + 2) // 3) * 4 + 4096)
+    return web.json_response({'transcript': await speech_client(request.app).transcribe(data)})
+
+
+async def voice_settings(request):
+    require_native(request)
+    saved = request.app['voice_settings']
+    if request.method == 'PUT':
+        result = saved.update(await http.json_body(request))
+        request.app['speech'].clear()
+        return web.json_response(result)
+    return web.json_response(saved.public())
+
+
+async def voice_test(request):
+    require_native(request)
+    if await http.json_body(request):
+        raise http.bad('Send an empty test request.')
+    return http.audio_response(request, *await speech_client(request.app).speak('Voice is ready.'))
+
+
 async def neutral(request):
     name = request.match_info.route.handler.__name__
     if request.path in http.PLUGIN_PATHS:
@@ -505,9 +533,8 @@ async def neutral(request):
 HANDLERS = {handler.__name__: handler for handler in (
     conversations, conversation, create_conversation, send_message, rename_conversation,
     delete_conversation, delete_all_conversations, get_chat_settings, update_chat_settings,
-    export_conversation, stream)}
+    export_conversation, stream, transcribe)}
 HANDLERS.update({name: neutral for name in (
     'jobs', 'create_job', 'get_job', 'job_runs', 'update_job', 'job_action', 'delete_job', 'delete_all_jobs',
     'pending_approvals', 'respond_approval', 'get_soul', 'update_soul', 'restart_agent',
-    'receive_delivery', 'receive_reply_usage', 'get_delivery', 'hermes_link', 'rotate_delivery_token', 'hermes_plugin',
-    'transcribe', 'speech')})
+    'receive_delivery', 'receive_reply_usage', 'get_delivery', 'hermes_link', 'rotate_delivery_token', 'hermes_plugin')})

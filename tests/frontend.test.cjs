@@ -2483,7 +2483,8 @@ test('native controls follow turn state and latest reply', async () => {
 test('native surfaces hide Hermes features while Hermes keeps them', async () => {
   const f = fixture(); await tick();
   assert.ok(Object.values(f.run(`backendSurfaces('hermes')`)).every(Boolean));
-  assert.ok(Object.values(f.run(`backendSurfaces('native')`)).every(value => !value));
+  assert.equal(f.run(`backendSurfaces('native').voice`), true);
+  assert.ok(Object.entries(f.run(`backendSurfaces('native')`)).filter(([key]) => key !== 'voice').every(([, value]) => !value));
   f.run(`state.backend='native'; state.settings={agent_name:''}; state.push={devices:[]}; state.about={
     roost:{},runtime:{},stats:{},at:new Date(),hermes:{reachable:false}};
     renderAgentSettings($('settings-detail')); renderServiceSettings($('settings-detail')); renderNotifications($('settings-detail')); renderAbout($('settings-detail'));`);
@@ -3147,4 +3148,81 @@ test('the fallback trace item shows its sentence while running and after an inte
     assert.equal(tool.children.length, 1);
     assert.equal(tool.children[0].textContent, result);
   }
+});
+
+test('native Voice settings save models and a write-only custom key', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.settings={}; state.settingsGroup='voice';
+    state.voiceSettings={same_as_model:true,base_url:'',has_key:true,transcription_model:'whisper-1',speech_model:'tts-1',voice:'alloy'};
+    globalThis.voiceCalls=[];
+    api=async (path, options) => { voiceCalls.push([path,options]); return {...state.voiceSettings,has_key:true}; };
+    renderSettings();`);
+  assert.equal(f.run(`settingsGroups().some(([id]) => id === 'voice')`), true);
+  const section = f.get('settings-detail').children[0];
+  const all = node => [node, ...(node.children || []).flatMap(all)];
+  const find = id => all(section).find(node => node.id === id);
+  assert.equal(find('settings-voice-key').value, '');
+  const server = find('settings-voice-server');
+  assert.equal(server.value, 'model');
+  server.value = 'custom'; server.events.change();
+  find('settings-voice-url').value = 'https://speech.example.invalid/v1';
+  find('settings-voice-key').value = 'example-key';
+  find('settings-voice-voice').value = 'nova';
+  const save = all(section).find(node => node.tagName === 'BUTTON' && node.textContent === 'Save');
+  await save.events.click();
+  const [path, options] = f.run('voiceCalls[0]');
+  assert.equal(path, '/settings/voice');
+  const body = JSON.parse(options.body);
+  assert.equal(body.key, 'example-key'); assert.equal(body.voice, 'nova'); assert.equal(body.same_as_model, false);
+  f.run(`state.backend='hermes'`);
+  assert.equal(f.run(`settingsGroups().some(([id]) => id === 'voice')`), false);
+});
+
+test('native recording stops at two minutes and auto-reads the committed reply', async () => {
+  const {players, recorders, globals} = voiceBrowser();
+  const timers = [];
+  let recordingTick;
+  const f = fixture(undefined, {...globals, setInterval: fn => {recordingTick = fn; return 1;},
+    setTimeout: fn => {timers.push(fn); return 1;}}); await tick();
+  f.run(`state.backend='native'; state.current='one'; globalThis.calls=[];
+    api=async (path, options={}) => {calls.push([path,options.body]); return path === '/audio/transcribe' ? {transcript:'Hello'} : {session_id:'one'};};
+    loadConversations=async () => {}; loadMessages=async () => {};`);
+  await f.get('voice-button').events.click();
+  f.run('voice.take.started = Date.now() - 120000');
+  recordingTick();
+  for (let n = 0; n < 5; n++) await tick();
+  assert.equal(recorders[0].state, 'inactive');
+  assert.equal(f.get('message').value, 'Hello');
+  assert.equal(JSON.parse(f.run('calls[0][1]')).duration_seconds, 120);
+  await f.run('submitMessage({preventDefault(){}})');
+  assert.equal(players[0].src, '/api/audio/silence');
+  f.run(`globalThis.rows=[{id:1,role:'user',content:'Hello',turn_id:1,state:'running',client_request_id:state.sentMessages[0].request_id}];
+    state.turn={id:'one',working:true,at:Date.now()}; renderMessages(rows);`);
+  assert.equal(f.run('state.voiceReply.row'), 1);
+  assert.equal(timers.length, 0);
+  f.run(`rows.push({id:2,role:'assistant',content:'Native reply.',turn_id:1,state:'completed'});
+    state.turn={id:'one',working:false,at:Date.now()}; renderMessages(rows);`);
+  assert.ok(find(f.get('transcript'), n => n.className?.startsWith('play-reply')));
+  timers.forEach(fn => fn());
+  assert.equal(players[0].src, '/api/conversations/one/speech/2');
+  assert.equal(f.run('state.voiceReply'), null);
+});
+
+test('Voice Test saves first and plays synthesized audio through the unlocked player', async () => {
+  const {players, globals} = voiceBrowser();
+  const calls = [];
+  class ClipURL extends URL { static createObjectURL() {return 'blob:voice-test';} static revokeObjectURL() {} }
+  const f = fixture(async (url, options) => {
+    calls.push([url, options]);
+    return {ok:true, blob:async () => ({}), json:async () => ({signed_in:false})};
+  }, {...globals, URL:ClipURL}); await tick();
+  f.run(`state.backend='native'; state.settings={}; state.settingsGroup='voice';
+    state.voiceSettings={same_as_model:true,base_url:'',has_key:false,transcription_model:'whisper-1',speech_model:'tts-1',voice:'alloy'};
+    api=async () => state.voiceSettings; renderSettings();`);
+  const button = find(f.get('settings-detail'), node => node.tagName === 'BUTTON' && node.textContent === 'Test');
+  await button.events.click();
+  assert.equal(calls.at(-1)[0], '/api/settings/voice/test');
+  assert.equal(calls.at(-1)[1].headers['X-Roost-Request'], '1');
+  assert.equal(players[0].src, 'blob:voice-test');
+  assert.equal(players[0].played, 'blob:voice-test');
 });

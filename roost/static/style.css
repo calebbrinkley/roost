@@ -601,3 +601,11 @@ button.attach-chip-main:focus-visible, .attach-chip-remove:focus-visible, .attac
   #attachment-sheet button { min-height: 44px; min-width: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .attach-spinner { animation: none; } }
+.voice-settings [hidden] { display: none; }
+.voice-settings .voice-key-clear { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.voice-settings .voice-key-clear input { flex: none; width: 20px; height: 20px; min-width: 0; min-height: 0; margin: 0; }
+/* The label row is the touch target; the box itself stays checkbox-sized. */
+@media (pointer: coarse) { .voice-settings .voice-key-clear { min-height: 44px; } }
+@media (pointer: coarse) {
+  .voice-settings input, .voice-settings select, .voice-settings button { min-height: 44px; min-width: 44px; }
+}

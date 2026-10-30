@@ -17,7 +17,7 @@ const SLICES = {
   voice: () => ({ voiceDraft: false, voiceReply: null, playing: null }),
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
-  settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
+  settings: () => ({ settings: null, voiceSettings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
                      soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, fallback: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
                     push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
@@ -108,6 +108,7 @@ const ICONS = {
   persona: [["circle", { cx: 12, cy: 8, r: 4 }], ["path", { d: "M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" }]],
   memory: [["path", { d: "M6 3h12v18l-6-4.5L6 21z" }]],
   paperclip: [["path", { d: "m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" }]],
+  mic: [["rect", { x: 9, y: 3, width: 6, height: 11, rx: 3 }], ["path", { d: "M5 11a7 7 0 0 0 14 0M12 18v3" }]],
 };
 
 function svgShapes(svg, shapes) {
@@ -401,7 +402,7 @@ async function refreshIdentity() {
 function isNative() { return state.backend === "native"; }
 
 function backendSurfaces(backend) {
-  return { jobs: backend !== "native", soul: backend !== "native", voice: backend !== "native",
+  return { jobs: backend !== "native", soul: backend !== "native", voice: true,
     approvals: backend !== "native", hermes: backend !== "native" };
 }
 
@@ -1351,7 +1352,7 @@ function renderMessages(rows) {
   // A turn's start never moves: keep it, so later responses (once the turn is over) still place it.
   if (view.live && view.after != null) view.live.after = view.after;
   state.working = view.working;
-  if (!isNative()) readVoiceReply(view);
+  readVoiceReply(view);
   updateNativeComposer();
   renderContext();
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
@@ -1435,7 +1436,7 @@ function renderMessages(rows) {
       transcript.append(under);
     } else {
       const under = el("div", "under reply-under");
-      if (!isNative() && row.id != null) under.append(playButton(row.id));
+      if (row.id != null) under.append(playButton(row.id));
       under.append(copyButton(messageText(row), "Copy reply"));
       if (isNative() && ["interrupted", "failed"].includes(row.state)) under.append(el("span", "", row.state === "failed" ? "Failed" : "Interrupted"));
       if (isNative()) { appendTurnControls(under, row, all, body); appendRemember(under, row, body); }
@@ -2561,6 +2562,70 @@ function renderModelList(parent, server, role = "primary") {
   }
 }
 
+async function loadVoice() {
+  const scope = signInScope();
+  try {
+    const data = await api("/settings/voice");
+    if (scope.alive()) { state.voiceSettings = data; if (state.settingsGroup === "voice") renderSettings(); }
+  } catch (error) { report(error, scope); }
+}
+
+function renderVoice(detail) {
+  const section = settingsSection(detail, "Voice", "Connect an OpenAI-compatible speech server. Keys stay on the server.");
+  section.classList.add("voice-settings");
+  const saved = state.voiceSettings;
+  if (!saved) { section.append(el("p", "", "Loading voice settings…")); return; }
+  const server = el("select"); server.id = "settings-voice-server";
+  for (const [value, label] of [["model", "Same as the model server"], ["custom", "Custom speech server"]]) {
+    const option = el("option", "", label); option.value = value; server.append(option);
+  }
+  server.value = saved.same_as_model ? "model" : "custom";
+  modelField(section, "Speech server", server);
+  const custom = el("div", "model-fields"); section.append(custom);
+  const url = modelField(custom, "Speech base URL", modelInput(saved.base_url, "url"));
+  url.id = "settings-voice-url"; url.placeholder = "https://speech.example.com/v1";
+  const key = modelField(custom, "API key", modelInput("", "password"));
+  key.id = "settings-voice-key"; key.autocomplete = "new-password";
+  key.placeholder = saved.has_key ? "Key saved; leave empty to keep it" : "Optional API key";
+  const clearLabel = el("label", "voice-key-clear", "Clear saved key"), clear = modelInput("", "checkbox");
+  clear.id = "settings-voice-clear-key"; clearLabel.append(clear); custom.append(clearLabel);
+  const visibility = () => { custom.hidden = server.value !== "custom"; };
+  server.addEventListener("change", visibility); visibility();
+  const fields = {};
+  for (const [name, label] of [["transcription_model", "Transcription model"], ["speech_model", "Speech model"], ["voice", "Voice"]]) {
+    fields[name] = modelField(section, label, modelInput(saved[name]));
+    fields[name].id = "settings-voice-" + name; fields[name].maxLength = 256;
+  }
+  const save = async () => {
+    const changes = {same_as_model: server.value === "model", base_url: url.value.trim(),
+      clear_key: clear.checked, ...Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value.trim()]))};
+    if (key.value) changes.key = key.value;
+    return withSettingsBusy(async (scope) => {
+      const data = await api("/settings/voice", {method: "PUT", body: JSON.stringify(changes)});
+      if (scope.alive()) state.voiceSettings = data;
+      notice("Voice settings saved.");
+    });
+  };
+  const actions = el("div", "settings-actions");
+  actions.append(settingsButton("primary", "Save", save), settingsButton("secondary", "Test", async () => {
+    unlockPlayer();
+    if (!await save()) return;
+    const scope = signInScope();
+    try {
+      const response = await fetch("/api/settings/voice/test", {method: "POST", headers: {"Content-Type": "application/json", "X-Roost-Request": "1"}, body: "{}"});
+      if (!response.ok) throw new Error((await response.json()).error || "Couldn’t test speech.");
+      const audio = await response.blob();
+      if (!scope.alive()) return;
+      const clip = URL.createObjectURL(audio), player = audioPlayer();
+      player.src = clip;
+      player.addEventListener("ended", () => URL.revokeObjectURL(clip), {once: true});
+      player.addEventListener("error", () => URL.revokeObjectURL(clip), {once: true});
+      try { await player.play(); } catch (error) { URL.revokeObjectURL(clip); throw error; }
+    } catch (error) { report(error, scope); }
+  }));
+  section.append(actions);
+}
+
 function renderWebSearch(detail) {
   const section = settingsSection(detail, "Web search", "Connect SearXNG to let models search. Leave the URL empty to turn web tools off.");
   const url = modelField(section, "SearXNG base URL", modelInput(state.settings.search_url || "", "url"));
@@ -2669,13 +2734,13 @@ function renderServer(detail, role) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ...(isNative() ? [["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
+          ["models", "Models", "Backend and model server"], ...(isNative() ? [["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
           ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", isNative() ? "Replies on your devices" : "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
 
-const SETTINGS_ICONS = { personas: "persona", memory: "memory", web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
+const SETTINGS_ICONS = { voice: "mic", personas: "persona", memory: "memory", web: "globe", models: "server", appearance: "palette", time: "globe", data: "data", service: "server", notifications: "bell", account: "key", about: "info" };
 
 async function loadSettings() {
   const scope = signInScope();
@@ -2686,6 +2751,7 @@ async function loadSettings() {
     state.settings = data;
     applyServerSettings(data);
     renderSettings();
+    if (isNative() && state.settingsGroup === "voice") await loadVoice();
     if (isNative() && state.settingsGroup === "personas") { await loadPersonas(); renderSettings(); }
     if (isNative() && state.settingsGroup === "memory") { await loadMemory(); renderSettings(); }
   } catch (error) { report(error, scope); }
@@ -2699,6 +2765,7 @@ function selectSettingsGroup(id) {
   renderSettings();
   $("settings-detail").scrollTop = 0;
   if (id === "models") loadPrimary();
+  if (id === "voice") loadVoice();
   if (id === "personas") loadPersonas().then(renderSettings).catch(error => notice(error.message));
   if (id === "memory") loadMemory().then(renderSettings).catch(error => notice(error.message));
   if (id === "agent" && !isNative()) loadSoul();
@@ -2727,7 +2794,7 @@ function renderSettings() {
   const detail = $("settings-detail"); detail.replaceChildren();
   if (!group) return;
   if (!state.settings) { detail.append(el("p", "job-history-empty", "Loading settings…")); return; }
-  ({ personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
+  ({ voice: renderVoice, personas: renderPersonas, memory: renderMemory, web: renderWebSearch, models: renderModels, appearance: renderAppearance, time: renderTimeSettings, agent: renderAgentSettings, data: renderDataSettings,
      service: renderServiceSettings, notifications: renderNotifications, account: renderAccount, about: renderAbout })[group[0]](detail);
 }
 
@@ -3716,6 +3783,7 @@ async function startRecording() {
     recorder.start(); take.phase = "recording"; take.started = Date.now();
     const tick = () => {
       const seconds = Math.floor((Date.now() - take.started) / 1000);
+      if (isNative() && seconds >= 120) { stopRecording(false); return; }
       recordingUI(`Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · tap the mic to stop`);
     };
     tick(); take.timer = setInterval(tick, 500);
@@ -3752,6 +3820,7 @@ function finishRecording(take) {
 
 async function sendRecording(recording, take) {
   try {
+    if (isNative() && recording.size > 25 * 1024 * 1024) throw new Error("Recordings are limited to 25 MB.");
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -3759,7 +3828,7 @@ async function sendRecording(recording, take) {
       reader.readAsDataURL(recording);
     });
     if (!currentTake(take)) return;
-    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type }) });
+    const data = await api("/audio/transcribe", { method: "POST", body: JSON.stringify({ data_url: dataUrl, mime_type: recording.type, ...(isNative() ? {duration_seconds: Math.min(120, (Date.now() - take.started) / 1000)} : {}) }) });
     if (!currentTake(take)) return;
     const text = String(data.transcript || "").trim();
     if (!text) { notice("Didn’t catch that. Try again a little closer to the mic."); return; }
@@ -3778,7 +3847,7 @@ function audioPlayer() {
     player.addEventListener("error", () => {
       if (!state.playing || !player.src.includes("/speech/")) return;
       state.playing = null; refreshPlayButtons();
-      notice("Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
+      notice(isNative() ? "Couldn’t read that aloud. Check Settings › Voice, or try again." : "Couldn’t read that aloud. Check Hermes’s text-to-speech setup, or try again.");
     });
   }
   return state.player;
