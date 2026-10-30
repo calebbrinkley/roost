@@ -1,4 +1,4 @@
-"""Application-owned native turns. HTTP streams observe committed state; they never own work."""
+"""Application-owned turns. HTTP streams observe committed state; they never own work."""
 
 import asyncio
 import json

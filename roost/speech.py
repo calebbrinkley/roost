@@ -1,4 +1,4 @@
-"""Bounded OpenAI-compatible speech transport and write-only native voice settings."""
+"""Bounded OpenAI-compatible speech transport and write-only voice settings."""
 
 import asyncio
 import base64

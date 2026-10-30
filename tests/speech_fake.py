@@ -1,4 +1,4 @@
-"""Deterministic speech HTTP fixture shared by native tests and smoke."""
+"""Deterministic speech HTTP fixture shared by tests and smoke."""
 
 import asyncio
 

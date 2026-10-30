@@ -1,6 +1,6 @@
-# Native Jobs (Phase 6)
+# Jobs
 
-In Native mode Roost owns scheduling, execution and notifications. No Hermes cron or Hermes connection is used. Hermes mode retains its existing routes, editor and delivery field.
+Roost owns scheduling, execution and notifications.
 
 ## API and editor
 
@@ -12,7 +12,7 @@ The existing `/api/jobs` URLs return `jobs` and `runs` wrappers. Create and upda
 - `enabled` (default true), optional `model` and `persona` identifiers (null means the current default).
 - `web` (default true), `notify` (`always` or `changed`, default always), `allow_memory` (default false).
 
-Native requests reject `deliver` and unknown fields. The same sign-in, origin and request-header guards apply as for native chat. POST `/{jid}/pause`, `/resume`, `/trigger` retains the existing action URLs. DELETE `/{jid}` needs `{confirm:true}`; DELETE `/api/jobs` needs `{confirm:"DELETE"}`. Resume schedules the next future occurrence, without replaying paused time. Trigger works while paused and does not move a recurring schedule.
+Requests reject `deliver` and unknown fields. The same sign-in, origin and request-header guards apply as for chat. POST `/{jid}/pause`, `/resume`, `/trigger` retains the existing action URLs. DELETE `/{jid}` needs `{confirm:true}`; DELETE `/api/jobs` needs `{confirm:"DELETE"}`. Resume schedules the next future occurrence, without replaying paused time. Trigger works while paused and does not move a recurring schedule.
 
 The editor offers the three schedule kinds, zone, notification and memory toggles, and default/explicit model and persona pickers. Each run links to its conversation. These conversations stay outside the Messages list and its count, but search includes them. Replies, transcript controls and exports work normally. Delete-all conversations preserves job conversations. Deleting a job cancels its current execution, removes its run records and pending notifications, and preserves its conversations and memory provenance.
 
@@ -28,16 +28,14 @@ Memory tools are offered only when allowed by both the job and model. Saved fact
 
 ## Notifications and persistence
 
-Migration 7 (after attachments' migration 6) adds jobs, job_runs, push_outbox, a conversation marker and nullable memory provenance. Existing chats remain visible and existing memories are unchanged; no Hermes data is imported or converted. Empty downgrade removes these additions. Populated jobs, outbox, run conversations or tagged memories cause an atomic refusal: preserve/export and explicitly remove that data before downgrading. Nothing is silently discarded.
+Migration 7 (after attachments' migration 6) adds jobs, job_runs, push_outbox, a conversation marker and nullable memory provenance.Empty downgrade removes these additions. Populated jobs, outbox, run conversations or tagged memories cause an atomic refusal: preserve/export and explicitly remove that data before downgrading. Nothing is silently discarded.
 
 Run settlement and its result commit with turn completion, so notification processing cannot block the next occurrence. A null changed flag records pending notification work across restarts; the changed flag and notification enqueue then commit together. Push payloads use the job name, the result's first line and `/?c=<conversation_id>`. The stable run identity deduplicates enqueue. The outbox persists payload, pending recipients, attempts and next retry; successes on one device are not repeated when another fails. Deleted/expired subscriptions are removed from the pending set. A notification with no subscriptions is settled without delivery. Pending notifications retry indefinitely at 1, 5, then 15-minute intervals. No subscriptions or model credentials are stored in the outbox.
 
-Delivery is at least once: a crash after a push service accepts a payload but before SQLite records success can repeat it. The stable notification tag lets the browser replace that notification. Old settled outbox rows are retained. Ordinary native chat completion push also enqueues on this outbox, retaining presence suppression. Its enqueue runs in the runner completion callback; job enqueue is recovered from the persisted run even if the process stops immediately after generation.
+Delivery is at least once: a crash after a push service accepts a payload but before SQLite records success can repeat it. The stable notification tag lets the browser replace that notification. Old settled outbox rows are retained. Ordinary chat completion push also enqueues on this outbox, retaining presence suppression. Its enqueue runs in the runner completion callback; job enqueue is recovered from the persisted run even if the process stops immediately after generation.
 
 For changed-only notifications the first completed run always notifies. Later runs compare against the preceding completed result with one primary-model, non-streaming call, thinking off, no tools. `SAME` suppresses push; `CHANGED` sends it. A failed or malformed comparison conservatively notifies. The run and its changed flag are saved either way. Comparison runs independently of scheduling, with a 30-second limit, after the job is free to run again.
 
 ## Verification
 
-`tests/test_jobs.py` uses an injectable fake clock and loopback provider, covering parser/DST, intervals, once, claims, catch-up, overlap, trigger/pause/resume/delete, retries, memory provenance, change comparison, hidden/searchable run conversations, replies, migrations, validation/auth and durable partial-delivery retries after reopening SQLite. Frontend tests cover native schedules/fields and unchanged Hermes delivery. Native smoke creates and triggers a job and asserts its run and outbox row without Hermes.
-
-Run `make PYTHON=.venv/bin/python check` and `make PYTHON=.venv/bin/python smoke`. For visual review outside the sandbox, run `node capture-native.mjs jobs`: the untracked capture helper writes 12 screenshots (list, editor, run conversation × phone/desktop × light/dark) under `./captures/jobs/`. `node capture-native.mjs jobs --check-server` validates only fixtures, without launching a browser. Screenshots and real push services require separate visual/delivery review; loopback tests do not prove those.
+`tests/test_jobs.py` uses an injectable fake clock and loopback provider, covering parser/DST, intervals, once, claims, catch-up, overlap, trigger/pause/resume/delete, retries, memory provenance, change comparison, hidden/searchable run conversations, replies, migrations, validation/auth and durable partial-delivery retries after reopening SQLite.

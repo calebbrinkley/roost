@@ -38,7 +38,7 @@ make PYTHON=.venv/bin/python smoke
 
 The JavaScript tests use Node’s built-in test runner and synthetic DOM objects; no browser package is required. Override `NODE` when Node is outside your PATH.
 
-`make check` scans candidate files and reachable history, checks documentation links, and runs unit tests. The smoke check reserves ephemeral loopback ports and uses temporary state, so it can run alongside an existing demo. It exercises authentication, origin checks, sample conversations and Jobs against a local stand-in. Neither proves behavior against a live Hermes agent or on a physical phone.
+`make check` scans candidate files and reachable history, checks documentation links, and runs unit tests. The smoke check reserves ephemeral loopback ports and uses temporary state, so it can run alongside an existing demo. It exercises durable chat, queue controls, tools, memory, compaction, attachments, fallback, voice and jobs against deterministic local providers. Neither proves behavior against real model/search/speech/push services or on a physical phone.
 
 Describe the validation performed and any remaining device or host checks in the pull request. Do not attach live logs, credentials or transcripts.
 

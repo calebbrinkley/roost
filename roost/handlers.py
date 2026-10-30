@@ -1,4 +1,4 @@
-"""Native implementations of the browser's existing conversation contracts."""
+"""Chat, persona, memory, voice and job HTTP handlers."""
 
 import asyncio
 import json
@@ -19,10 +19,6 @@ from .store import payload_fingerprint
 # Attachment text rides in the JSON body: the cap is 120,000 characters, which can escape to 12 bytes each.
 SEND_LIMIT = 2 * 1024 * 1024
 UPLOAD_SECONDS = 20
-
-
-def enabled(app):
-    return 'settings_file' in app and http.settings.load(app['settings_file'])['backend'] == 'native'
 
 
 def chat(request):
@@ -196,7 +192,7 @@ async def submit(request, *, new=False):
         if not new and changes:
             raise http.bad('Change conversation settings before sending a message.')
         if len(store.queued()) >= 500:
-            raise web.HTTPTooManyRequests(text='The native turn queue is full.')
+            raise web.HTTPTooManyRequests(text='The turn queue is full.')
         override = changes.get('model') if new else store.get_conversation(cid).model
         model, snapshot = runner.snapshot(override, no_web=store.get_conversation(cid).no_web if cid else False, web=data.get('web'))
         accepted = store.submit(request_id, text, conversation_id=cid, model=model,
@@ -273,7 +269,7 @@ async def stream(request):
     response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
     http.harden(request, response)
     task = asyncio.current_task()
-    request.app['native_streams'].add(task)
+    request.app['streams'].add(task)
     previous = sent_summaries = None
     try:
         await response.prepare(request)
@@ -290,7 +286,7 @@ async def stream(request):
             if marker != previous:
                 # Each revision is a full committed snapshot, so reconnects and resets are identical.
                 payload = {'reset': True, 'user': user.content, 'started': turn.created_at,
-                           'thoughts': assistant.reasoning, 'text': assistant.content, 'approvals': [],
+                           'thoughts': assistant.reasoning, 'text': assistant.content,
                            'turn_id': turn.id, 'revision': turn.revision, 'state': turn.state,
                            'done': turn.state not in ('running', 'queued'),
                            'trace': store.trace(turn.id), 'sources': store.sources(turn.id), **turn_context(turn),
@@ -304,19 +300,19 @@ async def stream(request):
             if turn.state not in ('running', 'queued'):
                 break
             try:
-                await asyncio.wait_for(changed.wait(), http.live.HEARTBEAT_SECONDS)
+                await asyncio.wait_for(changed.wait(), http.HEARTBEAT_SECONDS)
             except TimeoutError:
+                if not request.app['sessions'].valid(request.cookies.get(http.COOKIE, '')):
+                    break
                 await response.write(b': still writing\n\n')
     except (asyncio.CancelledError, ConnectionResetError, RuntimeError):
         pass
     finally:
-        request.app['native_streams'].discard(task)
+        request.app['streams'].discard(task)
     return response
 
 
 async def control(request):
-    if not enabled(request.app):
-        raise web.HTTPNotFound(text='Native controls require Native backend.')
     c, action = chat(request), request.match_info['action']
     if action not in ('stop', 'cancel', 'send-now', 'edit', 'regenerate'):
         raise web.HTTPNotFound(text='Unknown turn control.')
@@ -352,8 +348,6 @@ async def models(request):
 
 
 async def test_web_search(request):
-    if not enabled(request.app):
-        raise web.HTTPNotFound(text='Web search requires Native backend.')
     data = await http.json_body(request)
     if set(data) != {'query'} or not isinstance(data['query'], str) or not 0 < len(data['query'].strip()) <= 2000:
         raise http.bad('Provide a search query of 1 to 2000 characters.')
@@ -368,8 +362,6 @@ async def test_web_search(request):
 
 
 async def search(request):
-    if not enabled(request.app):
-        return web.json_response({'sessions': []})
     results = []
     for match in request.app['store'].search(request.query.get('q', '')):
         c = request.app['store'].get_conversation(match['conversation_id'])
@@ -377,14 +369,8 @@ async def search(request):
     return web.json_response({'sessions': results})
 
 
-def require_native(request):
-    if not enabled(request.app):
-        raise web.HTTPNotFound(text='This feature requires Native backend.')
-    return request.app['store']
-
-
 async def personas(request):
-    store = require_native(request)
+    store = request.app['store']
     if request.method == 'POST':
         data = await http.json_body(request)
         if set(data) != {'name', 'prompt'}:
@@ -394,7 +380,7 @@ async def personas(request):
 
 
 async def persona(request):
-    store, pid = require_native(request), request.match_info['pid']
+    store, pid = request.app['store'], request.match_info['pid']
     if request.method == 'DELETE':
         store.delete_persona(pid)
         return web.json_response({'ok': True})
@@ -405,7 +391,7 @@ async def persona(request):
 
 
 async def default_persona(request):
-    store, data = require_native(request), await http.json_body(request)
+    store, data = request.app['store'], await http.json_body(request)
     if set(data) != {'default_persona_id'}:
         raise http.bad('Send a default_persona_id.')
     store.set_default_persona(data['default_persona_id'])
@@ -413,7 +399,7 @@ async def default_persona(request):
 
 
 async def memory(request):
-    store = require_native(request)
+    store = request.app['store']
     if request.method == 'POST':
         data = await http.json_body(request)
         if 'text' not in data or set(data) - {'text', 'source_message_id', 'conversation_id'}:
@@ -425,7 +411,7 @@ async def memory(request):
 
 
 async def memory_fact(request):
-    store = require_native(request)
+    store = request.app['store']
     fid = request.match_info['fid']
     if not re.fullmatch(r'[0-9]{1,16}', fid) or not 1 <= int(fid) <= 9007199254740991:
         raise http.bad('Invalid memory identifier.')
@@ -442,7 +428,6 @@ async def memory_fact(request):
 
 
 async def extract_attachment(request):
-    require_native(request)
     if request.content_type != 'multipart/form-data':
         raise http.bad('Send the file as multipart form data.')
     too_large = {'error': f'That file is larger than {files.MAX_UPLOAD // 1024 // 1024} MB.'}
@@ -492,7 +477,6 @@ async def transcribe(request):
 
 
 async def voice_settings(request):
-    require_native(request)
     saved = request.app['voice_settings']
     if request.method == 'PUT':
         result = saved.update(await http.json_body(request))
@@ -502,43 +486,16 @@ async def voice_settings(request):
 
 
 async def voice_test(request):
-    require_native(request)
     if await http.json_body(request):
         raise http.bad('Send an empty test request.')
     return http.audio_response(request, *await speech_client(request.app).speak('Voice is ready.'))
-
-
-async def neutral(request):
-    name = request.match_info.route.handler.__name__
-    if request.path in http.PLUGIN_PATHS:
-        raise web.HTTPNotFound(text='Hermes integration is disabled in Native backend.')
-    if name == 'jobs':
-        result = {'jobs': []}
-    elif name == 'job_runs':
-        result = {'runs': []}
-    elif name == 'pending_approvals':
-        result = {'approvals': []}
-    elif name == 'respond_approval':
-        result = {'resolved': False}
-    elif name == 'get_soul':
-        result = {'content': ''}
-    elif name == 'hermes_link':
-        result = {'token': '', 'url': '', 'last_delivery': None}
-    elif name == 'get_delivery':
-        result = {}
-    elif name == 'delete_all_jobs':
-        http.confirmed_everything(await http.json_body(request))
-        result = {'deleted': 0}
-    else:
-        result = {'ok': False, 'disabled': True}
-    return web.json_response(result)
 
 
 async def jobs(request):
     return web.json_response({'jobs': request.app['jobs'].listing()})
 
 
-def native_job(request):
+def saved_job(request):
     job = request.app['jobs'].get(http.item_id(request, 'jid'))
     if not job:
         raise web.HTTPNotFound(text='Job does not exist.')
@@ -550,19 +507,19 @@ async def create_job(request):
 
 
 async def get_job(request):
-    return web.json_response(native_job(request))
+    return web.json_response(saved_job(request))
 
 
 async def job_runs(request):
-    return web.json_response({'runs': request.app['jobs'].runs(native_job(request)['id'])})
+    return web.json_response({'runs': request.app['jobs'].runs(saved_job(request)['id'])})
 
 
 async def update_job(request):
-    return web.json_response(request.app['jobs'].save(await http.json_body(request), native_job(request)['id']))
+    return web.json_response(request.app['jobs'].save(await http.json_body(request), saved_job(request)['id']))
 
 
 async def job_action(request):
-    job, action = native_job(request), request.match_info['action']
+    job, action = saved_job(request), request.match_info['action']
     service = request.app['jobs']
     if action in ('pause', 'resume'):
         return web.json_response(service.save({'enabled': action == 'resume'}, job['id']))
@@ -574,7 +531,7 @@ async def job_action(request):
 
 
 async def delete_job(request):
-    job, data = native_job(request), await http.json_body(request)
+    job, data = saved_job(request), await http.json_body(request)
     if set(data) != {'confirm'} or data['confirm'] is not True:
         raise http.bad('Confirm job deletion.')
     await request.app['jobs'].delete(job['id'])
@@ -588,11 +545,3 @@ async def delete_all_jobs(request):
         await request.app['jobs'].delete(job['id'])
     return web.json_response({'deleted': len(jobs)})
 
-
-HANDLERS = {handler.__name__: handler for handler in (
-    conversations, conversation, create_conversation, send_message, rename_conversation,
-    delete_conversation, delete_all_conversations, get_chat_settings, update_chat_settings,
-    export_conversation, stream, jobs, create_job, get_job, job_runs, update_job, job_action, delete_job, delete_all_jobs, transcribe)}
-HANDLERS.update({name: neutral for name in (
-    'pending_approvals', 'respond_approval', 'get_soul', 'update_soul', 'restart_agent',
-    'receive_delivery', 'receive_reply_usage', 'get_delivery', 'hermes_link', 'rotate_delivery_token', 'hermes_plugin')})

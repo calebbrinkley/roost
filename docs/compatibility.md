@@ -1,28 +1,55 @@
-# Compatibility and preview status
+# External service contracts
 
+Roost uses ordinary HTTP APIs. Chat, scheduling, persona, memory, history and push intent belong
+to Roost; external services provide inference, optional audio and optional search. Compatibility
+with a server's chat endpoint does not imply its model supports thinking or function tools.
 
-The integration targets Hermes **`v2026.9.24`**. The project records a successful live loopback check on 2026-10-11 covering sign-in, conversation listing and transcripts, two-turn chat, and Job creation, pause, edit, resume and deletion. These recorded live checks have not been repeated as part of repository governance work. Repository CI uses a local stand-in, not a live agent.
+## Model server
 
-- Phone layouts are implemented; a phone browser has not been verified.
-- Voice uses the dashboard's `/api/audio/transcribe` and `/api/audio/speak` (read from the `v2026.9.24` source), so it speaks and listens with whatever speech-to-text and text-to-speech Hermes is configured to use. Tap the microphone to start recording and tap again to stop (MediaRecorder chooses a supported MP4 or WebM format); the transcript goes into the composer for review and is sent only when you press Send. Cancelling, changing conversations, signing out or backgrounding the page stops capture and discards a pending transcription. Every reply has a play button; Roost serves the audio with byte ranges, which Safari needs, and reads at most 4,000 characters (about four minutes), leaving out code blocks. The reply to a reviewed voice draft plays by itself, using the player the recording tap started, since browsers refuse to start audio without a tap. Checked against stand-ins only: not against a live Hermes, and not on an iPhone, where the automatic reading is the part most likely to differ.
-- Reply notifications use Web Push, encrypted on the server for each device. They cover replies to messages sent from Roost, not Jobs or messages sent from other Hermes clients, and skip a conversation an open Roost has on screen. Pending replies are watched in memory for 30 minutes, so restarting Roost mid-reply drops that notification. Roost needs outbound HTTPS to the browsers' push services (Apple, Google, Mozilla, Microsoft). On iPhone and iPad they work only for Roost added to the Home Screen (iOS 16.4 or later). Encryption is checked against RFC 8291's example and delivery against a stand-in; Apple's push service and a real device have not been tried.
-- Passkeys are tested against a software authenticator with real ES256 and Ed25519 signatures, not yet against Face ID or Touch ID on a device.
-- Conversation instructions (the gear in a conversation) are Roost's own: Hermes `v2026.9.24` has no per-conversation instructions a client can set. Roost keeps them in its database and sends them once, between marker lines, at the start of the next message after they change (clearing them sends a note that they no longer apply). Roost hides the markers, but Hermes's transcript and other Hermes clients show them, and in a long conversation Hermes may compress them out of the model's context. Download as JSON reads the whole conversation from `/api/sessions/{id}/messages` page by page, compressed history included. Neither has been tried against a live Hermes, and the download not on an iPhone.
-- Schedules are sent to Hermes as entered; there is no schedule builder yet.
-- Settings uses the dashboard's profile routes (`/api/profiles`, `/api/profiles/active`, `/api/profiles/{name}/soul`), `/api/gateway/restart` and `/api/status` (About shows only its version, gateway state and active sessions), read from the `v2026.9.24` source. The profile name and SOUL routes were checked against a live dashboard on 2026-10-11; the others have not been.
-- Job history shows what Hermes returns. Job reports and messages the agent sends on its own reach Roost through its Hermes platform plugin (`roost/hermes_plugin`, see [setup](setup.md)), written against the `v2026.9.24` platform interface (`register_platform`, a live adapter's `send` with the job id in its metadata, and `standalone_sender_fn` for out-of-process cron delivery, where Roost reads the job id from Hermes's report header). It is tested against stand-ins for Hermes's gateway modules and for Roost, not inside a running Hermes.
-- Replies to messages sent from Roost stream as they are written: Roost keeps the dashboard socket open for the turn and passes Hermes's `reasoning.delta` and `message.delta` events (read from the `v2026.9.24` source) to the browser as Server-Sent Events, with the thoughts open while they are written. The transcript stays the record. Turns from other clients, a turn followed for more than 30 minutes, and a turn in progress when Roost restarts appear when Hermes saves them, because Roost polls for the transcript as before. Hermes continues submitted turns after Roost disconnects. Streaming is checked against a local stand-in, not a live agent or a phone.
+A saved base such as `https://models.example.com/v1` supplies:
 
-The README images are AI-generated device mockups based on demo captures. The new two-phone hero uses the existing demo mockups as references; it is an illustration, not an exact capture of the current interface. See [asset provenance](../assets/README.md). These images are not evidence of physical iPhone testing.
+- `POST /chat/completions`: JSON `model`, `messages`, `stream`, optional thinking controls and
+  function tools. Streaming replies use SSE `data:` frames with `choices[].delta`, optional usage
+  and a finish reason; `[DONE]` is supported. Non-streaming completions supply
+  `choices[].message.content`, used for titles and summaries.
+- Optional `GET /models`: `{data:[{id}]}`. Roost can use manually curated IDs when discovery is
+  unavailable. New discoveries start disabled.
+- Tool calls carry IDs and function name/JSON arguments, including fragmented streamed arguments.
+  Follow-up messages use `role:"tool"` and matching `tool_call_id`. Roost executes only its own
+  allowlisted search/page and remember tools, with bounded rounds and results.
+- Reasoning may arrive as `reasoning_content`, `reasoning`, or think tags, including split tags.
+  Usage uses prompt/completion token counts when supplied; missing measurements display as unknown.
 
-Runtime and UI fixes and their regression coverage are recorded in the [code review](code-review.md). Those checks use fake data and do not repeat the historical live Hermes validation.
+Bearer keys remain on the server. Redirects are refused. Upstream response bodies and credentials
+are not echoed in errors. HTTP 429/503 are busy responses; connect/read/total timeouts are bounded.
+Context overflow becomes a stored turn failure or a bounded compaction attempt, never an unbounded
+replay. See [model setup](model-server.md), [fallback](fallback.md) and [API](api.md).
 
-Approval integration uses the pinned Hermes gateway's `client.capabilities {server_requests: true}`, native `approval` requests, `request.cancel` events, redacted `session.resume` snapshots (`open_requests` / `pending_approval`), and exact `approval.respond` RPCs. Unknown server-request kinds receive method-not-supported; Roost does not silently approve password, secret or other unsupported prompts. Decisions are limited to the offered `once` and `deny` choices. Web Push uses the same authenticated, origin-checked decision route as the card, with no bearer approval links. Browser tests and loopback smoke tests cover the flow; live Hermes/Tirith and physical macOS/iOS notifications still require commissioning. Notification actions remain unsupported on Safari/iOS according to [browser compatibility data](https://github.com/mdn/browser-compat-data/blob/main/api/Notification.json); tapping opens the card instead.
+## Speech server (optional)
 
+The default target is the primary model server; Settings › Voice can select a separate `/v1` base
+and write-only key. It must implement:
 
-Thinking levels use the pinned Hermes dashboard's session-scoped `config.set reasoning` (`none`, `low`, `medium`, `high`). Hermes keeps a conversation's level while the conversation stays loaded, but conversations Roost creates follow the profile's configuration on resume, so a level does not survive a Hermes restart; Roost therefore sets the chosen level before every message. **Default** leaves Hermes's own setting untouched; choosing it after another level restores Hermes's configured level (read with `config.get reasoning`) once. A level Hermes rejects leaves the message to be sent unchanged. Hermes sends the level to OpenAI-compatible endpoints as `reasoning_effort`; whether a model honours it, and which levels differ, depends on the provider and model. A loopback test with a stand-in model confirmed the field Hermes sends for each choice; no real model's behaviour was measured.
+- `POST /audio/transcriptions`: multipart `model` and `file`, with the recorded format as MIME type
+  and filename extension; returns JSON `{text:"..."}` or plain text.
+- `POST /audio/speech`: JSON `{model,input,voice,response_format:"mp3"}`, returning audio bytes.
 
-Reply measurements use the pinned Hermes [`post_api_request` hook](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/turn_response_intake.py) for canonical prompt/output tokens and completed API durations, and [`post_llm_call`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/turn_finalizer.py) for the final persisted assistant row's identity. Roost's plugin 1.1.0 aggregates the whole main-model turn, uploads numeric fields only through the existing delivery-token trust boundary, and never matches a reply by text. Two bounded background uploads keep a slow/offline Roost off Hermes's reply path; unavailable measurements remain unavailable. Roost's SQLite state preserves measurements across reloads/restarts. See [setup](setup.md#4-optional-reply-measurements-and-job-reports-from-hermes) for the rate definition and plugin update. Tests use hook/HTTP stand-ins; live Hermes and physical iOS commissioning remain required.
+Model names and voice are editable. Roost bounds recording/transcript/audio sizes and timeouts;
+its browser audio URLs support byte ranges. See [voice](voice.md) for limits and error mapping.
+A real microphone, automatic playback and installed-phone behavior need separate device checks.
 
+## SearXNG (optional)
 
-Busy-session follow-ups preserve Hermes's configured queue/steer/interrupt policy; Roost does not force an input mode or start another agent worker. Once Hermes acknowledges a send, Roost shows a local **Sent** bubble until saved user rows replace it. Hermes may combine consecutive queued texts into one prompt; that row replaces all covered local echoes without duplicating them. These echoes survive polling and navigation within the page, including identical consecutive messages; signing out or reloading clears the local echoes without resubmitting anything. Hermes owns accepted prompts and their persistence. Live rendering replaces only the active turn's steps, preserving later messages. A `queued`, `steered` or `redirected` acknowledgement retires the ambiguous Roost stream; overlapping replies appear through saved-transcript polling. No interrupt/cancel RPC is sent by this fallback, and ordinary later turns stream normally. Loopback smoke and browser tests cover a paused demo turn with back-to-back sends; live Hermes and physical iOS verification remain separate.
+Roost calls `<base>/search?q=<query>&format=json`. Enable JSON output in SearXNG's `search.formats`;
+instances that disable it can return 403. The expected object has a `results` list with title,
+URL and content snippets. See the [SearXNG Search API](https://docs.searxng.org/dev/search_api.html).
+The configured search base may be private; redirects are refused. Model-selected page URLs use a
+separate public-web guard: every resolved IP and redirect is checked, with private/reserved and
+carrier-grade NAT destinations blocked. Provider keys and cookies never accompany page reads.
+
+## Validation boundary
+
+Repository tests and smoke use deterministic local model, speech and search fakes. Compose smoke
+adds container packaging and persistence checks. These do not prove compatibility with any live
+provider, browser push service or physical device. Verify your selected endpoints and model/template
+combination after configuration.

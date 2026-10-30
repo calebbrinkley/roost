@@ -1,4 +1,4 @@
-"""Native chat state. Each public write commits a short transaction before it returns."""
+"""Chat state. Each public write commits a short transaction before it returns."""
 
 import hashlib
 import json
@@ -150,7 +150,7 @@ def _chat_up(db: sqlite3.Connection) -> None:
 
 
 def _chat_down(db: sqlite3.Connection) -> None:
-    # A rollback must never silently discard native history.
+    # A rollback must never silently discard chat history.
     if db.execute("SELECT 1 FROM conversations LIMIT 1").fetchone():
         raise StoreError("Cannot roll back a nonempty chat store. Preserve its data first.")
     for table in ("turn_steps", "messages", "turns", "conversations"):
@@ -304,7 +304,7 @@ MIGRATIONS = ((_chat_up, _chat_down), (_runtime_up, _runtime_down), (_sources_up
 
 
 class Store:
-    """One owner's native history, separate from the Hermes/auth database. Use on its owning thread."""
+    """One owner's chat history, separate from the account database. Use on its owning thread."""
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)

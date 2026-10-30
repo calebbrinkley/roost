@@ -7,9 +7,6 @@
 !LICENSES/**
 !roost/
 !roost/*.py
-!roost/hermes_plugin/
-!roost/hermes_plugin/*.py
-!roost/hermes_plugin/plugin.yaml
 !roost/static/
 !roost/static/*.html
 !roost/static/*.css

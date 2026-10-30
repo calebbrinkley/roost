@@ -1,4 +1,4 @@
-"""Compaction policy for long native chats: when to summarize, what to fold, and how to ask."""
+"""Compaction policy for long chats: when to summarize, what to fold, and how to ask."""
 
 TRIGGER = (3, 4)   # compact at 75% of the model's context
 KEEP = (1, 4)      # keep roughly the last 25% of the context verbatim

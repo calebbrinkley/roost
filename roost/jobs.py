@@ -272,11 +272,9 @@ class Jobs:
 
 
 async def serve(app):
-    from .native import enabled
     while True:
         try:
-            if enabled(app):
-                await app['jobs'].tick()
+            await app['jobs'].tick()
         except Exception:
             log.warning('Job scheduler iteration failed; retrying.')
         await asyncio.sleep(1)

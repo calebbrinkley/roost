@@ -16,8 +16,8 @@ from pypdf import PdfWriter
 from roost import attachments
 from roost.attachments import AttachmentError
 from roost.store import Store, StoreError
-import test_native
-from test_native import without_clock
+import test_chat
+from test_chat import without_clock
 
 
 
@@ -175,12 +175,12 @@ class ExtractionTests(unittest.IsolatedAsyncioTestCase):
 
 class AttachmentApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        await test_native.NativeTests.asyncSetUp(self)
+        await test_chat.ChatTests.asyncSetUp(self)
         self.fake.delay = 0
 
-    asyncTearDown = test_native.NativeTests.asyncTearDown
-    request, create, send, settled, generations, control = (test_native.NativeTests.request, test_native.NativeTests.create, test_native.NativeTests.send,
-                                                             test_native.NativeTests.settled, test_native.NativeTests.generations, test_native.NativeTests.control)
+    asyncTearDown = test_chat.ChatTests.asyncTearDown
+    request, create, send, settled, generations, control = (test_chat.ChatTests.request, test_chat.ChatTests.create, test_chat.ChatTests.send,
+                                                             test_chat.ChatTests.settled, test_chat.ChatTests.generations, test_chat.ChatTests.control)
 
     async def upload(self, name, data, *, headers=None, status=200, client=None):
         form = FormData()
@@ -262,17 +262,14 @@ class AttachmentApiTests(unittest.IsolatedAsyncioTestCase):
         async def stalled():
             yield b'--sample\r\n'
             await asyncio.sleep(1)
-        with patch('roost.native.UPLOAD_SECONDS', .05):
+        with patch('roost.handlers.UPLOAD_SECONDS', .05):
             await self.raw_upload(stalled(), 'multipart/form-data; boundary=sample', 408)
 
-    async def test_extract_requires_session_origin_and_native_backend(self):
+    async def test_extract_requires_session_and_origin(self):
         async with ClientSession() as anonymous:
             self.assertEqual((await self.upload('a.txt', b'hi', client=anonymous, status=401))['error'], 'Sign in to Roost.')
         await self.upload('a.txt', b'hi', headers={'X-Roost-Request': '1'}, status=403)
         await self.upload('a.txt', b'hi', headers={'Origin': 'http://localhost'}, status=403)
-        from roost import settings
-        settings.update(self.state / 'settings.json', {'backend': 'hermes'})
-        await self.upload('a.txt', b'hi', status=404)
 
     # Sending
 
@@ -390,14 +387,14 @@ class AttachmentApiTests(unittest.IsolatedAsyncioTestCase):
 
 class AttachmentCompactionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        await test_native.CompactionTests.asyncSetUp(self)
+        await test_chat.CompactionTests.asyncSetUp(self)
 
-    asyncTearDown = test_native.CompactionTests.asyncTearDown
-    web_fixture = test_native.CompactionTests.web_fixture
-    request, create, send, settled, generations, control = (test_native.CompactionTests.request, test_native.CompactionTests.create, test_native.CompactionTests.send,
-                                                             test_native.CompactionTests.settled, test_native.CompactionTests.generations, test_native.CompactionTests.control)
-    set_context, extend, summary_requests, run_turn = (test_native.CompactionTests.set_context, test_native.CompactionTests.extend,
-                                                       test_native.CompactionTests.summary_requests, test_native.CompactionTests.run_turn)
+    asyncTearDown = test_chat.CompactionTests.asyncTearDown
+    web_fixture = test_chat.CompactionTests.web_fixture
+    request, create, send, settled, generations, control = (test_chat.CompactionTests.request, test_chat.CompactionTests.create, test_chat.CompactionTests.send,
+                                                             test_chat.CompactionTests.settled, test_chat.CompactionTests.generations, test_chat.CompactionTests.control)
+    set_context, extend, summary_requests, run_turn = (test_chat.CompactionTests.set_context, test_chat.CompactionTests.extend,
+                                                       test_chat.CompactionTests.summary_requests, test_chat.CompactionTests.run_turn)
 
     async def test_folded_turns_contribute_their_attachment_text(self):
         cid = self.store.create_conversation(model='example-model').id

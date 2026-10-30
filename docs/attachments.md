@@ -1,6 +1,6 @@
-# Native attachments (Phase 2b-1)
+# Attachments
 
-In Native mode you can attach text files and text-layer PDFs to a message. Roost reads the file on the server and sends the extracted text to the model as context alongside your message. The file itself is discarded; only the extracted text is kept, with the message. Hermes mode has no attachments and is unchanged.
+You can attach text files and text-layer PDFs to a message. Roost reads the file on the server and sends the extracted text to the model as context alongside your message. The file itself is discarded; only the extracted text is kept, with the message.
 
 ## What is accepted
 
@@ -12,7 +12,7 @@ Limits: 20 MB upload, 500 PDF pages, 20 seconds of extraction, 1,000,000 charact
 
 ## Extract a file
 
-`POST /api/attachments/extract` takes `multipart/form-data` with one `file` part. It needs the owner cookie and the usual `Origin` and `X-Roost-Request: 1` checks, and returns 404 outside Native mode. It stores nothing.
+`POST /api/attachments/extract` takes `multipart/form-data` with one `file` part. It needs the owner cookie and the usual `Origin` and `X-Roost-Request: 1` checks. It stores nothing.
 
 Success: `{name, kind: "text" | "pdf", chars, tokens, text}`, where `tokens = ceil(chars / 4)` and `name` has any path parts removed. Errors are `{"error": "..."}`: 400 for a rejected file, 408 when reading took too long, 413 for a file over the limits.
 
@@ -46,7 +46,7 @@ Compaction counts attachments. The size estimate and the text folded into a summ
 
 ## Browser
 
-- A paperclip button in the composer (Native only) opens a file picker restricted to the accepted types. Each file shows as a chip above the input with its name, "~N tokens" and a remove button; a spinner chip shows while the server reads it, and a rejected file shows an inline error you can dismiss.
+- A paperclip button in the composer () opens a file picker restricted to the accepted types. Each file shows as a chip above the input with its name, "~N tokens" and a remove button; a spinner chip shows while the server reads it, and a rejected file shows an inline error you can dismiss.
 - The running total appears at 80% of the cap. Over the cap, or while a file is still being read, Send is disabled.
 - Sent messages show their chips. Tapping a chip opens a read-only sheet with the extracted text.
 - Edit shows the message's chips with remove buttons. The edit request includes `attachments` only when you removed one.
@@ -55,4 +55,3 @@ Compaction counts attachments. The size estimate and the text folded into a summ
 
 ## Verification
 
-Tests: `tests/test_attachments.py` (extraction of text, text PDF, scanned PDF, encrypted PDF, image, NUL binary, the size, page and time caps; endpoint auth; send validation, cap and fingerprint; prompt layout for new and history turns; compaction; edit keep, replace and remove; regenerate; migration 6) and the attachment tests at the end of `tests/frontend.test.cjs`. PDF fixtures are built in the test code. `dev/native_smoke.py` uploads a file, sends it through the fake provider and checks the prompt. The untracked `capture-native.mjs attachments` writes screenshots to `./captures/attachments/`.

@@ -3,7 +3,6 @@
   --line: #e3e6ec; --accent: #2f6f4e; --accent-ink: #ffffff;
   --accent-text: #1d633d; --agent: #eceef2; --chip: #f3f4f7;
   --sheet: #f7f8fa; --good: #1f9d55; --warn: #a8650a; --danger: #b42318;
-  --approve: #ffe9e0;
   --font: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --desktop-header-height: 68px;
@@ -17,7 +16,6 @@
   --line: #262a31; --accent: #347f58; --accent-ink: #ffffff;
   --accent-text: #8bd5a3; --agent: #23272e; --chip: #1e2228;
   --sheet: #1a1d23; --good: #55bb7a; --warn: #e1a53c; --danger: #f97066;
-  --approve: color-mix(in srgb, var(--warn) 10%, var(--frame));
   color-scheme: dark;
 }
 /* Accent presets (Settings). Forest is the default above; each preset sets its light and dark pair. */
@@ -347,8 +345,6 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .sheet .dialog-actions { margin-top: 6px; }
 .sheet .error:empty { display: none; }
 .sheet-title:focus { outline: none; }
-.delivery-text { max-height: 60vh; overflow-y: auto; overflow-wrap: anywhere; line-height: 1.45; font-size: calc(15px * var(--text-scale)); }
-.delivery-text p { margin: 0 0 8px; white-space: pre-wrap; }
 .setup-steps { margin: 0 0 12px; padding-left: 20px; line-height: 1.5; max-width: 620px; }
 .setup-steps li + li { margin-top: 6px; }
 .setup-block { margin: 6px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--sheet); font-size: calc(13px * var(--text-scale)); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
@@ -455,17 +451,6 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   .pull-indicator.refreshing .spinner, .list-loading .spinner { animation-duration: 2.4s; } }
 
 /* A pending decision stays visible above the composer on phone and desktop. */
-.approval-panel { flex: 0 1 auto; max-height: 45%; overflow-y: auto; display: grid; gap: 10px; padding: 0 max(24px, calc((100% - 832px) / 2)) 12px; }
-.approval-card { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); border-radius: 16px; background: var(--approve); }
-.approval-heading { display: flex; align-items: center; gap: 8px; }
-.approval-heading svg { width: 18px; height: 18px; flex: 0 0 18px; color: var(--warn); }
-.approval-summary, .approval-status { margin: 0; font-size: calc(14px * var(--text-scale)); color: var(--muted); }
-.approval-summary { font-style: italic; }
-.approval-command { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow-y: auto; font: calc(12.5px * var(--text-scale))/1.5 var(--mono); padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--frame); }
-/* Allow once comes first for keyboards and screen readers; Deny shows on its left. */
-.approval-actions { display: flex; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; }
-.approval-actions button { min-height: 44px; padding: 8px 18px; }
-.approval-actions .secondary { border: 1px solid var(--line); background: var(--frame); }
 /* Phones: every accent on one row. The circles shrink to share the width and the names are read aloud only. */
 @media (max-width: 700px) {
   .swatches { flex-wrap: nowrap; gap: 10px; }
@@ -474,9 +459,8 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   .swatch span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
   .swatch-custom input { width: 100%; height: 100%; }
 }
-@media (max-width: 700px) { .approval-panel { padding: 0 12px 10px; } .approval-actions button { flex: 1; } }
 
-/* Native model configuration and durable turn controls use the existing settings and message tokens. */
+/* Model configuration and durable turn controls use the existing settings and message tokens. */
 .model-row { max-width: 520px; border-bottom: 1px solid var(--line); }
 .model-row-heading { display: flex; align-items: center; gap: 12px; min-height: 64px; }
 .model-expand { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 10px 0; border: 0; background: transparent; color: var(--ink); text-align: left; }
@@ -495,10 +479,10 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .model-details { padding: 0 0 14px; }
 .settings-detail .model-field { margin-top: 12px; }
 .model-field input, .model-field select { display: block; margin-top: 6px; }
-.native-action { min-height: 32px; padding: 4px 8px; }
-@media (pointer: coarse) { .native-action, .web-toggle { min-width: 44px; min-height: 44px; } }
-.native .reply-under { flex-wrap: wrap; }
-.native .reply-usage { flex-basis: 100%; font-size: 11px; }
+.message-action { min-height: 32px; padding: 4px 8px; }
+@media (pointer: coarse) { .message-action, .web-toggle { min-width: 44px; min-height: 44px; } }
+.reply-under { flex-wrap: wrap; }
+.reply-usage { flex-basis: 100%; font-size: 11px; }
 .composer .send-button.stopping { display: grid; width: auto; flex-basis: auto; padding: 0 12px; font-size: 14px; }
 .queue-send { padding: 0 10px; }
 .context-meter { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 4px 16px; color: var(--muted); font-size: 11px; }
@@ -509,7 +493,7 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 @media (max-width: 700px) {
   .settings-detail select { font-size: max(16px, calc(16px * var(--text-scale))); }
 }
-.native .from-agent .message-body:empty { display: none; }
+.from-agent .message-body:empty { display: none; }
 .message:has(.inline-edit) { width: min(520px, 88%); }
 .message-body.editing { color: var(--ink); background: var(--sheet); border: 1px solid var(--line); }
 
@@ -565,7 +549,7 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   #sheet-persona, #remember-sheet button, #sheet-instructions-form .check-row { min-height: 44px; min-width: 44px; }
 }
 
-/* Attachments (native): one chip shape in the composer tray, sent messages and the edit form. */
+/* Attachments: one chip shape in the composer tray, sent messages and the edit form. */
 .attach-button { flex-shrink: 0; align-self: flex-end; border: 0; background: none; color: var(--muted); padding: 8px 4px; cursor: pointer; }
 .attach-button svg { display: block; width: 20px; height: 20px; }
 .attach-button:disabled { opacity: .4; cursor: default; }
@@ -616,9 +600,9 @@ button.attach-chip-main:focus-visible, .attach-chip-remove:focus-visible, .attac
 @media (pointer: coarse) {
   .job-dialog input, .job-dialog button, .job-dialog select, .run-row button { min-height: 44px; }
   .job-dialog .job-option input { min-height: 20px; }
-  .job-dialog button, .native .job-history-heading button { min-width: 44px; }
-  .native .job-history-heading button { min-height: 44px; }
-  .native .job-enabled .job-toggle { height: 44px; border-radius: 22px; }
-  .native .job-enabled .job-toggle::after { top: 8px; }
+  .job-dialog button, .job-history-heading button { min-width: 44px; }
+  .job-history-heading button { min-height: 44px; }
+  .job-enabled .job-toggle { height: 44px; border-radius: 22px; }
+  .job-enabled .job-toggle::after { top: 8px; }
   .job-dialog select { font-size: 16px; }
 }

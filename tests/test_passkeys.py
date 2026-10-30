@@ -7,8 +7,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
@@ -168,11 +167,8 @@ class PasskeyHTTPTests(unittest.IsolatedAsyncioTestCase):
         (self.state / "password.hash").write_text(make_password_hash("example-demo-password"))
         with patch.dict(os.environ, {
             "ROOST_PUBLIC_ORIGIN": ORIGIN, "ROOST_STATE_DIR": str(self.state),
-            "ROOST_HERMES_URL": "http://127.0.0.1:1", "ROOST_HERMES_USERNAME": "demo",
-            "ROOST_HERMES_PASSWORD_FILE": str(self.state / "upstream-password"),
         }):
             self.app = server.create_app()
-        self.app["hermes"] = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), request=AsyncMock(return_value=[]))
         self.client = TestClient(TestServer(self.app), cookie_jar=CookieJar(unsafe=True))
         await self.client.start_server()
         self.headers = {"Origin": ORIGIN, "X-Roost-Request": "1"}

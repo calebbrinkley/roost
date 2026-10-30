@@ -77,7 +77,7 @@ test('sign-out clears private state, drafts and open dialogs', async () => {
 test('older transcript response cannot overwrite a newer poll', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = '';
-    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered = rows[0].content; };`);
+    api = path => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered = rows[0].content; };`);
   const old = f.run('loadMessages()'); const latest = f.run('loadMessages()');
   f.run(`requests[1]({messages: [{content:'new'}]});`); await latest;
   f.run(`requests[0]({messages: [{content:'old'}]});`); await old;
@@ -231,7 +231,7 @@ test('malformed transcript and Job rows do not crash the remaining valid content
 test('transcript keeps updating when every poll overlaps the next one', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
-    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+    api = path => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
   const loads = [f.run('loadMessages()')];
   for (let i = 0; i < 5; i++) {
     loads.push(f.run('loadMessages()'));
@@ -245,7 +245,7 @@ test('transcript keeps updating when every poll overlaps the next one', async ()
 test('a transcript response from an earlier view or sign-in is discarded', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one'; globalThis.requests = []; globalThis.rendered = [];
-    api = path => path.endsWith('/approvals') ? Promise.resolve({approvals:[]}) : new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
+    api = path => new Promise(resolve => requests.push(resolve)); renderMessages = rows => { rendered.push(rows[0].content); };`);
   const beforeSwitch = f.run('loadMessages()');
   f.run(`state.viewEpoch++; state.current = 'two'; state.viewEpoch++; state.current = 'one';`);
   f.run(`requests[0]({messages: [{content:'old view'}]});`); await beforeSwitch;
@@ -256,6 +256,7 @@ test('a transcript response from an earlier view or sign-in is discarded', async
 
 test('session expiry during a Job save leaves the reopened form usable', async () => {
   const f = fixture(); await tick();
+  f.run('loadPersonas = async () => {};');
   const button = f.get('save-job-button'); f.get('job-form').querySelectorAll = () => [button];
   f.context.fetch = async () => ({ok:false, status:401, json: async () => ({error:'expired'})});
   await f.run('saveJob({preventDefault() {}})');
@@ -268,6 +269,7 @@ test('session expiry during a Job save leaves the reopened form usable', async (
 
 test('a late Job save from an old session cannot unlock a save in the new one', async () => {
   const f = fixture(); await tick();
+  f.run('loadPersonas = async () => {};');
   const button = f.get('save-job-button'); f.get('job-form').querySelectorAll = () => [button];
   f.context.fetch = () => new Promise(resolve => { f.context.finishOld = resolve; });
   const old = f.run('saveJob({preventDefault() {}})');
@@ -363,7 +365,7 @@ function settingsFixture(...args) {
     textSize() { return this.size; }, setTextSize(name) { this.size = name; } });
   return f;
 }
-const SETTINGS = "{agent_name:'', hermes_agent_name:'Kestrel', accent:'forest', accents:['forest','ocean','violet','rose','amber','slate']}";
+const SETTINGS = "{agent:'Kestrel', accent:'forest', accents:['forest','ocean','violet','rose','amber','slate']}";
 const text = n => (n.textContent || '') + (n.children?.map(text).join('') || '');
 const find = (n, test) => test(n) ? n : n.children?.map(c => find(c, test)).find(Boolean);
 
@@ -428,22 +430,6 @@ test('delete all stays disabled until its own phrase is typed, then sends the co
   assert.equal(f.get('notice').textContent, 'Deleted 3 conversations.');
 });
 
-test('saving an agent name applies the name the server now reports, with no second request', async () => {
-  const f = settingsFixture(); await tick();
-  f.run(`globalThis.paths = []; api = async (path, options = {}) => {
-    paths.push(path);
-    if (options.method === 'PATCH') return {...${SETTINGS}, agent_name: 'Robin', agent: 'Robin'};
-    if (path === '/settings/soul') return {content: 'Be brief.'};
-    return ${SETTINGS}; };`);
-  f.run(`setSection('settings'); selectSettingsGroup('agent')`); await tick(); await tick();
-  const input = find(f.get('settings-detail'), n => n.id === 'settings-agent-name');
-  assert.equal(input.placeholder, 'Kestrel');
-  assert.equal(find(f.get('settings-detail'), n => n.id === 'settings-soul').value, 'Be brief.');
-  input.value = 'Robin'; input.events.input();
-  await find(f.get('settings-detail'), n => n.textContent === 'Save name').events.click(); await tick();
-  assert.equal(f.run('agent()'), 'Robin');
-  assert.equal(f.run('paths').includes('/me'), false);
-});
 
 test('Settings applies the name, accent and time zone another device saved', async () => {
   const f = settingsFixture(); await tick();
@@ -511,20 +497,17 @@ test('the Settings tab opens Settings beside Messages and Jobs', async () => {
   assert.equal(f.get('nav-settings').classList.contains('active'), false);
 });
 
-test('About shows the build, live stats and Hermes, or says Hermes is unreachable', async () => {
+test('About shows the build and live service stats', async () => {
   const f = settingsFixture(); await tick();
   f.run(`globalThis.about = {roost:{version:'0.1.0', revision:'e2ebc26784892de5558fd5bb95f589a1d3fe62b4'},
       runtime:{python:'3.14.0', aiohttp:'3.14.4'},
       stats:{uptime_seconds:7260, cpu_percent:1.5, memory_bytes:52428800, memory_limit_bytes:null, process_memory_bytes:41943040,
-             app_bytes:2097152, state_bytes:24576, disk_total_bytes:1e12, disk_free_bytes:4e11},
-      hermes:{reachable:true, latency_ms:12, version:'2026.9.24', gateway_running:true, active_sessions:2}};
+             app_bytes:2097152, state_bytes:24576, disk_total_bytes:1e12, disk_free_bytes:4e11}};
     api = async path => path === '/about' ? about : ${SETTINGS};`);
   f.run(`setSection('settings'); selectSettingsGroup('about')`); await tick(); await tick();
   const shown = text(f.get('settings-detail'));
-  for (const part of [/0\.1\.0/, /e2ebc26/, /2h 1m/, /50 MB/, /Running/, /12 ms/, /Space Grotesk/, /calebbrinkley/,
+  for (const part of [/0\.1\.0/, /e2ebc26/, /2h 1m/, /50 MB/, /Space Grotesk/, /calebbrinkley/,
                       /Roost on disk2\.0 MB ?app 2\.0 MB · data 24 KB/, /Free space373 GB ?of 931 GB on the shared drive/]) assert.match(shown, part);
-  f.run(`about.hermes = {reachable:false}; loadAbout()`); await tick(); await tick();
-  assert.match(text(f.get('settings-detail')), /Unreachable/);
 });
 
 test('choosing a time zone saves it and re-renders times', async () => {
@@ -732,11 +715,11 @@ test('an unreachable server at start shows Connecting and retries, never a blank
 test('the thinking indicator follows the server, and shows at once for a message just sent', async () => {
   const f = fixture(); await tick();
   const now = Date.now() / 1000, thinking = () => Boolean(find(f.get('transcript'), n => n.className === 'typing-row'));
-  const user = {id: 1, role: 'user', content: 'check the logs', timestamp: now};
+  const user = {id: 1, role: 'user', content: 'check the logs', client_request_id: 'request-one', timestamp: now};
   f.context.rows = [];
   // Sent from this device; the server has not answered since.
   f.run(`state.current = 'one'; state.turn = {id: 'one', working: false, at: Date.now() - 1000};
-    state.sentMessages = [{id: 'one', text: 'check the logs', since: Date.now(), after: 0, key: 'sent-1'}]; renderMessages(rows)`);
+    state.sentMessages = [{id: 'one', text: 'check the logs', since: Date.now(), after: 0, key: 'sent-1', request_id:'request-one'}]; renderMessages(rows)`);
   assert.equal(thinking(), true, 'unsaved and not yet reported on');
   f.context.rows = [user, {id: 2, role: 'tool', content: 'ok', timestamp: now}];
   f.run(`state.turn = {id: 'one', working: true, at: Date.now()}; renderMessages(rows)`);
@@ -803,7 +786,7 @@ test('thoughts from every step fold, collapsed, into one block above the reply t
     {id: 2, role: 'assistant', content: '', reasoning: 'Read the log first.', tool_calls: [{id: 'a'}], timestamp: now},
     {id: 3, role: 'tool', content: 'ok', timestamp: now},
     {id: 4, role: 'assistant', content: 'All clear.', reasoning_content: 'Nothing failed.', timestamp: now},
-    {id: 5, role: 'assistant', content: 'Anything else?', reasoning: 'hidden by Hermes', display_reasoning: '', timestamp: now}];
+    {id: 5, role: 'assistant', content: 'Anything else?', reasoning: 'hidden by the server', display_reasoning: '', timestamp: now}];
   f.run(`state.current = 'one'; renderMessages(rows)`);
   const kids = f.get('transcript').children, blocks = kids.filter(n => n.className === 'thoughts');
   assert.equal(blocks.length, 1);
@@ -921,7 +904,7 @@ function eventSources() {
   return {opened, globals: {EventSource}};
 }
 
-test('a reply streams its thoughts, then its text, in place of the steps Hermes has saved so far', async () => {
+test('a reply streams its thoughts, then its text, in place of the steps the server has saved so far', async () => {
   const {opened, globals} = eventSources();
   const f = fixture(undefined, globals); await tick();
   const now = Date.now() / 1000, kids = () => f.get('transcript').children;
@@ -932,7 +915,7 @@ test('a reply streams its thoughts, then its text, in place of the steps Hermes 
   await f.run(`submitMessage({preventDefault() {}})`);
   assert.equal(opened.length, 1);
   assert.equal(opened[0].url, '/api/conversations/one/stream');
-  const user = {id: 1, role: 'user', content: 'check the logs', timestamp: now};
+  const user = {id: 1, role: 'user', content: 'check the logs', client_request_id: 'request-one', timestamp: now};
   const interim = {id: 2, role: 'assistant', content: 'Let me look.', reasoning: 'Read the log.', tool_calls: [{id: 'a'}], timestamp: now};
   f.context.rows = [user, interim];
   // As loadMessages would record it: the server is following the turn that started at 1, after row 0.
@@ -983,7 +966,7 @@ test('collapsed live thoughts respect manual toggles through updates, rebuilds a
   assert.equal(f.run(`thoughtsBlock(['Saved thinking'], 'saved').open`), false);
 });
 
-test('a reply being written shows the message it answers before Hermes has saved it', async () => {
+test('a reply being written shows the message it answers before the server has saved it', async () => {
   const {opened, globals} = eventSources();
   const f = fixture(undefined, globals); await tick();
   f.run(`state.current = 'one'; openStream('one'); renderMessages([])`);
@@ -1007,24 +990,11 @@ test('a refused stream hands the turn back to the transcript, and leaving a conv
   assert.equal(f.run('state.live'), null);
 });
 
-test('a message that carried instructions shows as typed, in the transcript and the list', async () => {
-  const f = fixture(); await tick();
-  const begin = f.run('INSTRUCTIONS_BEGIN'), end = f.run('INSTRUCTIONS_END');
-  const sent = `${begin}\nAnswer in French.\n${end}\n\nhello there`;
-  f.context.rows = [{role: 'user', content: sent, timestamp: Date.now() / 1000}, {role: 'assistant', content: 'Bonjour.', timestamp: Date.now() / 1000}];
-  f.run(`state.current = 'one'; renderMessages(rows)`);
-  const transcript = text(f.get('transcript'));
-  assert.match(transcript, /hello there/);
-  assert.doesNotMatch(transcript, /Answer in French/);
-  assert.equal(f.run(`withoutInstructions(${JSON.stringify(sent.slice(0, 40))})`), '', 'a preview cut inside the instructions');
-  assert.equal(f.run(`sessionName({preview: ${JSON.stringify(sent)}})`), 'hello there');
-  assert.equal(f.run(`withoutInstructions(${JSON.stringify(sent.replaceAll('\n', ' '))})`), 'hello there', 'a preview flattened to one line');
-  assert.equal(f.run(`withoutInstructions('Write [Instructions for this conversation] as a heading')`), 'Write [Instructions for this conversation] as a heading');
-});
 
 test('the gear opens this conversation\'s menu: instructions load and save, and Download points at the export', async () => {
   const f = fixture(); await tick();
-  f.run(`state.current = 'chat:one'; state.conversations = [{id: 'chat:one', title: 'Plans'}]; globalThis.calls = [];
+  f.run(`loadModels = async () => {}; loadPersonas = async () => {state.personaData={personas:[],default_persona_id:null};};
+    loadMessages = async () => {}; state.current = 'chat:one'; state.conversations = [{id: 'chat:one', title: 'Plans'}]; globalThis.calls = [];
     api = async (path, options = {}) => { calls.push([path, options.method || 'GET', options.body]);
       return options.method === 'PUT' ? JSON.parse(options.body) : {instructions: 'Be brief.'}; };`);
   f.context.rows = [{role: 'user', content: 'hi'}];
@@ -1039,13 +1009,15 @@ test('the gear opens this conversation\'s menu: instructions load and save, and 
   assert.equal(f.get('sheet-instructions-text').disabled, false);
   f.get('sheet-instructions-text').value = 'Answer in French.';
   await f.get('sheet-instructions-form').events.submit({preventDefault() {}});
-  assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls').at(-1))), ['/conversations/chat%3Aone/settings', 'PUT', '{"instructions":"Answer in French."}']);
+  const saved = Array.from(f.run('calls')).find(call => call[1] === 'PUT');
+  assert.deepEqual(Array.from(saved).slice(0, 2), ['/conversations/chat%3Aone/settings', 'PUT']);
+  assert.deepEqual(JSON.parse(saved[2]), {instructions:'Answer in French.',model:null,reasoning:'none',no_web:false,keep_local:false,persona_id:null});
   assert.equal(f.get('conversation-sheet').open, false);
   f.run('renderWelcome()');
   assert.equal(f.get('chat-settings').classList.contains('hidden'), true);
 });
 
-test('a tapped notification opens its job, or the message the agent sent', async () => {
+test('a tapped notification opens its job', async () => {
   const f = fixture(); await tick();
   f.run(`globalThis.calls = []; api = async path => { calls.push(path);
     return path === '/jobs' ? {jobs: [{id: 'job_7', name: 'Morning brief'}]} : {id: 'd1', title: '', text: 'Dinner is at **7**.', created: 1760000000}; };
@@ -1053,30 +1025,9 @@ test('a tapped notification opens its job, or the message the agent sent', async
   await f.run(`openLink('?j=job_7')`); await tick();
   assert.equal(f.run('state.section'), 'jobs');
   assert.equal(f.run('state.selectedJob'), 'job_7');
-  await f.run(`openLink('?d=d1')`); await tick();
-  assert.equal(f.get('delivery-sheet').open, true);
-  assert.match(text(f.get('delivery-text')), /Dinner is at/);
-  assert.equal(f.get('delivery-title').textContent, f.run('agent()'));
+
 });
 
-test('Notifications shows how to connect Hermes, with the token, and replaces the token after a confirm', async () => {
-  const f = fixture(); await tick();
-  f.run(`state.settings = {}; state.settingsGroup = 'notifications'; state.push = {devices: [], mine: null, public_key: ''};
-    state.hermesLink = {token: 'tok-1', url: 'https://roost.example.invalid', last_delivery: null};
-    globalThis.calls = []; api = async (path, options = {}) => { calls.push([path, options.body]);
-      return {token: 'tok-2', url: 'https://roost.example.invalid', last_delivery: null}; };`);
-  f.run('renderSettings()');
-  const detail = text(f.get('settings-detail'));
-  assert.match(detail, /ROOST_URL=https:\/\/roost\.example\.invalid\nROOST_DELIVERY_TOKEN=tok-1\nROOST_HOME_CHANNEL=roost/);
-  assert.match(detail, /hermes plugins enable roost/);
-  assert.match(detail, /Nothing received from Hermes yet/);
-  const button = () => find(f.get('settings-detail'), n => /token/i.test(n.textContent || '') && n.events?.click);
-  button().events.click();
-  assert.equal(button().textContent, 'Confirm new token');
-  await button().events.click(); await tick();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.run('calls').at(-1))), ['/hermes/token', '{"confirm":true}']);
-  assert.equal(f.run('state.hermesLink.token'), 'tok-2');
-});
 
 function voiceBrowser() {
   const players = [];
@@ -1130,7 +1081,11 @@ test('tap to record, tap to review the transcript, and send for a spoken reply',
   assert.equal(stream.stopped, true);
   assert.equal(f.get('composer').classList.contains('recording'), false);
   const calls = JSON.parse(JSON.stringify(f.run('calls')));
-  assert.deepEqual(calls[0], ['/audio/transcribe', '{"data_url":"data:audio/mp4;base64,AAAA","mime_type":"audio/mp4"}']);
+  assert.equal(calls[0][0], '/audio/transcribe');
+  const recording = JSON.parse(calls[0][1]);
+  assert.equal(recording.data_url, 'data:audio/mp4;base64,AAAA');
+  assert.equal(recording.mime_type, 'audio/mp4');
+  assert.ok(recording.duration_seconds >= 0 && recording.duration_seconds <= 120);
   assert.equal(calls.length, 1, 'dictation must not send a message');
   assert.equal(f.get('message').value, 'what is on today');
   const now = Date.now() / 1000;
@@ -1142,7 +1097,7 @@ test('tap to record, tap to review the transcript, and send for a spoken reply',
   assert.equal(players[0].src, '/api/audio/silence', 'sending the voice draft unlocks the player for the reply');
   assert.equal(f.run('calls[1][0]'), '/conversations/one/messages');
   assert.equal(f.run('state.voiceReply.key'), f.run('state.sentMessages[0].key'));
-  f.context.rows.push({id: 3, role: 'user', content: 'what is on today', timestamp: now});
+  f.context.rows.push({id: 3, role: 'user', content: 'what is on today', client_request_id:f.run('state.sentMessages[0].request_id'), timestamp: now});
   f.run(`state.turn = {id: 'one', working: true, at: Date.now()}; renderMessages(rows)`);
   assert.equal(f.run('state.voiceReply.row'), 3);
   assert.equal(timers.length, 0, 'nothing is read while the agent is working');
@@ -1287,49 +1242,6 @@ test('late final chunks from a cancelled recording cannot disrupt the next recor
 });
 
 
-test('approval card shows literal commands and resolves only one request', async () => {
-  const f = fixture(); await tick();
-  f.run(`state.current = 'chat:one'; setApprovals([{request_id:'request-one', command:'<script>unsafe()</script>', description:'Write a note', choices:['once','deny']}]);`);
-  assert.equal(f.get('approvals').classList.contains('hidden'), false);
-  const card = f.get('approvals').children[0];
-  assert.equal(card.children[2].tagName, 'PRE');
-  assert.equal(card.children[2].textContent, '<script>unsafe()</script>');
-  assert.equal(card.children[3].children[0].textContent, 'Allow once');
-  f.run(`globalThis.decisions = []; api = async (url, options) => { decisions.push({url, options}); return {resolved:true}; }; loadApprovals = () => {};`);
-  await f.run(`decideApproval('request-one', 'once')`);
-  assert.equal(f.run('decisions[0].url'), '/conversations/chat%3Aone/approvals');
-  assert.equal(f.run('decisions[0].options.body'), '{"request_id":"request-one","choice":"once"}');
-  assert.match(f.get('approvals').children[0].textContent, /Allowed once/);
-  f.run('signedOut()');
-  assert.equal(f.get('approvals').classList.contains('hidden'), true);
-});
-
-test('expired, offline and duplicate approval clicks never masquerade as success', async () => {
-  const f = fixture(); await tick();
-  f.run(`state.current = 'one'; setApprovals([{request_id:'r', command:'example', choices:['once','deny']}]);
-    globalThis.calls = 0; api = () => { calls++; return new Promise((_, reject) => { globalThis.rejectDecision = reject; }); }; loadApprovals = () => {};`);
-  const pending = f.run(`decideApproval('r', 'once')`);
-  await f.run(`decideApproval('r', 'deny')`);
-  assert.equal(f.run('calls'), 1);
-  f.run(`rejectDecision(new Error('This request expired.'))`); await pending;
-  assert.equal(f.run('state.approvalReady'), false);
-  assert.match(f.run('state.approvalNotice'), /expired/);
-  assert.equal(f.get('approvals').children[0].children[2].children[0].disabled, true);
-});
-
-test('pending approvals recover after reopening and stale polls cannot overwrite stream updates', async () => {
-  const f = fixture(); await tick();
-  f.run(`state.current = 'one'; globalThis.completePoll = null; api = () => new Promise(resolve => { completePoll = resolve; });`);
-  const pending = f.run('loadApprovals()');
-  f.run(`setApprovals([{request_id:'new', choices:['deny']}]); completePoll({approvals:[]});`); await pending;
-  assert.equal(f.run('state.approvals[0].request_id'), 'new');
-  f.run(`api = async () => ({approvals:[{request_id:'pending', description:'Recovered request', choices:['once','deny']}]});`);
-  await f.run('loadApprovals()');
-  assert.equal(f.run('state.approvals[0].request_id'), 'pending');
-  f.run(`leaveLive(); state.current = 'two'; state.approvalFocus='old'; state.approvalFocusConversation='two'; setApprovals([]);`);
-  assert.match(f.get('approvals').children[0].textContent, /no longer waiting/);
-});
-
 function workerFixture(maxActions = 2, fetch = async () => ({ok:true})) {
   const events = {}, notifications = [], opened = [], requests = [];
   const self = {location:{origin:'https://roost.example.invalid'}, Notification:{maxActions},
@@ -1342,34 +1254,6 @@ function workerFixture(maxActions = 2, fetch = async () => ({ok:true})) {
   return {notifications, requests, opened, dispatch};
 }
 
-test('notification actions use the owner session and exact request; Safari opens the card', async () => {
-  for (const maxActions of [0,2]) {
-    const f = workerFixture(maxActions);
-    const payload = {title:'Kestrel needs approval', body:'Write a note', url:'/?c=one&a=request-one',
-      approval:{conversation:'one', request_id:'request-one', choices:['once','deny']}};
-    await f.dispatch('push', {data:{json:() => payload}});
-    const notice = f.notifications[0];
-    assert.equal(notice.options.actions.length, maxActions);
-    await f.dispatch('notificationclick', {action:maxActions ? 'once' : '', notification:{...notice.options, close() {}}});
-    if (maxActions) {
-      assert.equal(f.requests[0][0], '/api/conversations/one/approvals');
-      assert.equal(f.requests[0][1].credentials, 'same-origin');
-      assert.equal(f.requests[0][1].headers['X-Roost-Request'], '1');
-      assert.equal(f.requests[0][1].body, '{"request_id":"request-one","choice":"once"}');
-    } else {
-      assert.equal(f.requests.length, 0);
-      assert.equal(f.opened[0], 'https://roost.example.invalid/?c=one&a=request-one');
-    }
-  }
-});
-
-test('failed notification decisions open Roost without replaying or implying approval', async () => {
-  const f = workerFixture(2, async () => ({ok:false, status:401}));
-  await f.dispatch('notificationclick', {action:'deny', notification:{tag:'r', close() {}, data:{url:'/?c=one&a=r', approval:{conversation:'one', request_id:'r'}}}});
-  assert.equal(f.requests.length, 1);
-  assert.match(f.notifications[0].options.body, /not confirmed/);
-  assert.equal(f.opened.length, 1);
-});
 
 test('polling and live updates preserve a transcript selection until it is cleared', async () => {
   const f = fixture(); await tick();
@@ -1384,7 +1268,7 @@ test('polling and live updates preserve a transcript selection until it is clear
   f.run(`state.live = {id:'one', user:'Question', started:1, thoughts:'', text:'Streaming', done:false}; renderMessages(rows); selected = true;`);
   const liveBody = f.run('state.liveNodes.body');
   f.run(`state.live.text += ' continues'; renderLive()`);
-  assert.equal(text(liveBody), 'Streaming');
+  assert.equal(text(liveBody), 'AssistantStreaming');
   f.run(`selected = false; document.events.selectionchange()`);
   assert.match(text(f.get('transcript')), /Streaming continues/);
 });
@@ -1402,7 +1286,7 @@ test('a second submitted message stays visible while the first reply is streamin
 });
 
 
-test('accepted follow-ups appear before Hermes persists them, including repeated text', async () => {
+test('accepted follow-ups appear before the server persists them, including repeated text', async () => {
   const f = fixture(); await tick();
   f.context.rows = [{id:1,role:'user',content:'First question',timestamp:Date.now()/1000}];
   f.run(`state.current='one'; renderMessages(rows); api=async()=>({session_id:'one'});
@@ -1413,12 +1297,12 @@ test('accepted follow-ups appear before Hermes persists them, including repeated
   }
   const own = () => f.get('transcript').children.filter(n=>n.className==='message from-you').map(text);
   assert.deepEqual(own(), ['First question','Follow up','Follow up']);
-  f.context.rows.push({id:2,role:'user',content:'Follow up',timestamp:Date.now()/1000});
+  f.context.rows.push({id:2,role:'user',content:'Follow up',client_request_id:f.run('state.sentMessages[0].request_id'),timestamp:Date.now()/1000});
   f.run('renderMessages(rows)');
   assert.deepEqual(own(), ['First question','Follow up','Follow up'], 'one persisted copy must consume only one local echo');
   f.run('renderMessages(rows)');
   assert.deepEqual(own(), ['First question','Follow up','Follow up'], 'a later poll must not consume the second echo with the same row');
-  f.context.rows.push({id:3,role:'user',content:'Follow up',timestamp:Date.now()/1000});
+  f.context.rows.push({id:3,role:'user',content:'Follow up',client_request_id:f.run('state.sentMessages[0].request_id'),timestamp:Date.now()/1000});
   f.run('renderMessages(rows)');
   assert.deepEqual(own(), ['First question','Follow up','Follow up']);
   f.run('signedOut()');
@@ -1450,19 +1334,6 @@ test('a completed first stream does not hide later replies or wait for their tur
   assert.match(text(f.get('transcript')),/Second/);
 });
 
-test('Hermes may persist a queued burst as one combined user row without leaving duplicate local echoes', async () => {
-  const f=fixture();await tick();
-  f.context.rows=[{id:1,role:'user',content:'First',timestamp:Date.now()/1000}];
-  f.run(`state.current='one';renderMessages(rows);api=async()=>({session_id:'one'});loadConversations=async()=>{};loadMessages=async()=>renderMessages(rows);`);
-  for(const line of ['Same follow up','Same follow up']) {
-    f.get('message').value=line;await f.run('submitMessage({preventDefault(){}})');
-  }
-  f.context.rows.push({id:2,role:'assistant',content:'First reply',timestamp:Date.now()/1000},
-    {id:3,role:'user',content:'Same follow up\n\nSame follow up',timestamp:Date.now()/1000});
-  f.run('renderMessages(rows)');
-  assert.equal(f.run('state.sentMessages.length'),0,'the combined durable row covers both accepted sends');
-  assert.equal(f.get('transcript').children.filter(n=>n.className==='message from-you').length,2);
-});
 
 test('thinking level: a new conversation sends it with the first message, an open one saves it at once', async () => {
   const f = fixture(); await tick();
@@ -1478,8 +1349,8 @@ test('thinking level: a new conversation sends it with the first message, an ope
   f.get('reasoning').value = 'low'; await f.run(`changeReasoning()`);
   assert.deepEqual(JSON.parse(f.run('JSON.stringify(calls.at(-1).slice(0, 2))')), ['/conversations/one/settings', 'PUT']);
   f.run(`newConversation()`);
-  assert.equal(f.get('reasoning').value, 'default');
-  assert.ok(!f.get('reasoning-chip').classList.contains('chosen'));
+  assert.equal(f.get('reasoning').value, 'none');
+  assert.ok(f.get('reasoning-chip').classList.contains('chosen'));
 });
 
 test('a failed thinking change puts the previous level back', async () => {
@@ -1507,12 +1378,12 @@ test('notification messages wait for sign-in, open once, and clear on sign-out',
   await tick();
   f.run(`globalThis.opened = []; openLink = link => opened.push(link);
     refreshIdentity = () => {}; loadConversations = () => new Promise(resolve => {globalThis.finishList = resolve;});`);
-  message({data: {link: '?c=one&a=approval'}});
+  message({data: {link: '?c=one'}});
   const signingIn = f.run('signedIn()');
-  message({data: {link: '?c=two&a=approval'}});
+  message({data: {link: '?c=two'}});
   assert.equal(f.run('opened.length'), 0);
   f.run('finishList()'); await signingIn;
-  assert.deepEqual(Array.from(f.run('opened')), ['?c=two&a=approval']);
+  assert.deepEqual(Array.from(f.run('opened')), ['?c=two']);
   f.run('loadConversations = async () => {}'); await f.run('signedIn()');
   assert.equal(f.run('opened.length'), 1);
   f.run('signedOut()'); message({data: {open: 'old'}}); f.run('signedOut()');
@@ -1520,7 +1391,7 @@ test('notification messages wait for sign-in, open once, and clear on sign-out',
 });
 
 test('cold notification URLs survive initial sign-out through password and passkey sign-in', async () => {
-  for (const method of ['password', 'passkey']) for (const link of ['?c=one&a=approval', '?j=job', '?d=delivery']) {
+  for (const method of ['password', 'passkey']) for (const link of ['?c=one', '?j=job']) {
     const f = passkeyFixture(); await tick();
     f.context.location = {search: link};
     f.context.history = {replaceState() { f.context.location.search = ''; }};
@@ -1628,15 +1499,15 @@ test('a notification received during boot survives the initial signed-out respon
   let finish, message;
   const f = fixture(() => new Promise(resolve => {finish = resolve;}),
     {navigator: {serviceWorker: {addEventListener(type, fn) {message = fn;}}}});
-  message({data: {link: '?d=delivery'}});
+  message({data: {link: '?j=job'}});
   finish({ok:true, json:async () => ({signed_in:false})}); await tick();
   f.run(`globalThis.opened = ''; openLink = link => {opened = link;}; refreshIdentity = () => {}; loadConversations = async () => {};`);
-  await f.run('signedIn()'); assert.equal(f.run('opened'), '?d=delivery');
+  await f.run('signedIn()'); assert.equal(f.run('opened'), '?j=job');
 });
 
 test('live reply chunks mark jump to latest without moving the reader', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend = 'native'; state.current = 'one'; state.lastRows = [];
+  f.run(`state.current = 'one'; state.lastRows = [];
     state.live = {id:'one', text:'First chunk', thoughts:'', trace:[], sources:[]}; liveNodes(state.live);`);
   const transcript = f.get('transcript'), jump = f.get('jump-latest');
   transcript.scrollHeight = 1000; transcript.clientHeight = 200; transcript.scrollTop = 100;
@@ -1676,12 +1547,12 @@ test('failed messages stay in their conversation and Retry sends once without co
 test('a timed-out send keeps its key on Retry and uses the cached acknowledgment for queued and coalesced text', async () => {
   for (const saved of [[], [{id:2, role:'user', content:'Accepted prompt\n\nOther prompt'}]]) {
     const f = fixture(); await tick();
-    const posts = [], entries = new Map(); let hermes = 0;
+    const posts = [], entries = new Map(); let providerCalls = 0;
     f.context.fetch = async (url, options = {}) => {
       if (options.method !== 'POST') return {ok:true, json:async () => ({messages:saved})};
       const body = JSON.parse(options.body); posts.push(body);
       if (entries.has(body.request_id)) return {ok:true, json:async () => ({session_id:entries.get(body.request_id)})};
-      hermes++; entries.set(body.request_id, 'one');
+      providerCalls++; entries.set(body.request_id, 'one');
       const error = new Error('timed out after acceptance'); error.name = 'TimeoutError'; throw error;
     };
     f.run(`state.current = 'one'; loadConversations = async () => {}; loadMessages = async () => {};`);
@@ -1689,7 +1560,7 @@ test('a timed-out send keeps its key on Retry and uses the cached acknowledgment
     assert.equal(f.run('state.sentMessages[0].pending'), true);
     assert.doesNotMatch(text(f.get('transcript')), /Not sent/);
     await f.run('retryMessage(state.sentMessages[0])');
-    assert.equal(posts.length, 2); assert.equal(hermes, 1);
+    assert.equal(posts.length, 2); assert.equal(providerCalls, 1);
     assert.equal(posts[0].request_id, posts[1].request_id);
     assert.match(posts[0].request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.equal(f.run('state.sentMessages[0].failed'), false);
@@ -1790,33 +1661,33 @@ test('failed new conversations retain voice on Retry and can Delete a failed row
 
 test('Retry of a new send receives its created id from the cached result', async () => {
   const f = fixture(); await tick();
-  const posts = [], entries = new Map(); let hermes = 0;
+  const posts = [], entries = new Map(); let providerCalls = 0;
   f.context.fetch = async (url, options = {}) => {
     assert.equal(url, '/api/conversations');
     const body = JSON.parse(options.body); posts.push(body);
     if (entries.has(body.request_id)) return {ok:true, json:async () => ({session_id:'created'})};
-    hermes++; entries.set(body.request_id, 'created'); throw new TypeError('lost response');
+    providerCalls++; entries.set(body.request_id, 'created'); throw new TypeError('lost response');
   };
   f.run(`newConversation(); loadMessages = async () => {}; loadConversations = async () => {};`);
   f.get('message').value = 'New prompt'; await f.run('submitMessage({preventDefault() {}})');
   await f.run('retryMessage(state.sentMessages[0])');
-  assert.equal(posts.length, 2); assert.equal(hermes, 1);
+  assert.equal(posts.length, 2); assert.equal(providerCalls, 1);
   assert.equal(posts[0].request_id, posts[1].request_id); assert.equal(f.run('state.current'), 'created');
 });
 
-test('a 503 after acceptance and repeated pending responses never make another Hermes call', async () => {
+test('a 503 after acceptance and repeated pending responses never make another server call', async () => {
   const f = fixture(); await tick();
-  const posts = [], entries = new Map(); let hermes = 0;
+  const posts = [], entries = new Map(); let providerCalls = 0;
   f.context.fetch = async (url, options = {}) => {
     const body = JSON.parse(options.body); posts.push(body);
     if (entries.has(body.request_id)) return {ok:false, status:409, json:async () => ({pending:true, error:'Still sending. Check again shortly.'})};
-    hermes++; entries.set(body.request_id, 'pending');
+    providerCalls++; entries.set(body.request_id, 'pending');
     return {ok:false, status:503, json:async () => ({error:'Acknowledgment lost'})};
   };
   f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
   f.get('message').value = 'Late prompt'; await f.run('submitMessage({preventDefault() {}})');
   await f.run('retryMessage(state.sentMessages[0])'); await f.run('retryMessage(state.sentMessages[0])');
-  assert.equal(posts.length, 3); assert.equal(hermes, 1);
+  assert.equal(posts.length, 3); assert.equal(providerCalls, 1);
   assert.equal(new Set(posts.map(row => row.request_id)).size, 1);
   assert.equal(f.run('state.sentMessages[0].pending'), true);
   assert.match(text(f.get('transcript')), /Sending….*Check again/s);
@@ -1826,20 +1697,20 @@ test('a 503 after acceptance and repeated pending responses never make another H
 
 test('deliberately repeated text gets distinct keys and an earlier row cannot confirm the second send', async () => {
   const f = fixture(); await tick();
-  const posts = [], entries = new Map(); let hermes = 0;
+  const posts = [], entries = new Map(); let providerCalls = 0;
   f.context.fetch = async (url, options = {}) => {
     const body = JSON.parse(options.body); posts.push(body);
     if (entries.has(body.request_id)) return {ok:false, status:409, json:async () => ({pending:true})};
-    hermes++; entries.set(body.request_id, 'pending');
-    return hermes === 1 ? {ok:true, json:async () => ({session_id:'one'})}
+    providerCalls++; entries.set(body.request_id, 'pending');
+    return providerCalls === 1 ? {ok:true, json:async () => ({session_id:'one'})}
       : {ok:false, status:503, json:async () => ({error:'Reply lost'})};
   };
   f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
   f.get('message').value = 'Again'; await f.run('submitMessage({preventDefault() {}})');
-  f.run(`renderMessages([{id:1, role:'user', content:'Again', timestamp:Date.now()/1000}]);`);
+  f.run(`renderMessages([{id:1, role:'user', content:'Again', client_request_id:state.sentMessages[0].request_id, timestamp:Date.now()/1000}]);`);
   f.get('message').value = 'Again'; await f.run('submitMessage({preventDefault() {}})');
   await f.run('retryMessage(state.sentMessages[0])');
-  assert.equal(posts.length, 3); assert.equal(hermes, 2);
+  assert.equal(posts.length, 3); assert.equal(providerCalls, 2);
   assert.notEqual(posts[0].request_id, posts[1].request_id);
   assert.equal(posts[1].request_id, posts[2].request_id);
   assert.equal(f.run('state.sentMessages[0].pending'), true);
@@ -1966,7 +1837,7 @@ function pendingClock() {
     }, checks: () => [...timers.values()].filter(timer => timer.ms === 5000).length};
 }
 
-test('saved user rows retire pending echoes and their timers, including coalesced sends', async () => {
+test('saved user rows retire only their matching pending echoes and timers', async () => {
   const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
   f.run(`state.current = 'one'; api = async () => {const error = new Error('Still sending'); error.pending = true; throw error;};`);
   for (const value of ['First', 'Second']) {
@@ -1974,24 +1845,24 @@ test('saved user rows retire pending echoes and their timers, including coalesce
   }
   assert.equal(clock.checks(), 2);
   f.run(`state.sentMessages.push({id:'one', key:'failed', text:'Not accepted', since:Date.now(), after:0, failed:true});
-    renderMessages([{id:1, role:'user', content:'First\\n\\nSecond', timestamp:Date.now()/1000}]);`);
+    renderMessages([{id:1, role:'user', content:'First', client_request_id:state.sentMessages[0].request_id, timestamp:Date.now()/1000}, {id:2,role:'user',content:'Second',client_request_id:state.sentMessages[1].request_id,timestamp:Date.now()/1000}]);`);
   assert.equal(f.run('state.sentMessages.length'), 1);
   assert.equal(f.run('state.sentMessages[0].key'), 'failed');
   assert.equal(clock.checks(), 0);
   const own = f.get('transcript').children.filter(n => n.className === 'message from-you');
-  assert.equal(own.length, 2);
+  assert.equal(own.length, 3);
   assert.doesNotMatch(text(f.get('transcript')), /Sending…|Check again/);
   await clock.advance(15000); assert.equal(clock.checks(), 0);
 });
 
-test('pending auto-checks reuse one key and resolve with exactly one Hermes-bound submission', async () => {
+test('pending auto-checks reuse one key and resolve with exactly one server-bound submission', async () => {
   const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
-  const posts = [], entries = new Map(); let hermes = 0, done = false;
+  const posts = [], entries = new Map(); let providerCalls = 0, done = false;
   f.context.fetch = async (url, options) => {
     const body = JSON.parse(options.body); posts.push(body);
     if (entries.has(body.request_id)) return done ? {ok:true, json:async () => ({session_id:'one'})}
       : {ok:false, status:409, json:async () => ({pending:true, error:'Still sending'})};
-    hermes++; entries.set(body.request_id, 'pending');
+    providerCalls++; entries.set(body.request_id, 'pending');
     return {ok:false, status:503, json:async () => ({error:'Lost acknowledgment'})};
   };
   f.run(`state.current = 'one'; loadMessages = async () => {}; loadConversations = async () => {};`);
@@ -1999,7 +1870,7 @@ test('pending auto-checks reuse one key and resolve with exactly one Hermes-boun
   assert.equal(clock.checks(), 1);
   await clock.advance(5000); assert.equal(posts.length, 2); assert.equal(clock.checks(), 1);
   done = true; await clock.advance(5000);
-  assert.equal(posts.length, 3); assert.equal(hermes, 1);
+  assert.equal(posts.length, 3); assert.equal(providerCalls, 1);
   assert.equal(new Set(posts.map(row => row.request_id)).size, 1);
   assert.equal(f.run('state.sentMessages[0].pending'), false); assert.equal(clock.checks(), 0);
   await clock.advance(15000); assert.equal(posts.length, 3);
@@ -2007,10 +1878,10 @@ test('pending auto-checks reuse one key and resolve with exactly one Hermes-boun
 
 test('pending auto-checks stop two minutes after the first send, even after manual checks', async () => {
   const clock = pendingClock(), f = fixture(undefined, clock.globals); await tick();
-  const posts = [], entries = new Map(); let hermes = 0;
+  const posts = [], entries = new Map(); let providerCalls = 0;
   f.context.fetch = async (url, options) => {
     const body = JSON.parse(options.body); posts.push(body);
-    if (!entries.has(body.request_id)) {hermes++; entries.set(body.request_id, 'pending');}
+    if (!entries.has(body.request_id)) {providerCalls++; entries.set(body.request_id, 'pending');}
     return {ok:false, status:409, json:async () => ({pending:true, error:'Still sending'})};
   };
   f.run(`state.current = 'one'`); f.get('message').value = 'Keep checking';
@@ -2018,7 +1889,7 @@ test('pending auto-checks stop two minutes after the first send, even after manu
   await clock.advance(60000); await f.run('retryMessage(state.sentMessages[0])');
   await clock.advance(65000);
   assert.equal(f.run('state.sentMessages[0].since'), since);
-  assert.equal(hermes, 1); assert.equal(clock.checks(), 0);
+  assert.equal(providerCalls, 1); assert.equal(clock.checks(), 0);
   assert.ok(posts.length > 10);
   const count = posts.length; await clock.advance(60000); assert.equal(posts.length, count);
   assert.match(text(f.get('transcript')), /Check again/);
@@ -2042,7 +1913,7 @@ test('saving one pending row preserves the other item and its active timer', asy
     f.get('message').value = value; await f.run('submitMessage({preventDefault() {}})');
   }
   const second = f.run('state.sentMessages[1]');
-  f.run(`renderMessages([{id:1, role:'user', content:'First'}]);`);
+  f.run(`renderMessages([{id:1, role:'user', content:'First', client_request_id:state.sentMessages[0].request_id}]);`);
   assert.equal(f.run('state.sentMessages[0]'), second); assert.equal(clock.checks(), 1);
   const own = f.get('transcript').children.filter(n => n.className === 'message from-you');
   assert.equal(own.length, 2);
@@ -2062,9 +1933,8 @@ test('loading earlier messages prepends rows without moving the reader, and poll
   f.run(`state.current = 'one'; globalThis.calls = [];
     api = async path => {
       calls.push(path);
-      if (path.endsWith('/approvals')) return {approvals:[]};
-      if (path.includes('?before=')) return {messages:[{id:1,role:'user',content:'earlier'}],has_older:false};
-      return {messages:[{id:2,role:'assistant',content:'newest'}],has_older:true};
+      if (path.includes('?before=')) return {messages:[{id:1,ordinal:1,role:'user',content:'earlier'}],has_older:false};
+      return {messages:[{id:2,ordinal:2,role:'assistant',content:'newest'}],has_older:true};
     };`);
   await f.run('loadMessages()');
   const button = transcript.children[0];
@@ -2075,8 +1945,8 @@ test('loading earlier messages prepends rows without moving the reader, and poll
   assert.equal(transcript.scrollTop, 35 + transcript.scrollHeight - height);
   assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [1,2]);
   assert.ok(f.run(`calls.includes('/conversations/one?before=2&limit=500')`));
-  f.run(`api = async path => path.endsWith('/approvals') ? {approvals:[]} :
-    {messages:[{id:2,role:'assistant',content:'updated'},{id:3,role:'user',content:'next'}],has_older:true};`);
+  f.run(`api = async path =>
+    ({messages:[{id:2,ordinal:2,role:'assistant',content:'updated'},{id:3,ordinal:3,role:'user',content:'next'}],has_older:true});`);
   const top = transcript.scrollTop;
   await f.run('loadMessages()');
   assert.deepEqual(Array.from(f.run('state.lastRows.map(row => row.id)')), [1,2,3]);
@@ -2090,12 +1960,12 @@ test('loading earlier messages prepends rows without moving the reader, and poll
 test('an older history page cannot follow the reader to another conversation', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one';
-    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
-      {messages:[{id:2,role:'user',content:'one'}],has_older:true};`);
+    api = async path =>
+      ({messages:[{id:2,role:'user',content:'one'}],has_older:true});`);
   await f.run('loadMessages()');
   f.run(`api = () => new Promise(resolve => { globalThis.finishHistory = resolve; });`);
   const pending = f.run('loadEarlierMessages()');
-  f.run(`api = async path => path.endsWith('/approvals') ? {approvals:[]} :
+  f.run(`api = async path =>
     path.endsWith('/settings') ? {} : {messages:[{id:5,role:'user',content:'two'}],has_older:false};`);
   await f.run(`selectConversation('two')`);
   f.run(`finishHistory({messages:[{id:1,role:'user',content:'private old'}],has_older:false})`);
@@ -2111,14 +1981,14 @@ test('a history page arriving during selection preserves position when selection
   transcript.clientHeight = 100;
   f.run(`state.current = 'one'; globalThis.selected = false;
     window.getSelection = () => ({isCollapsed:!selected,rangeCount:1,getRangeAt:() => ({intersectsNode:() => true})});
-    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
-      {messages:[{id:2,role:'user',content:'newest'}],has_older:true};`);
+    api = async path =>
+      ({messages:[{id:2,role:'user',content:'newest'}],has_older:true});`);
   await f.run('loadMessages()');
   transcript.scrollTop = 25;
   const height = transcript.scrollHeight;
   f.run(`api = () => new Promise(resolve => { globalThis.finishHistory = resolve; });`);
   const pending = f.run('loadEarlierMessages()');
-  f.run(`selected = true; finishHistory({messages:[{id:1,role:'user',content:'earlier'}],has_older:false})`);
+  f.run(`selected = true; finishHistory({messages:[{id:1,ordinal:1,role:'user',content:'earlier'}],has_older:false})`);
   await pending;
   assert.equal(transcript.scrollHeight, height);
   f.run('selected = false; document.events.selectionchange()');
@@ -2128,8 +1998,8 @@ test('a history page arriving during selection preserves position when selection
 test('scrolling to the transcript top loads one history page at a time and can retry', async () => {
   const f = fixture(); await tick();
   f.run(`state.current = 'one';
-    api = async path => path.endsWith('/approvals') ? {approvals:[]} :
-      {messages:[{id:2,role:'user',content:'newest'}],has_older:true};`);
+    api = async path =>
+      ({messages:[{id:2,role:'user',content:'newest'}],has_older:true});`);
   await f.run('loadMessages()');
   f.run(`globalThis.historyCalls = 0;
     api = () => { historyCalls++; return new Promise((resolve,reject) => { globalThis.finishHistory = resolve; globalThis.failHistory = reject; }); };`);
@@ -2153,7 +2023,7 @@ test('identical transcript polls keep the DOM and skip Markdown, while visible c
   f.run(`state.current = 'one'; globalThis.markdowns = 0; const markdown = addMarkdown;
     addMarkdown = (...args) => {markdowns++; markdown(...args);};
     globalThis.data = {messages:[{id:1,role:'assistant',content:'Reply',reasoning:'Thoughts',timestamp:1700000000}],has_older:true};
-    api = async path => path.endsWith('/approvals') ? {approvals:data.approvals || []} : JSON.parse(JSON.stringify(data));`);
+    api = async path => JSON.parse(JSON.stringify(data));`);
   await f.run('loadMessages()');
   const body = transcript.children.find(n => n.className === 'message from-agent');
   const markdowns = f.run('markdowns');
@@ -2168,7 +2038,6 @@ test('identical transcript polls keep the DOM and skip Markdown, while visible c
     `data.working = true; data.after = 1; data.started = 2`,
     `state.reasoning = 'high'`,
     `state.playing = {conversation:'one',id:1}`,
-    `data.approvals = state.approvals = [{request_id:'approval'}]`,
   ]) {
     const before = renders;
     f.run(change); await f.run('loadMessages()');
@@ -2187,9 +2056,9 @@ test('Retry state and older-history prepend invalidate the transcript without re
   transcript.replaceChildren = (...rows) => { renders++; replace(...rows); };
   f.run(`state.current = 'one';
     state.sentMessages = [{id:'one',key:'failed',text:'Try again',since:Date.now(),after:2,failed:true}];
-    api = async path => path.endsWith('/approvals') ? {approvals:[]} : path.includes('?before=')
-      ? {messages:[{id:1,role:'user',content:'Earlier'}],has_older:false}
-      : {messages:[{id:2,role:'assistant',content:'Newest'}],has_older:true};`);
+    api = async path => path.includes('?before=')
+      ? {messages:[{id:1,ordinal:1,role:'user',content:'Earlier'}],has_older:false}
+      : {messages:[{id:2,ordinal:2,role:'assistant',content:'Newest'}],has_older:true};`);
   await f.run('loadMessages()'); await f.run('loadMessages()'); assert.equal(renders, 1);
   const actions = () => transcript.children.flatMap(n => n.children).filter(n => n.className === 'send-action');
   assert.equal(actions()[0].textContent, 'Retry');
@@ -2236,7 +2105,7 @@ test('healthy live streams poll every 15 seconds and errors, completion and fini
   const clock = pendingClock(), {opened, globals} = eventSources(), polls = new Map();
   const f = fixture(undefined, {...clock.globals, ...globals, setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
   f.run(`show('app',true); state.current='one'; globalThis.loads=0; globalThis.active=true;
-    api=async path=>path.endsWith('/approvals') ? {approvals:[]} :
+    api=async path=>
       (loads++, {messages:[],working:active,live:active,after:0,started:1});`);
   const poll = async () => { await clock.advance(3000); polls.get(3000)(); await tick(); };
   await f.run('loadMessages()');
@@ -2268,7 +2137,7 @@ test('idle conversations slow after a minute and send, pending rows and visibili
   const f = fixture(undefined, {...clock.globals, setInterval(fn, ms) { polls.set(ms, fn); }}); await tick();
   f.run(`show('app',true); state.current='one'; globalThis.loads=0;
     loadConversations=async()=>{};
-    api=async (path,options)=>options?.method==='POST' ? {session_id:'one'} : path.endsWith('/approvals') ? {approvals:[]} :
+    api=async (path,options)=>options?.method==='POST' ? {session_id:'one'} :
       (loads++, {messages:[],working:false,live:false});`);
   const poll = async () => { await clock.advance(3000); polls.get(3000)(); await tick(); };
   await f.run('loadMessages()');
@@ -2426,7 +2295,7 @@ test('a new conversation migrates its folded follow-up draft after navigation', 
   assert.equal(f.run('expandPastes($("message").value)'), full);
 });
 
-test('native history uses execution ordinals and user before assistant after send now', async () => {
+test('history uses execution ordinals and user before assistant after send now', async () => {
   const f = fixture(); await tick();
   const order = f.run(`mergeMessages(
     [{id:1,ordinal:1,role:'user'}, {id:2,ordinal:1,role:'assistant'}, {id:3,ordinal:2,role:'user'}, {id:4,ordinal:2,role:'assistant'}],
@@ -2435,7 +2304,7 @@ test('native history uses execution ordinals and user before assistant after sen
   assert.deepEqual(Array.from(order), [1,2,5,6,3,4]);
 });
 
-test('native authoritative tails remove cancelled and edited rows while retaining earlier pages', async () => {
+test('authoritative tails remove cancelled and edited rows while retaining earlier pages', async () => {
   const f = fixture(); await tick();
   const order = f.run(`mergeMessages(
     [{id:1,ordinal:1,role:'user'}, {id:2,ordinal:1,role:'assistant'}, {id:3,ordinal:2,role:'user'}, {id:4,ordinal:2,role:'assistant'}, {id:5,ordinal:3,role:'user'}],
@@ -2444,7 +2313,7 @@ test('native authoritative tails remove cancelled and edited rows while retainin
   assert.equal(f.run('mergeMessages([{id:1,ordinal:1}], [], true).length'), 0);
 });
 
-test('native live overlay replaces only its turn regardless of allocated message IDs', async () => {
+test('live overlay replaces only its turn regardless of allocated message IDs', async () => {
   const f = fixture(); await tick();
   const view = f.run(`conversationView({current:'one',sent:[],server:{working:true,after:2},
     rows:[{id:1,role:'user',turn_id:'a',ordinal:1,content:'first'}, {id:2,role:'assistant',turn_id:'a',ordinal:1,content:'partial',state:'interrupted'},
@@ -2455,17 +2324,17 @@ test('native live overlay replaces only its turn regardless of allocated message
   assert.equal(view.liveAfter.id, 5);
 });
 
-test('native SSE full snapshots replace text, thoughts and turn identity', async () => {
+test('SSE full snapshots replace text, thoughts and turn identity', async () => {
   const f = fixture(); await tick();
   const live = f.run(`applyStreamFrame(applyStreamFrame(null,
     {reset:true,turn_id:'first',revision:1,text:'A',thoughts:'thinking'},'one'),
     {reset:true,turn_id:'second',revision:2,text:'AB',thoughts:'thought',done:true},'one')`);
   assert.equal(live.text, 'AB'); assert.equal(live.thoughts, 'thought');
   assert.equal(live.turn_id, 'second'); assert.equal(live.revision, 2); assert.equal(live.done, true);
-  assert.equal(f.run(`applyStreamFrame({text:'A',thoughts:''},{text:'B'},'one').text`), 'AB', 'Hermes deltas remain additive');
+  assert.equal(f.run(`applyStreamFrame({text:'A',thoughts:''},{text:'B'},'one').text`), 'AB', 'the server deltas remain additive');
 });
 
-test('native controls follow turn state and latest reply', async () => {
+test('controls follow turn state and latest reply', async () => {
   const f = fixture(); await tick();
   for (const state of ['queued','running','completed','interrupted','failed']) {
     for (const role of ['user','assistant']) {
@@ -2480,20 +2349,6 @@ test('native controls follow turn state and latest reply', async () => {
   }
 });
 
-test('native surfaces hide Hermes features while Hermes keeps them', async () => {
-  const f = fixture(); await tick();
-  assert.ok(Object.values(f.run(`backendSurfaces('hermes')`)).every(Boolean));
-  assert.equal(f.run(`backendSurfaces('native').jobs`), true);
-  assert.equal(f.run(`backendSurfaces('native').voice`), true);
-  assert.ok(Object.entries(f.run(`backendSurfaces('native')`)).filter(([key]) => key !== 'jobs' && key !== 'voice').every(([, value]) => !value));
-  f.run(`state.backend='native'; state.settings={agent_name:''}; state.push={devices:[]}; state.about={
-    roost:{},runtime:{},stats:{},at:new Date(),hermes:{reachable:false}};
-    renderAgentSettings($('settings-detail')); renderServiceSettings($('settings-detail')); renderNotifications($('settings-detail')); renderAbout($('settings-detail'));`);
-  const texts = node => [node.textContent, ...(node.children || []).flatMap(texts)].join(' ');
-  const rendered = texts(f.get('settings-detail'));
-  assert.ok(!rendered.includes('SOUL.md')); assert.ok(!rendered.includes('Restart Agent'));
-  assert.ok(!rendered.includes('(Hermes)')); assert.ok(!rendered.includes('Download the plugin'));
-});
 
 test('thinking picker follows the selected model or server default', async () => {
   const f = fixture(); await tick();
@@ -2506,39 +2361,39 @@ test('thinking picker follows the selected model or server default', async () =>
   assert.equal(f.run(`thinkingVisible(state.models,'missing','effort')`), false);
 });
 
-test('native usage keeps provider TPS and time to first token instead of recomputing prefill rate', async () => {
+test('usage keeps provider TPS and time to first token instead of recomputing prefill rate', async () => {
   const f = fixture(); await tick();
   assert.equal(f.run(`replyUsage({turn_id:'one',roost_usage:{input_tokens:128,output_tokens:64,model_seconds:10,
     tokens_per_second:32,time_to_first_token:1.25}})`), '128 in / 64 out · 32.0 TPS · 1.25 s to first token');
 });
 
-test('native composer offers Stop during a running reply and Queue for a typed message', async () => {
+test('composer offers Stop during a running reply and Queue for a typed message', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.lastRows=[{turn_id:'current',state:'running'}];updateNativeComposer()`);
+  f.run(`state.lastRows=[{turn_id:'current',state:'running'}];updateComposer()`);
   assert.equal(f.get('send').textContent,'Stop'); assert.equal(f.get('send').type,'button');
   assert.ok(f.get('queue-send').classList.contains('hidden'));
-  f.get('message').value='next message'; f.run('updateNativeComposer()');
+  f.get('message').value='next message'; f.run('updateComposer()');
   assert.ok(!f.get('queue-send').classList.contains('hidden'));
   // A new stream identity takes precedence over an older transcript poll.
   f.run(`state.live={turn_id:'next',done:false};`);
   assert.equal(f.run('runningTurn()'),'next');
-  f.run(`state.live=null;state.lastRows=[{turn_id:'current',state:'completed'}];updateNativeComposer()`);
+  f.run(`state.live=null;state.lastRows=[{turn_id:'current',state:'completed'}];updateComposer()`);
   assert.equal(f.get('send').type,'submit'); assert.equal(f.get('send').textContent,'↑');
 });
 
-test('native accepted sends reconcile by request identity even when IDs move backwards', async () => {
+test('accepted sends reconcile by request identity even when IDs move backwards', async () => {
   const f=fixture();await tick();
   const view=f.run(`withSentMessages([{id:3,role:'user',content:'same',client_request_id:'request'}],
     [{id:'chat',text:'same',request_id:'request',after:9,key:'local',since:0}], 'chat')`);
   assert.equal(view.sent.length,0);assert.equal(view.savedAs.local,3);assert.equal(view.rows.length,1);
 });
 
-test('native composer states retain idle behavior and expose Stop with or without text', async () => {
+test('composer states retain idle behavior and expose Stop with or without text', async () => {
   const f = fixture(); await tick();
   for (const turn of [null, 'running', 'queued']) for (const text of ['', 'next message']) {
     f.context.turnState = turn; f.get('message').value = text;
     f.get('composer').classList.toggle('has-text', Boolean(text));
-    f.run(`state.backend='native'; state.live=null; state.lastRows=turnState ? [{turn_id:'one',state:turnState}] : []; updateNativeComposer()`);
+    f.run(`state.live=null; state.lastRows=turnState ? [{turn_id:'one',state:turnState}] : []; updateComposer()`);
     assert.equal(f.get('send').classList.contains('stopping'), turn !== null, `${turn}/${text}: Stop`);
     assert.equal(f.get('send').type, turn ? 'button' : 'submit');
     assert.equal(f.get('queue-send').classList.contains('hidden'), !(turn && text), `${turn}/${text}: Queue`);
@@ -2547,21 +2402,18 @@ test('native composer states retain idle behavior and expose Stop with or withou
   // The original failure lived in CSS: an aria-label and a Stop class alone did not make the button visible.
   const css = fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8');
   assert.match(css, /\.composer\s+\.send-button\.stopping\s*\{[^}]*display:\s*grid/s);
-  f.run(`state.backend='hermes'; state.lastRows=[];`);
-  f.get('send').textContent='Hermes send'; f.run('updateNativeComposer()');
-  assert.equal(f.get('send').textContent,'Hermes send');
 });
 
 test('Stop targets a running turn, or cancels the first queued turn while waiting for admission', async () => {
   const f = fixture(); await tick();
-  f.run(`globalThis.actions=[]; nativeControl=async (action,id)=>actions.push([action,id]);
+  f.run(`globalThis.actions=[]; turnControl=async (action,id)=>actions.push([action,id]);
     state.lastRows=[{turn_id:'first',state:'queued'},{turn_id:'second',state:'queued'}];`);
-  await f.run('stopNativeReply()');
+  await f.run('stopReply()');
   f.run(`state.live={turn_id:'first',state:'queued',done:false}`);
   assert.equal(f.run('runningTurn()'), undefined);
-  await f.run('stopNativeReply()');
+  await f.run('stopReply()');
   f.run(`state.lastRows.unshift({turn_id:'active',state:'running'});`);
-  await f.run('stopNativeReply()');
+  await f.run('stopReply()');
   assert.deepEqual(JSON.parse(f.run('JSON.stringify(actions)')), [['cancel','first'],['cancel','first'],['stop','active']]);
 });
 
@@ -2570,7 +2422,7 @@ test('model rows share switches, expose one detail panel, and keep the default e
   const walk = node => [node, ...(node.children || []).flatMap(walk)];
   const nodes = () => walk(f.get('settings-detail'));
   const byClass = name => nodes().filter(node => (node.className || '').split(' ').includes(name));
-  f.run(`state.backend='native';state.settings={};state.settingsGroup='models';state.primary={base_url:'',has_key:false,
+  f.run(`state.settings={};state.settingsGroup='models';state.primary={base_url:'',has_key:false,
     default_model:'one',models:[{id:'one',display_name:'First',enabled:true,thinking_mode:'reasoning_effort'},
       {id:'two',display_name:'',enabled:false,thinking_mode:'unsupported'}]};renderSettings()`);
   assert.equal(byClass('model-row').length,2);
@@ -2602,14 +2454,14 @@ test('model rows share switches, expose one detail panel, and keep the default e
   assert.equal(f.run('state.primary.default_model'),null);assert.equal(picker().disabled,true);
 });
 
-test('native full snapshots replace trace and sources instead of appending', async () => {
+test('full snapshots replace trace and sources instead of appending', async () => {
   const f = fixture(); await tick();
   const result = f.run('(() => { const frame = {reset: true, user: "Search", text: "Answer [1]", thoughts: "Check", trace: [{kind: "reasoning", text: "Check"}, {kind: "tool", id: "call", name: "web_search", arguments: "{}", status: "running"}], sources: [{n: 1, title: "Example", url: "https://example.org"}]}; const first = applyStreamFrame(null, frame, "one"); return applyStreamFrame(first, {...frame, trace: [...frame.trace.slice(0, 1), {...frame.trace[1], status: "completed", result: "Untrusted"}]}, "one"); })()');
   assert.equal(result.text, 'Answer [1]'); assert.equal(result.trace.length, 2); assert.equal(result.sources.length, 1);
   assert.equal(result.trace[1].status, 'completed');
 });
 
-test('native Thoughts interleave tools and render bounded literal output in collapsed details', async () => {
+test('Thoughts interleave tools and render bounded literal output in collapsed details', async () => {
   const f = fixture(); await tick();
   f.run('fillThoughts($("test-thoughts"), [{kind: "reasoning", text: "Before"}, {kind: "tool", id: "one", name: "web_search", arguments: JSON.stringify({query:"example"}), status: "completed", result: "<script>unsafe</script>" + "x".repeat(17000)}, {kind: "reasoning", text: "After"}]);');
   const children = f.get('test-thoughts').children;
@@ -2623,7 +2475,7 @@ test('native Thoughts interleave tools and render bounded literal output in coll
   assert(output.children[1].textContent.length < 16100);
 });
 
-test('native citations are safe turn-specific links with a source list; code stays literal', async () => {
+test('citations are safe turn-specific links with a source list; code stays literal', async () => {
   const f = fixture(); await tick();
   f.run('addReply($("test-reply"), "Answer [1] **bold [2]** \u0060[1]\u0060 [9]\\n\\n\u0060\u0060\u0060text\\n[1]\\n\u0060\u0060\u0060", [{n: 1, title: "Example", url: "https://example.org/page"}, {n: 2, title: "<b>Literal</b>", url: "http://example.com/other"}, {n: 3, title: "Unsafe", url: "javascript:alert(1)"}]);');
   function descendants(node) { return [node, ...(node.children || []).flatMap(descendants)]; }
@@ -2638,9 +2490,9 @@ test('native citations are safe turn-specific links with a source list; code sta
   assert.equal(f.run('sourceLink({url:"https://REPLACE_USER:REPLACE_PASSWORD@example.org"}, "bad")'), null);
 });
 
-test('globe follows native search, model tools and No web, and resets on send', async () => {
+test('globe follows search, model tools and No web, and resets on send', async () => {
   const f = fixture(); await tick();
-  f.run('state.backend = "native"; state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; state.noWeb = false; updateWebToggle();');
+  f.run('state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; state.noWeb = false; updateWebToggle();');
   assert.equal(f.get('web-toggle').classList.contains('hidden'), false);
   f.run('state.noWeb = true; updateWebToggle();');
   assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
@@ -2653,8 +2505,6 @@ test('globe follows native search, model tools and No web, and resets on send', 
   assert.equal(f.run('payloads[0].web'), 'force');
   assert.equal(f.run('state.webForce'), false);
   assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'false');
-  f.run('state.backend = "hermes"; updateWebToggle();');
-  assert.equal(f.get('web-toggle').classList.contains('hidden'), true);
 });
 
 
@@ -2690,16 +2540,16 @@ test('globe has a named 44px coarse-pointer target and reflects toggle state', a
   const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
   assert.match(html, /id="web-toggle"[^>]*aria-label="[^"]+"[^>]*aria-pressed="false"/);
   const f = fixture(); await tick();
-  f.run('state.backend = "native"; state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; updateWebToggle();');
+  f.run('state.models = [{id: "example", tools: true}]; state.defaultModel = "example"; state.webAvailable = true; updateWebToggle();');
   f.get('web-toggle').events.click();
   assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'true');
   f.get('web-toggle').events.click();
   assert.equal(f.get('web-toggle').getAttribute('aria-pressed'), 'false');
 });
 
-test('native persona names label the header and each reply while Hermes keeps its agent name', async () => {
+test('persona names label the header and each reply', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.agentName='Old name';state.currentPersona='Guide';`);
+  f.run(`state.agentName='Old name';state.currentPersona='Guide';`);
   assert.equal(f.run('agent()'), 'Guide');
   assert.equal(f.run(`replyName({persona_name:'Builder'})`), 'Builder');
   f.run(`state.current='chat';state.turn={id:'chat',working:false};renderMessages([
@@ -2709,23 +2559,18 @@ test('native persona names label the header and each reply while Hermes keeps it
   const walk = node => [node, ...(node.children || []).flatMap(walk)];
   assert.equal(walk(f.get('transcript')).find(node => node.className === 'persona-label').textContent, 'Builder');
   assert.equal(walk(f.get('transcript')).filter(node => node.textContent === 'Remember…').length, 2);
-  f.run(`state.backend='hermes';state.agentName='Remote assistant'`);
-  assert.equal(f.run('agent()'), 'Remote assistant');
-  assert.equal(f.run(`replyName({persona_name:'Builder'})`), 'Remote assistant');
+
 });
 
-test('native settings offer Persona and Memory and hide the agent-name field', async () => {
+test('settings offer Persona and Memory and hide the agent-name field', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.settings={};renderAgentSettings($('agent-settings'));`);
-  assert.equal(f.get('agent-settings').children.length, 0);
   assert.ok(f.run(`settingsGroups().some(row=>row[0]==='personas')`));
   assert.ok(f.run(`settingsGroups().some(row=>row[0]==='memory')`));
   assert.ok(!f.run(`settingsGroups().some(row=>row[0]==='agent')`));
   f.run(`state.personaData={default_persona_id:'default',personas:[{id:'default',name:'Assistant'},{id:'guide',name:'Guide'}]};fillPersonaPicker($('picker'),'guide')`);
   assert.deepEqual(f.get('picker').children.map(node => node.textContent), ['Default (Assistant)', 'Assistant', 'Guide']);
   assert.equal(f.get('picker').value, 'guide');
-  f.run(`state.backend='hermes'`);
-  assert.ok(!f.run(`settingsGroups().some(row=>['personas','memory'].includes(row[0]))`));
+
 });
 
 test('memory meter uses server counts and warns only above budget with origin tags', async () => {
@@ -2767,14 +2612,14 @@ test('Remember sheet prefills selection only from its message, caps text, and sa
 
 test('Thoughts omit an empty memory snapshot and pluralise the used-memories summary', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';globalThis.none=nativeThoughts({turn_id:'t',memories:[],trace:[]});globalThis.two=nativeThoughts({turn_id:'t',memories:[{id:1,text:'A'},{id:2,text:'B'}],trace:[]});fillThoughts($('thoughts'),two)`);
+  f.run(`globalThis.none=turnThoughts({turn_id:'t',memories:[],trace:[]});globalThis.two=turnThoughts({turn_id:'t',memories:[{id:1,text:'A'},{id:2,text:'B'}],trace:[]});fillThoughts($('thoughts'),two)`);
   assert.equal(f.run(`none.length`), 0);
   assert.equal(f.get('thoughts').children[0].children[0].textContent, 'Used 2 memories');
 });
 
 test('Thoughts show collapsed memory snapshots and friendly remembered and forgotten steps', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';globalThis.items=nativeThoughts({turn_id:'turn',memories:[{id:1,text:'Deleted later'}],trace:[
+  f.run(`globalThis.items=turnThoughts({turn_id:'turn',memories:[{id:1,text:'Deleted later'}],trace:[
     {kind:'tool',id:'save',name:'remember',arguments:'{"fact":"A lasting preference"}',status:'completed',fact_id:2,fact:'A lasting preference',forgotten:false}
   ]});fillThoughts($('thoughts'),items);api=async()=>({facts:[],used_tokens:0,budget_tokens:2000})`);
   const children = f.get('thoughts').children;
@@ -2802,7 +2647,7 @@ const afterMessage = (f, index) => f.get('transcript').children.slice(0, index).
 
 test('summary divider follows the last loaded message at or before its boundary and never repeats', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+  f.run(`state.current='chat';${summaryRows()};
     state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[{id:1,through_ordinal:2,text:'First summary',created_at:'2026-10-01T10:00:00Z'}]};renderMessages(rows)`);
   const [index] = dividerIndexes(f);
   assert.equal(dividerIndexes(f).length, 1);
@@ -2817,7 +2662,7 @@ test('summary divider follows the last loaded message at or before its boundary 
 
 test('summary dividers: several summaries, and none without a qualifying loaded message', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+  f.run(`state.current='chat';${summaryRows()};
     state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[
       {id:1,through_ordinal:1,text:'S1',created_at:'2026-10-01T10:00:00Z'},{id:2,through_ordinal:3,text:'S2',created_at:'2026-10-02T10:00:00Z'}]};renderMessages(rows)`);
   assert.deepEqual(dividerIndexes(f).map(index => afterMessage(f, index)), [2, 6]);
@@ -2830,7 +2675,7 @@ test('summary dividers: several summaries, and none without a qualifying loaded 
 
 test('summary snapshots from the transcript response and stream frames update dividers', async () => {
   const f = fixture(async () => ({ok: true, json: async () => ({})})); await tick();
-  f.run(`state.backend='native';state.current='chat';${summaryRows()};state.messageHistory={id:'chat',rows,loaded:false,loading:false};
+  f.run(`state.current='chat';${summaryRows()};state.messageHistory={id:'chat',rows,loaded:false,loading:false};
     api=async()=>({messages:rows,working:false,summaries:[{id:4,through_ordinal:1,text:'Saved',created_at:'2026-10-01T10:00:00Z'}]});`);
   await f.run(`loadMessages('chat')`);
   assert.equal(f.run('state.messageHistory.summaries[0].id'), 4);
@@ -2843,7 +2688,7 @@ test('summary snapshots from the transcript response and stream frames update di
 
 test('summary sheet is read-only, shows the text and written time, and closes', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native';state.current='chat';${summaryRows()};
+  f.run(`state.current='chat';${summaryRows()};
     state.messageHistory={id:'chat',rows,loaded:false,loading:false,summaries:[{id:1,through_ordinal:1,text:'Line one\\nLine two',created_at:'2026-10-01T10:00:00Z'}]};renderMessages(rows)`);
   const divider = f.get('transcript').children[dividerIndexes(f)[0]];
   divider.events.click();
@@ -2857,7 +2702,7 @@ test('summary sheet is read-only, shows the text and written time, and closes', 
 test('summarize trace items use plain sentences for running, completed and error', async () => {
   const f = fixture(); await tick();
   const labels = ['running', 'completed', 'error'].map(status => {
-    f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'compaction-1',name:'summarize',arguments:'{}',status:'${status}',result:'ignored'}])`);
+    f.run(`fillThoughts($('thoughts'),[{kind:'tool',id:'compaction-1',name:'summarize',arguments:'{}',status:'${status}',result:'ignored'}])`);
     const tool = f.get('thoughts').children[0];
     assert.equal(tool.children.length, 1);
     assert.equal(tool.children[0].className, 'tool-call tool-call-plain');
@@ -2879,7 +2724,7 @@ const attachRows = `globalThis.rows=[
 
 test('attaching shows a spinner chip, then name and tokens, and an inline error for a rejected file; x removes', async () => {
   const f = fixture(undefined, {FormData, File}); await tick();
-  f.run(`state.backend='native'; globalThis.calls=[]; globalThis.release=null;
+  f.run(`globalThis.calls=[]; globalThis.release=null;
     api = (path, options) => { calls.push([path, options.method, options.body instanceof FormData]);
       return options.body.get('file').name === 'bad.png' ? Promise.reject(new Error("Roost can't read images yet. Attach text files or PDFs."))
         : new Promise(resolve => { release = () => resolve({name:'notes.txt',kind:'text',chars:41,tokens:11,text:'x'.repeat(41)}); }); };`);
@@ -2903,15 +2748,13 @@ test('attaching shows a spinner chip, then name and tokens, and an inline error 
   assert.equal(f.get('attach-tray').classList.contains('hidden'), true);
 });
 
-test('the attach button is native only, takes the allowed types, and files over 20 MB never upload', async () => {
+test('the attach button is shown, takes the allowed types, and files over 20 MB never upload', async () => {
   const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
   const accept = /id="attach-input"[^>]*accept="([^"]+)"/.exec(html)[1].split(',');
   for (const type of ['.txt', '.md', '.csv', '.json', '.yaml', '.toml', '.xml', '.html', '.log', '.py', '.js', '.pdf']) assert.ok(accept.includes(type), type);
   assert.match(html, /id="attach-button"[^>]*aria-label="Attach files"/);
   const f = fixture(undefined, {FormData, File}); await tick();
-  f.run('state.backend="hermes"; updateNativeComposer()');
-  assert.equal(f.get('attach-button').classList.contains('hidden'), true);
-  f.run('state.backend="native"; updateNativeComposer()');
+  f.run('updateComposer()');
   assert.equal(f.get('attach-button').classList.contains('hidden'), false);
   f.run(`globalThis.uploads = 0; api = async () => { uploads++; return {}; }`);
   await f.run(`attachFiles([Object.defineProperty(new File([''], 'big.txt'), 'size', {value: 21 * 1024 * 1024})])`);
@@ -2922,12 +2765,12 @@ test('the attach button is native only, takes the allowed types, and files over 
 test('the running total appears near the cap, and Send is disabled over it until a file is removed', async () => {
   const f = fixture(); await tick();
   const file = (name, chars) => `{name:'${name}', kind:'text', status:'ready', chars:${chars}, text:'t'}`;
-  f.run(`state.backend='native'; state.attachments=[${file('a.txt', 20000)}]; updateNativeComposer()`);
+  f.run(`state.attachments=[${file('a.txt', 20000)}]; updateComposer()`);
   assert.equal(findAll(f.get('attach-tray'), n => n.className?.startsWith('attach-total')).length, 0, 'quiet well under the cap');
-  f.run(`state.attachments=[${file('a.txt', 100000)}]; updateNativeComposer()`);
+  f.run(`state.attachments=[${file('a.txt', 100000)}]; updateComposer()`);
   assert.match(textOf(f.get('attach-tray')), /About 25,000 of 30,000 tokens/);
   assert.equal(f.get('send').disabled, false);
-  f.run(`state.attachments=[${file('a.txt', 100000)}, ${file('b.txt', 24000)}]; updateNativeComposer()`);
+  f.run(`state.attachments=[${file('a.txt', 100000)}, ${file('b.txt', 24000)}]; updateComposer()`);
   assert.equal(f.get('send').disabled, true);
   assert.match(textOf(f.get('attach-tray')), /31,000 tokens of files\. The limit is 30,000/);
   f.get('message').value = 'hello';
@@ -2943,7 +2786,7 @@ test('sending carries the extracted attachments, clears the tray, and keeps them
     if (options.method === 'POST') { posts.push(JSON.parse(options.body)); return {ok:true, json:async () => ({session_id:'one'})}; }
     return {ok:true, json:async () => ({signed_in:false})};
   }); await tick();
-  f.run(`state.backend='native'; state.current='one'; loadMessages = async () => {}; loadConversations = async () => {};
+  f.run(`state.current='one'; loadMessages = async () => {}; loadConversations = async () => {};
     state.attachments=[{name:'a.md', kind:'text', status:'ready', chars:5, text:'Hello'}, {name:'bad.png', status:'error', error:'No'}, {name:'wait.txt', status:'ready', chars:2, text:'Hi'}]`);
   f.get('message').value = 'Read these';
   await f.run('submitMessage({preventDefault() {}})');
@@ -2966,7 +2809,7 @@ test('a first message sends its attachments with the new conversation', async ()
     if (options.method === 'POST') { posts.push([url, JSON.parse(options.body)]); return {ok:true, json:async () => ({session_id:'new'})}; }
     return {ok:true, json:async () => ({signed_in:false})};
   }); await tick();
-  f.run(`state.backend='native'; state.current=null; loadMessages = async () => {}; loadConversations = async () => {};
+  f.run(`state.current=null; loadMessages = async () => {}; loadConversations = async () => {};
     state.attachments=[{name:'a.md', kind:'text', status:'ready', chars:5, text:'Hello'}]`);
   f.get('message').value = 'First';
   await f.run('submitMessage({preventDefault() {}})');
@@ -2976,7 +2819,7 @@ test('a first message sends its attachments with the new conversation', async ()
 
 test('sent messages show attachment chips and tapping one opens a read-only sheet with the text', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.current='chat'; ${attachRows}; renderMessages(rows)`);
+  f.run(`state.current='chat'; ${attachRows}; renderMessages(rows)`);
   const chips = chipsIn(f.get('transcript'));
   assert.equal(chips.length, 2);
   assert.match(textOf(chips[0]), /notes\.md\s+~10 tokens/);
@@ -2995,7 +2838,7 @@ test('sent messages show attachment chips and tapping one opens a read-only shee
 
 test('Edit shows the message attachments as removable chips and sends them only when changed', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.current='chat'; ${attachRows}; globalThis.controls=[]; nativeControl = (action, id, extra) => controls.push([action, id, extra]);
+  f.run(`state.current='chat'; ${attachRows}; globalThis.controls=[]; turnControl = (action, id, extra) => controls.push([action, id, extra]);
     renderMessages(rows)`);
   const edit = () => findAll(f.get('transcript'), n => n.textContent === 'Edit' && n.attributes?.['aria-label'] === 'Edit message')[0];
   edit().events.click({stopPropagation() {}});
@@ -3027,7 +2870,7 @@ test('attachment chips and the attach button have 44px coarse-pointer targets an
 
 test('sign-out clears chosen files and closes the attachment sheet', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.attachments=[{name:'a.txt', status:'ready', chars:4, text:'private'}]; updateNativeComposer()`);
+  f.run(`state.attachments=[{name:'a.txt', status:'ready', chars:4, text:'private'}]; updateComposer()`);
   f.get('attachment-sheet').open = true;
   f.run('signedOut()');
   assert.equal(f.run('state.attachments.length'), 0);
@@ -3043,7 +2886,7 @@ test('Settings Models shows a fallback server section with its own fields, ids a
   const f = fixture(); await tick();
   const nodes = () => walkNodes(f.get('settings-detail'));
   const headings = () => nodes().filter(node => node.tagName === 'H2').map(node => node.textContent);
-  f.run(`state.backend='native';state.settings={use_fallback:false};state.settingsGroup='models';
+  f.run(`state.settings={use_fallback:false};state.settingsGroup='models';
     state.primary={base_url:'https://primary.example.invalid/v1',has_key:false,default_model:'one',models:[{id:'one',display_name:'First',enabled:true,thinking_mode:'unsupported'}]};
     state.fallback=${JSON.stringify(fallbackServer())};renderSettings()`);
   assert.deepEqual(headings().filter(text => /server|models|fallback/i.test(text)), ['Primary server', 'Models', 'Fallback server', 'Fallback models', 'Use the fallback']);
@@ -3064,7 +2907,7 @@ test('Settings Models shows a fallback server section with its own fields, ids a
 test('fallback server buttons save to the fallback routes, never the primary', async () => {
   const f = fixture(); await tick();
   const nodes = () => walkNodes(f.get('settings-detail'));
-  f.run(`state.backend='native';state.settings={use_fallback:false};state.settingsGroup='models';globalThis.calls=[];
+  f.run(`state.settings={use_fallback:false};state.settingsGroup='models';globalThis.calls=[];
     api=async (path,options)=>{calls.push([path,options&&options.method]);return path.endsWith('/models')?{}:{base_url:'https://fallback.example.invalid/v1',has_key:true}};loadModels=async()=>{};
     state.primary={base_url:'https://primary.example.invalid/v1',has_key:false,default_model:null,models:[]};
     state.fallback=${JSON.stringify(fallbackServer())};renderSettings()`);
@@ -3079,7 +2922,7 @@ test('the fallback switch needs a saved fallback server and default model, and s
   const f = fixture(); await tick();
   const toggle = () => walkNodes(f.get('settings-detail')).find(node => node.id === 'settings-use-fallback');
   const hints = () => walkNodes(f.get('settings-detail')).filter(node => node.className === 'sheet-note').map(node => node.textContent);
-  const show = (fallback, on = false) => f.run(`state.backend='native';state.settings={use_fallback:${on}};state.settingsGroup='models';
+  const show = (fallback, on = false) => f.run(`state.settings={use_fallback:${on}};state.settingsGroup='models';
     state.primary={base_url:'',has_key:false,default_model:null,models:[]};state.fallback=${JSON.stringify(fallback)};renderSettings()`);
   show({base_url: '', has_key: false, default_model: null, models: []});
   assert.equal(toggle().disabled, true); assert.equal(toggle().getAttribute('aria-checked'), 'false'); assert.equal(toggle().className, 'job-toggle off');
@@ -3105,7 +2948,7 @@ test('Keep this chat local is a chat setting that loads and saves with the sheet
   const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
   assert.match(html, /id="sheet-keep-local" type="checkbox"> Keep this chat local/);
   assert.match(fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8'), /#sheet-instructions-form \.check-row \{ min-height: 44px/);
-  f.run(`state.backend='native';state.sheetItem={id:'chat'};state.sheetBusy=false;globalThis.puts=[];
+  f.run(`state.sheetItem={id:'chat'};state.sheetBusy=false;globalThis.puts=[];
     loadModels=async()=>{};loadPersonas=async()=>{};fillModelPicker=()=>{};fillPersonaPicker=()=>{};updateSheetThinking=()=>{};
     api=async(path,options)=>{if(options&&options.method==='PUT'){puts.push(JSON.parse(options.body));return {instructions:'',model:null,reasoning:'none',no_web:false,keep_local:true}}
       return {instructions:'',model:null,reasoning:'none',no_web:false,keep_local:true,persona_id:null}}`);
@@ -3132,7 +2975,7 @@ test('fallback replies say which model answered; primary replies add nothing', a
 test('the fallback trace item is one plain sentence, running or settled', async () => {
   const f = fixture(); await tick();
   const sentence = "Primary couldn't start (HTTP 503); answered with Backup on the fallback server";
-  f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:'completed',result:${JSON.stringify(sentence)}}])`);
+  f.run(`fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:'completed',result:${JSON.stringify(sentence)}}])`);
   const tool = f.get('thoughts').children[0];
   assert.equal(tool.children.length, 1);
   assert.equal(tool.children[0].className, 'tool-call tool-call-plain');
@@ -3144,7 +2987,7 @@ test('the fallback trace item shows its sentence while running and after an inte
   for (const [status, result] of [['running', "Primary couldn't start (HTTP 503); answering with Backup on the fallback server"],
                                   ['interrupted', "Primary couldn't start (HTTP 503); switched to Backup on the fallback server"],
                                   ['error', "Primary couldn't start (HTTP 503); Backup on the fallback server failed too"]]) {
-    f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:${JSON.stringify(status)},result:${JSON.stringify(result)}}])`);
+    f.run(`fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:${JSON.stringify(status)},result:${JSON.stringify(result)}}])`);
     const tool = f.get('thoughts').children[0];
     assert.equal(tool.children.length, 1);
     assert.equal(tool.children[0].textContent, result);
@@ -3152,15 +2995,13 @@ test('the fallback trace item shows its sentence while running and after an inte
 });
 
 
-test('native job editor keeps schedules, overrides and safe memory defaults', async () => {
+test('job editor keeps schedules, overrides and safe memory defaults', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.settings={time_zone:'America/New_York'};
+  f.run(`state.settings={time_zone:'America/New_York'};
     state.models=[{id:'example-model',display_name:'Example',enabled:true}];
     state.personaData={personas:[{id:'guide',name:'Guide'}],default_persona_id:'guide'};
     openJob();`);
-  assert.equal(f.get('native-job-fields').classList.contains('hidden'), false);
-  assert.equal(f.get('job-delivery-fields').classList.contains('hidden'), true);
-  assert.equal(f.get('job-deliver').required, false);
+  assert.equal(f.get('job-fields').classList.contains('hidden'), false);
   assert.equal(f.get('job-memory').checked, false);
   assert.equal(f.get('job-web').checked, true);
   assert.equal(f.get('job-zone').value, 'America/New_York');
@@ -3169,13 +3010,13 @@ test('native job editor keeps schedules, overrides and safe memory defaults', as
   assert.equal(f.get('job-cron-fields').classList.contains('hidden'), true);
   assert.equal(f.get('job-every-fields').classList.contains('hidden'), false);
   assert.equal(f.get('job-schedule').required, false);
-  assert.deepEqual(JSON.parse(f.run('JSON.stringify(nativeJobSchedule())')), {kind:'every',value:3,unit:'hours'});
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(jobScheduleInput())')), {kind:'every',value:3,unit:'hours'});
   f.get('job-kind').value = 'once'; f.get('job-once').value = '2026-11-01T08:00';
   f.run('updateJobKind()');
   assert.equal(f.get('job-every-fields').classList.contains('hidden'), true);
   assert.equal(f.get('job-once-fields').classList.contains('hidden'), false);
   assert.equal(f.get('job-once').required, true);
-  assert.deepEqual(JSON.parse(f.run('JSON.stringify(nativeJobSchedule())')), {kind:'once',at:'2026-11-01T08:00'});
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(jobScheduleInput())')), {kind:'once',at:'2026-11-01T08:00'});
   f.get('job-kind').value = 'cron'; f.get('job-schedule').value = '0 8 * * *';
   f.get('job-changed').checked = true; f.get('job-memory').checked = true;
   f.get('job-model').value = 'example-model'; f.get('job-persona').value = 'guide';
@@ -3205,38 +3046,27 @@ test('three navigation tabs share one row on phone and desktop', () => {
   }
 });
 
-test('native run transcript supplies the job name and run time in the header', async () => {
+test('run transcript supplies the job name and run time in the header', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.current='run'; state.timeZone='UTC';
+  f.run(`state.current='run'; state.timeZone='UTC';
     renderMessages=()=>{}; api=async()=>({messages:[],job:{id:'job',name:'Garden briefing',scheduled_for:1793260800}});`);
   await f.run('loadMessages()');
   assert.match(f.get('chat-title').textContent, /^Garden briefing · Oct 29,? .*8:00 AM$/);
-  f.run(`state.backend='hermes'; api=async()=>({messages:[],job:{name:'Ignored',scheduled_for:1793260800}});`);
-  f.get('chat-title').textContent = 'Existing Hermes title';
-  await f.run('loadMessages()');
-  assert.equal(f.get('chat-title').textContent, 'Existing Hermes title');
-});
 
-test('Hermes job editor retains delivery and schedule strings', async () => {
-  const f = fixture(); await tick();
-  f.run(`state.backend='hermes'; openJob({id:'existing',name:'Report',prompt:'Summarize',schedule:'0 8 * * *',deliver:'local'});`);
-  assert.equal(f.get('native-job-fields').classList.contains('hidden'), true);
-  assert.equal(f.get('job-deliver').required, true);
-  assert.equal(f.get('job-schedule').value, '0 8 * * *');
 });
 
 
-test('native memory facts display job provenance', async () => {
+test('memory facts display job provenance', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.memoryData={facts:[{id:1,text:'Garden fact',origin:'model',job_name:'Garden briefing'}],used_tokens:3,budget_tokens:2000};
+  f.run(`state.memoryData={facts:[{id:1,text:'Garden fact',origin:'model',job_name:'Garden briefing'}],used_tokens:3,budget_tokens:2000};
     renderMemory($('settings-detail'));`);
   const texts = node => [node.textContent, ...(node.children || []).flatMap(texts)].join(' ');
   assert.ok(texts(f.get('settings-detail')).includes('Job: Garden briefing'));
 });
 
-test('native Voice settings save models and a write-only custom key', async () => {
+test('Voice settings save models and a write-only custom key', async () => {
   const f = fixture(); await tick();
-  f.run(`state.backend='native'; state.settings={}; state.settingsGroup='voice';
+  f.run(`state.settings={}; state.settingsGroup='voice';
     state.voiceSettings={same_as_model:true,base_url:'',has_key:true,transcription_model:'whisper-1',speech_model:'tts-1',voice:'alloy'};
     globalThis.voiceCalls=[];
     api=async (path, options) => { voiceCalls.push([path,options]); return {...state.voiceSettings,has_key:true}; };
@@ -3258,17 +3088,15 @@ test('native Voice settings save models and a write-only custom key', async () =
   assert.equal(path, '/settings/voice');
   const body = JSON.parse(options.body);
   assert.equal(body.key, 'example-key'); assert.equal(body.voice, 'nova'); assert.equal(body.same_as_model, false);
-  f.run(`state.backend='hermes'`);
-  assert.equal(f.run(`settingsGroups().some(([id]) => id === 'voice')`), false);
 });
 
-test('native recording stops at two minutes and auto-reads the committed reply', async () => {
+test('recording stops at two minutes and auto-reads the committed reply', async () => {
   const {players, recorders, globals} = voiceBrowser();
   const timers = [];
   let recordingTick;
   const f = fixture(undefined, {...globals, setInterval: fn => {recordingTick = fn; return 1;},
     setTimeout: fn => {timers.push(fn); return 1;}}); await tick();
-  f.run(`state.backend='native'; state.current='one'; globalThis.calls=[];
+  f.run(`state.current='one'; globalThis.calls=[];
     api=async (path, options={}) => {calls.push([path,options.body]); return path === '/audio/transcribe' ? {transcript:'Hello'} : {session_id:'one'};};
     loadConversations=async () => {}; loadMessages=async () => {};`);
   await f.get('voice-button').events.click();
@@ -3284,7 +3112,7 @@ test('native recording stops at two minutes and auto-reads the committed reply',
     state.turn={id:'one',working:true,at:Date.now()}; renderMessages(rows);`);
   assert.equal(f.run('state.voiceReply.row'), 1);
   assert.equal(timers.length, 0);
-  f.run(`rows.push({id:2,role:'assistant',content:'Native reply.',turn_id:1,state:'completed'});
+  f.run(`rows.push({id:2,role:'assistant',content:'reply.',turn_id:1,state:'completed'});
     state.turn={id:'one',working:false,at:Date.now()}; renderMessages(rows);`);
   assert.ok(find(f.get('transcript'), n => n.className?.startsWith('play-reply')));
   timers.forEach(fn => fn());
@@ -3300,7 +3128,7 @@ test('Voice Test saves first and plays synthesized audio through the unlocked pl
     calls.push([url, options]);
     return {ok:true, blob:async () => ({}), json:async () => ({signed_in:false})};
   }, {...globals, URL:ClipURL}); await tick();
-  f.run(`state.backend='native'; state.settings={}; state.settingsGroup='voice';
+  f.run(`state.settings={}; state.settingsGroup='voice';
     state.voiceSettings={same_as_model:true,base_url:'',has_key:false,transcription_model:'whisper-1',speech_model:'tts-1',voice:'alloy'};
     api=async () => state.voiceSettings; renderSettings();`);
   const button = find(f.get('settings-detail'), node => node.tagName === 'BUTTON' && node.textContent === 'Test');
@@ -3309,4 +3137,23 @@ test('Voice Test saves first and plays synthesized audio through the unlocked pl
   assert.equal(calls.at(-1)[1].headers['X-Roost-Request'], '1');
   assert.equal(players[0].src, 'blob:voice-test');
   assert.equal(players[0].played, 'blob:voice-test');
+});
+
+test('the app shell gives every element a unique id', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('the default persona names sign-in, the title and composer after editing and signing out', async () => {
+  const f = fixture(); await tick();
+  const placeholder = {dataset:{agentPlaceholder:'Message {agent}'}};
+  f.context.document.querySelectorAll = selector => selector === '[data-agent-placeholder]' ? [placeholder] : [];
+  f.run(`state.agentName='Old name'; state.currentPersona='Chat preset';
+    api=async()=>({default_persona_id:'default',personas:[{id:'default',name:'Guide'}]});`);
+  await f.run('loadPersonas()');
+  f.run('signedOut()');
+  assert.equal(f.run('agent()'), 'Guide');
+  assert.equal(f.context.document.title, 'Guide · Roost');
+  assert.equal(placeholder.placeholder, 'Message Guide');
 });

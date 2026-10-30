@@ -30,7 +30,7 @@ jobs:
           /tmp/roost/bin/python -m pip install -e .
       - name: Check public content, links and tests
         run: make PYTHON=/tmp/roost/bin/python check
-      - name: Run the demo smoke check
+      - name: Run the standalone smoke check
         run: make PYTHON=/tmp/roost/bin/python smoke
       - name: Check the Docker Compose installation
         run: make PYTHON=/tmp/roost/bin/python smoke-compose
