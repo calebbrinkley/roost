@@ -18,6 +18,7 @@ from roost.server import create_app
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 from openai_fake import OpenAIFake, frame
 from web_fake import WebFake
+from speech_fake import SpeechFake
 
 
 def configure(state, url):
@@ -38,6 +39,7 @@ async def run():
         fake = await OpenAIFake().start()
         search = await WebFake().start()
         backup = await OpenAIFake().start()
+        speech = await SpeechFake().start()
         fake.delay, fake.chunk_delay = .1, .3
         partial = frame({'content': 'Native partial reply. ' * 60})
         fake.frames = partial + frame({'content': 'Finished.'}) + frame({}, finish='stop', usage={'prompt_tokens': 20, 'completion_tokens': 8})
@@ -110,6 +112,20 @@ async def run():
                 assert len(view['messages']) == 2 and view['context']['prompt_tokens'] == 20
                 history = await request('GET', path + '?before=' + str(view['messages'][-1]['id']) + '&limit=1')
                 assert history['messages'][0]['role'] == 'user'
+                # Native voice talks directly to its speech server; no Hermes service exists.
+                await request('PUT', '/api/settings/voice', {'same_as_model': False, 'base_url': speech.url,
+                                                            'key': 'example-speech-key'})
+                for mime in ('audio/mp4', 'audio/webm;codecs=opus'):
+                    recorded = await request('POST', '/api/audio/transcribe', {
+                        'data_url': 'data:' + mime + ';base64,Y2xpcA==', 'mime_type': mime, 'duration_seconds': 1})
+                    assert recorded == {'transcript': 'Hello'}
+                mid = view['messages'][-1]['id']
+                speech_url = roost.make_url(path + '/speech/' + str(mid))
+                async with client.get(speech_url) as response:
+                    assert response.status == 200 and await response.read() == speech.audio
+                async with client.get(speech_url, headers={'Range': 'bytes=0-2'}) as response:
+                    assert response.status == 206 and await response.read() == speech.audio[:3]
+                assert len(speech.calls) == 3 and speech.calls[-1][0] == 'Bearer example-speech-key'
                 exported = await request('GET', path + '/export')
                 assert exported['messages'][0]['content'] == 'Edited searchable message'
                 await request('PATCH', path, {'title': 'My title'})
@@ -194,12 +210,13 @@ async def run():
                 await request('DELETE', path, {'confirm': True})
                 assert [c['id'] for c in (await request('GET', '/api/conversations'))['sessions']] == [long_chat]
                 await request('DELETE', '/api/conversations', {'confirm': 'DELETE'})
-                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, fallback reply on a 503, No web, rename, delete, delete-all and export; no Hermes server')
+                print('PASS: native send, committed SSE/reconnect snapshot, queue, cancel, Stop, send-now, edit, regenerate, title, search/escaping, history, model/context, persona, manual/model memory, memory snapshots/forget, web search/read/answer, forced search, compaction summary, citations, trace snapshots, fallback reply on a 503, native MP4/WebM transcription, speech/cache/ranges, No web, rename, delete, delete-all and export; no Hermes server')
         finally:
             await roost.close()
             await fake.close()
             await search.close()
             await backup.close()
+            await speech.close()
 
 
 if __name__ == '__main__':
