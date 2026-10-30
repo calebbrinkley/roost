@@ -12,7 +12,7 @@ ACCENTS = ("forest", "ocean", "violet", "rose", "amber", "slate")
 CUSTOM_ACCENT = re.compile(r"#[0-9a-f]{6}")
 # "" follows each device's own time zone; otherwise an IANA name such as "America/New_York".
 TIME_ZONE = re.compile(r"(UTC|[A-Za-z]+(/[A-Za-z0-9_+-]+){1,2})")
-FIELDS = {"agent_name", "accent", "time_zone", "backend", "search_url"}
+FIELDS = {"agent_name", "accent", "time_zone", "backend", "search_url", "use_fallback"}
 
 
 class SettingsError(ValueError):
@@ -54,7 +54,8 @@ def load(path: Path) -> dict:
             "accent": _accent(stored.get("accent")) or ACCENTS[0],
             "time_zone": _time_zone(stored.get("time_zone")) or "",
             "backend": "native" if stored.get("backend") == "native" else "hermes",
-            "search_url": _search_url(stored.get("search_url", "")) or ""}
+            "search_url": _search_url(stored.get("search_url", "")) or "",
+            "use_fallback": stored.get("use_fallback") is True}
 
 
 def update(path: Path, changes: dict) -> dict:
@@ -86,6 +87,10 @@ def update(path: Path, changes: dict) -> dict:
         if value is None:
             raise SettingsError("Choose an HTTP(S) search base URL without credentials, query or fragment.")
         settings['search_url'] = value
+    if "use_fallback" in changes:
+        if type(changes["use_fallback"]) is not bool:
+            raise SettingsError("use_fallback must be true or false.")
+        settings["use_fallback"] = changes["use_fallback"]
     temporary = path.with_name(path.name + ".new")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:

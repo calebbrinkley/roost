@@ -2578,7 +2578,7 @@ test('model rows share switches, expose one detail panel, and keep the default e
   assert.deepEqual(byClass('model-id').map(node => node.className), ['model-id','model-id hidden']);
   const picker = () => nodes().find(node => node.id === 'settings-default-model');
   assert.deepEqual(picker().children.map(node => node.value),['one']);
-  const toggles = () => nodes().filter(node => node.getAttribute?.('role') === 'switch');
+  const toggles = () => nodes().filter(node => node.getAttribute?.('role') === 'switch' && node.id !== 'settings-use-fallback');
   assert.equal(toggles().length,2);assert.equal(toggles()[0].className,'job-toggle');
   toggles()[1].events.click();
   assert.deepEqual(picker().children.map(node => node.value),['one','two']);
@@ -2862,4 +2862,120 @@ test('summarize trace items use plain sentences for running, completed and error
     return tool.children[0].textContent;
   });
   assert.deepEqual(labels, ['Summarizing earlier messages…', 'Summarized earlier messages', "Couldn't summarize earlier messages"]);
+});
+
+const fallbackServer = (extra = {}) => ({base_url: 'https://fallback.example.invalid/v1', has_key: true, default_model: 'backup',
+  models: [{id: 'backup', display_name: 'Backup', enabled: true, thinking_mode: 'unsupported'}], ...extra});
+const walkNodes = node => [node, ...(node.children || []).flatMap(walkNodes)];
+
+test('Settings Models shows a fallback server section with its own fields, ids and model list', async () => {
+  const f = fixture(); await tick();
+  const nodes = () => walkNodes(f.get('settings-detail'));
+  const headings = () => nodes().filter(node => node.tagName === 'H2').map(node => node.textContent);
+  f.run(`state.backend='native';state.settings={use_fallback:false};state.settingsGroup='models';
+    state.primary={base_url:'https://primary.example.invalid/v1',has_key:false,default_model:'one',models:[{id:'one',display_name:'First',enabled:true,thinking_mode:'unsupported'}]};
+    state.fallback=${JSON.stringify(fallbackServer())};renderSettings()`);
+  assert.deepEqual(headings().filter(text => /server|models|fallback/i.test(text)), ['Primary server', 'Models', 'Fallback server', 'Fallback models', 'Use the fallback']);
+  const byId = id => nodes().find(node => node.id === id);
+  assert.equal(byId('settings-base-url').value, 'https://primary.example.invalid/v1');
+  assert.equal(byId('settings-fallback-base-url').value, 'https://fallback.example.invalid/v1');
+  assert.equal(byId('settings-fallback-api-key').type, 'password');
+  assert.equal(byId('settings-fallback-api-key').placeholder, 'Key saved');
+  assert.deepEqual(byId('settings-fallback-default-model').children.map(node => node.value), ['backup']);
+  assert.deepEqual(byId('settings-default-model').children.map(node => node.value), ['one']);
+  // Expanding a fallback model leaves the primary's rows alone.
+  byId('settings-fallback-model-0').events.click();
+  assert.equal(f.run('state.openModel'), 'fallback:backup');
+  assert.equal(byId('settings-fallback-model-0').getAttribute('aria-expanded'), 'true');
+  assert.equal(byId('settings-model-0').getAttribute('aria-expanded'), 'false');
+});
+
+test('fallback server buttons save to the fallback routes, never the primary', async () => {
+  const f = fixture(); await tick();
+  const nodes = () => walkNodes(f.get('settings-detail'));
+  f.run(`state.backend='native';state.settings={use_fallback:false};state.settingsGroup='models';globalThis.calls=[];
+    api=async (path,options)=>{calls.push([path,options&&options.method]);return path.endsWith('/models')?{}:{base_url:'https://fallback.example.invalid/v1',has_key:true}};loadModels=async()=>{};
+    state.primary={base_url:'https://primary.example.invalid/v1',has_key:false,default_model:null,models:[]};
+    state.fallback=${JSON.stringify(fallbackServer())};renderSettings()`);
+  const buttons = text => nodes().filter(node => node.tagName === 'BUTTON' && node.textContent === text);
+  assert.equal(buttons('Save server').length, 2);
+  await buttons('Save server')[1].events.click();
+  await buttons('Save models')[1].events.click();
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(calls)')), [['/settings/servers/fallback', 'PUT'], ['/settings/servers/fallback/models', 'PUT']]);
+});
+
+test('the fallback switch needs a saved fallback server and default model, and saves a boolean', async () => {
+  const f = fixture(); await tick();
+  const toggle = () => walkNodes(f.get('settings-detail')).find(node => node.id === 'settings-use-fallback');
+  const hints = () => walkNodes(f.get('settings-detail')).filter(node => node.className === 'sheet-note').map(node => node.textContent);
+  const show = (fallback, on = false) => f.run(`state.backend='native';state.settings={use_fallback:${on}};state.settingsGroup='models';
+    state.primary={base_url:'',has_key:false,default_model:null,models:[]};state.fallback=${JSON.stringify(fallback)};renderSettings()`);
+  show({base_url: '', has_key: false, default_model: null, models: []});
+  assert.equal(toggle().disabled, true); assert.equal(toggle().getAttribute('aria-checked'), 'false'); assert.equal(toggle().className, 'job-toggle off');
+  assert.match(hints().join(' '), /Save a fallback server and choose its default model first/);
+  show(fallbackServer({default_model: null}));
+  assert.equal(toggle().disabled, true);
+  show(fallbackServer());
+  assert.equal(toggle().disabled, false); assert.deepEqual(hints(), []);
+  f.run(`globalThis.sent=[];saveSettings=async changes=>{sent.push(changes);return true}`);
+  toggle().events.click();
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(sent)')), [{use_fallback: true}]);
+  show(fallbackServer({base_url: '', default_model: null}), true);
+  assert.equal(toggle().disabled, false); assert.equal(toggle().getAttribute('aria-checked'), 'true'); assert.equal(toggle().className, 'job-toggle');
+  toggle().events.click();
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(sent)')).pop(), {use_fallback: false});
+  const privacy = walkNodes(f.get('settings-detail')).map(node => node.textContent || '').join('\n');
+  assert.match(privacy, /leave this server, if that server is hosted elsewhere/);
+  assert.match(privacy, /Use the fallback when the primary can’t start a reply/);
+});
+
+test('Keep this chat local is a chat setting that loads and saves with the sheet', async () => {
+  const f = fixture(); await tick();
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  assert.match(html, /id="sheet-keep-local" type="checkbox"> Keep this chat local/);
+  assert.match(fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8'), /#sheet-instructions-form \.check-row \{ min-height: 44px/);
+  f.run(`state.backend='native';state.sheetItem={id:'chat'};state.sheetBusy=false;globalThis.puts=[];
+    loadModels=async()=>{};loadPersonas=async()=>{};fillModelPicker=()=>{};fillPersonaPicker=()=>{};updateSheetThinking=()=>{};
+    api=async(path,options)=>{if(options&&options.method==='PUT'){puts.push(JSON.parse(options.body));return {instructions:'',model:null,reasoning:'none',no_web:false,keep_local:true}}
+      return {instructions:'',model:null,reasoning:'none',no_web:false,keep_local:true,persona_id:null}}`);
+  await f.run('openInstructions()');
+  assert.equal(f.get('sheet-keep-local').checked, true);
+  f.get('sheet-keep-local').checked = false;
+  await f.run('saveInstructions({preventDefault(){}})');
+  assert.equal(f.run('puts[0].keep_local'), false);
+  f.get('sheet-keep-local').checked = true; f.get('sheet-instructions-text').disabled = false;
+  await f.run('saveInstructions({preventDefault(){}})');
+  assert.equal(f.run('puts[1].keep_local'), true);
+});
+
+test('fallback replies say which model answered; primary replies add nothing', async () => {
+  const f = fixture(); await tick();
+  const base = "roost_usage:{input_tokens:12,output_tokens:3,tokens_per_second:20,time_to_first_token:.5}";
+  assert.equal(f.run(`replyUsage({turn_id:'t',${base}})`), '12 in / 3 out · 20.0 TPS · 0.50 s to first token');
+  assert.equal(f.run(`replyUsage({turn_id:'t',${base},served_by:{server:'primary',model:'m',display_name:'Main'}})`), '12 in / 3 out · 20.0 TPS · 0.50 s to first token');
+  assert.equal(f.run(`replyUsage({turn_id:'t',${base},served_by:{server:'fallback',model:'backup-model',display_name:'Backup'}})`),
+    '12 in / 3 out · 20.0 TPS · 0.50 s to first token · via Backup · fallback');
+  assert.match(f.run(`replyUsage({turn_id:'t',${base},served_by:{server:'fallback',model:'backup-model'}})`), /· via backup-model · fallback$/);
+});
+
+test('the fallback trace item is one plain sentence, running or settled', async () => {
+  const f = fixture(); await tick();
+  const sentence = "Primary couldn't start (HTTP 503); answered with Backup on the fallback server";
+  f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:'completed',result:${JSON.stringify(sentence)}}])`);
+  const tool = f.get('thoughts').children[0];
+  assert.equal(tool.children.length, 1);
+  assert.equal(tool.children[0].className, 'tool-call tool-call-plain');
+  assert.equal(tool.children[0].textContent, sentence);
+});
+
+test('the fallback trace item shows its sentence while running and after an interruption', async () => {
+  const f = fixture(); await tick();
+  for (const [status, result] of [['running', "Primary couldn't start (HTTP 503); answering with Backup on the fallback server"],
+                                  ['interrupted', "Primary couldn't start (HTTP 503); switched to Backup on the fallback server"],
+                                  ['error', "Primary couldn't start (HTTP 503); Backup on the fallback server failed too"]]) {
+    f.run(`state.backend='native';fillThoughts($('thoughts'),[{kind:'tool',id:'fallback-1',name:'fallback',arguments:'{}',status:${JSON.stringify(status)},result:${JSON.stringify(result)}}])`);
+    const tool = f.get('thoughts').children[0];
+    assert.equal(tool.children.length, 1);
+    assert.equal(tool.children[0].textContent, result);
+  }
 });

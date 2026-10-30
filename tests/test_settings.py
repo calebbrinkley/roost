@@ -17,7 +17,7 @@ class SettingsTests(unittest.TestCase):
         self.directory.cleanup()
 
     def test_defaults_survive_a_missing_or_damaged_file(self):
-        default = {"agent_name": "", "accent": "forest", "time_zone": "", "backend": "hermes", "search_url": ""}
+        default = {"agent_name": "", "accent": "forest", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False}
         self.assertEqual(settings.load(self.path), default)
         for content in ("{not json", "[]", '{"agent_name": 5, "accent": "neon", "time_zone": "../etc"}'):
             self.path.write_text(content)
@@ -40,6 +40,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.load(self.path)['search_url'], 'http://search.example.org')
         self.assertEqual(settings.update(self.path, {'search_url': ''})['search_url'], '')
 
+    def test_use_fallback_is_a_strict_boolean_and_off_by_default(self):
+        self.assertIs(settings.load(self.path)["use_fallback"], False)
+        self.assertIs(settings.update(self.path, {"use_fallback": True})["use_fallback"], True)
+        for value in (None, "yes", 1, []):
+            with self.assertRaises(settings.SettingsError):
+                settings.update(self.path, {"use_fallback": value})
+        self.assertIs(settings.load(self.path)["use_fallback"], True)
+        self.path.write_text('{"use_fallback": "true"}')
+        self.assertIs(settings.load(self.path)["use_fallback"], False)
+
     def test_backend_is_explicit_validated_and_persisted(self):
         settings.update(self.path, {"backend": "native"})
         self.assertEqual(settings.load(self.path)["backend"], "native")
@@ -50,12 +60,12 @@ class SettingsTests(unittest.TestCase):
 
     def test_changes_are_cleaned_saved_privately_and_kept(self):
         saved = settings.update(self.path, {"agent_name": "  Robin  ", "accent": "rose"})
-        self.assertEqual(saved, {"agent_name": "Robin", "accent": "rose", "time_zone": "", "backend": "hermes", "search_url": ""})
+        self.assertEqual(saved, {"agent_name": "Robin", "accent": "rose", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False})
         self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
         settings.update(self.path, {"accent": "#A1B2C3", "time_zone": "America/New_York"})
-        self.assertEqual(settings.load(self.path), {"agent_name": "Robin", "accent": "#a1b2c3", "time_zone": "America/New_York", "backend": "hermes", "search_url": ""})
+        self.assertEqual(settings.load(self.path), {"agent_name": "Robin", "accent": "#a1b2c3", "time_zone": "America/New_York", "backend": "hermes", "search_url": "", "use_fallback": False})
         settings.update(self.path, {"agent_name": "", "time_zone": ""})
-        self.assertEqual(settings.load(self.path), {"agent_name": "", "accent": "#a1b2c3", "time_zone": "", "backend": "hermes", "search_url": ""})
+        self.assertEqual(settings.load(self.path), {"agent_name": "", "accent": "#a1b2c3", "time_zone": "", "backend": "hermes", "search_url": "", "use_fallback": False})
 
 
 if __name__ == "__main__":
