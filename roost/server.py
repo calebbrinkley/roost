@@ -1095,19 +1095,23 @@ async def static(request: web.Request):
 
 
 async def native_store(app: web.Application):
+    from .jobs import Jobs, enqueue
     app["store"] = Store(app["state_dir"] / "native.sqlite3")
     app["provider_http"] = aiohttp.ClientSession()
     async def completed(cid, tid, text):
-        if not looking_at(app, cid):
-            await notify(app, {"title": await agent_name(app, ask_hermes=False), "body": preview(text),
-                               "url": "/?c=" + quote(cid, safe=""), "tag": "reply-" + tid})
+        turn = app['store'].get_turn(tid)
+        if turn and not turn.settings.get('job_run') and not looking_at(app, cid):
+            enqueue(app["store"], "reply-" + tid, {"title": await agent_name(app, ask_hermes=False), "body": preview(text),
+                    "url": "/?c=" + quote(cid, safe=""), "tag": "reply-" + tid}, time.time())
     app["runner"] = Runner(app["store"], app["servers"], app["provider_http"], completed=completed,
                            limit=int(os.environ.get("ROOST_NATIVE_ADMISSION", "1")),
                            preferences=lambda: settings.load(app["settings_file"]))
+    app["jobs"] = Jobs(app["store"], app["runner"])
     app["runner"].start()
     try:
         yield
     finally:
+        await app["jobs"].close()
         await app["runner"].close()
         await app["provider_http"].close()
         app["store"].close()
@@ -1119,10 +1123,18 @@ async def startup(app: web.Application):
         await app["hermes"].start()
         app["hermes_started"] = True
     app["push_http"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    from .jobs import Outbox, serve, deliver
+    app["outbox"] = Outbox(app["store"], app["push"], app["push_http"])
+    app["job_scheduler"] = asyncio.create_task(serve(app))
+    app["outbox_worker"] = asyncio.create_task(deliver(app))
     app["watcher"] = asyncio.create_task(watch_replies(app))
 
 
 async def shutdown(app: web.Application):
+    for key in ('job_scheduler', 'outbox_worker'):
+        app[key].cancel()
+    await asyncio.gather(app['job_scheduler'], app['outbox_worker'], return_exceptions=True)
+    await app['jobs'].close()
     streams = list(app["native_streams"])
     for task in streams:
         task.cancel()

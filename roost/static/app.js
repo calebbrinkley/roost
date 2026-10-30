@@ -402,7 +402,7 @@ async function refreshIdentity() {
 function isNative() { return state.backend === "native"; }
 
 function backendSurfaces(backend) {
-  return { jobs: backend !== "native", soul: backend !== "native", voice: true,
+  return { jobs: true, soul: backend !== "native", voice: true,
     approvals: backend !== "native", hermes: backend !== "native" };
 }
 
@@ -429,7 +429,6 @@ function applyTimeZone(name) {
 }
 
 function setSection(section) {
-  if (isNative() && section === "jobs") section = "messages";
   if (section !== "messages") stopRecording(true);
   state.section = section;
   $("app").classList.toggle("section-jobs", section === "jobs");
@@ -1526,6 +1525,10 @@ async function loadMessages(id = state.current) {
     state.turn = { id, working: data.working === true, after: typeof data.after === "number" ? data.after : null,
                    started: typeof data.started === "number" ? data.started : null, turn_id: data.turn_id, at };
     if (isNative()) { state.context = data.context; state.currentPersona = data.persona_name || null; applyAgentName(); }
+    if (isNative() && data.job) {
+      const date = parseTime(data.job.scheduled_for);
+      $("chat-title").textContent = `${data.job.name} · ${date.toLocaleDateString(undefined, {month: "short", day: "numeric", ...zone()})}, ${clockTime(date)}`;
+    }
     if (data.live === true) openStream(id);
     else if (!state.turn.working && state.stream?.id === id && state.stream.healthy) {
       state.stream.healthy = false; resetMessagePolling();
@@ -2030,6 +2033,8 @@ function jobSchedule(job) {
 }
 
 function jobScheduleLabel(job) {
+  if (isNative() && job.schedule?.kind === "every") return `Every ${job.schedule.value} ${job.schedule.unit} · ${job.time_zone}`;
+  if (isNative() && job.schedule?.kind === "once") return `Once: ${job.schedule.at} · ${job.time_zone}`;
   const schedule = jobSchedule(job);
   const label = scheduleLabel(schedule);
   return label !== schedule ? label : (jobValue(job, "schedule_display") || schedule);
@@ -2058,7 +2063,7 @@ function updateSchedulePreview() {
   const schedule = $("job-schedule").value.trim();
   const label = scheduleLabel(schedule);
   $("job-schedule-preview").textContent = !schedule ? "Example: 0 8 * * * runs daily at 8:00 AM." :
-    label === schedule ? "This schedule will be sent to Hermes as entered." : "Runs " + label.toLowerCase() + ".";
+    label === schedule ? (isNative() ? "Five cron fields: minute hour day month weekday." : "This schedule will be sent to Hermes as entered.") : "Runs " + label.toLowerCase() + ".";
 }
 
 function renderJobs() {
@@ -2144,7 +2149,7 @@ function renderJobDetail() {
   // Hermes keeps no report on the job itself; its newest run's preview is the last report.
   const latestRun = state.jobRuns[job.id]?.[0];
   const facts = [["Last run", timeLabel(job.last_run_at || latestRun?.started_at || latestRun?.created_at || latestRun?.timestamp) || "Not yet"],
-                 ["Delivery", jobValue(job, "deliver") === "local" ? "Saved in Hermes" : jobValue(job, "deliver") || "Saved in Hermes"]];
+                 ...(isNative() ? [["Time zone", job.time_zone], ["Notifications", job.notify === "changed" ? "Only if changed" : "Every result"]] : [["Delivery", jobValue(job, "deliver") === "local" ? "Saved in Hermes" : jobValue(job, "deliver") || "Saved in Hermes"]])];
   const stats = el("dl", "stats");
   for (const [term, value] of facts) { const item = el("div"); item.append(el("dt", "", term), el("dd", "", value)); stats.append(item); }
   summary.append(stats);
@@ -2178,9 +2183,9 @@ function renderJobDetail() {
     row.append(heading);
     const report = run.output || run.result || run.summary || run.report || run.preview || "";
     if (report) row.append(el("pre", "", typeof report === "string" ? report : JSON.stringify(report, null, 2)));
-    if (run.id && run.source !== "cron_output") {
+    if ((run.conversation_id || run.id) && run.source !== "cron_output") {
       const open = el("button", "text-button", "Open conversation");
-      open.addEventListener("click", () => { setSection("messages"); selectConversation(run.id, run.source); });
+      open.addEventListener("click", () => { setSection("messages"); selectConversation(run.conversation_id || run.id, run.source); });
       row.append(open);
     }
     history.append(row);
@@ -2265,6 +2270,22 @@ async function deleteJob(job) {
   finally { if (scope.alive()) { state.jobBusy = false; renderJobDetail(); } }
 }
 
+function updateJobKind() {
+  const kind = $("job-kind").value;
+  show("job-cron-fields", !isNative() || kind === "cron");
+  show("job-every-fields", kind === "every"); show("job-once-fields", kind === "once");
+  $("job-schedule").required = !isNative() || kind === "cron";
+  $("job-every").required = isNative() && kind === "every";
+  $("job-once").required = isNative() && kind === "once";
+}
+
+function nativeJobSchedule() {
+  const kind = $("job-kind").value;
+  if (kind === "every") return {kind, value: Number($("job-every").value), unit: $("job-unit").value};
+  if (kind === "once") return {kind, at: $("job-once").value};
+  return {kind, expr: $("job-schedule").value.trim()};
+}
+
 function openJob(job = null) {
   if (state.jobBusy) return;
   // A save cut short by sign-out skips its cleanup, so the form's buttons start enabled here.
@@ -2275,6 +2296,27 @@ function openJob(job = null) {
   $("job-prompt").value = job ? jobValue(job, "prompt") : "";
   $("job-schedule").value = job ? jobSchedule(job) : "";
   updateSchedulePreview();
+  show("native-job-kind", isNative()); show("native-job-fields", isNative()); show("job-delivery-fields", !isNative());
+  $("job-deliver").required = !isNative();
+  if (isNative()) {
+    $("job-kind").value = job?.schedule?.kind || "cron";
+    $("job-every").value = job?.schedule?.value || 1;
+    $("job-unit").value = job?.schedule?.unit || "hours";
+    $("job-once").value = job?.schedule?.at || "";
+    const saved = job?.time_zone || state.settings.time_zone || "UTC";
+    const zones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+    $("job-zone").replaceChildren();
+    for (const name of [...new Set([saved, "UTC", ...zones])]) { const option = el("option", "", name); option.value = name; $("job-zone").append(option); }
+    $("job-zone").value = saved;
+    $("job-web").checked = job?.web !== false; $("job-memory").checked = job?.allow_memory === true;
+    $("job-changed").checked = job?.notify === "changed";
+    fillModelPicker($("job-model"), job?.model);
+    const scope = signInScope();
+    const fill = () => { if (scope.alive() && $("job-dialog").open && state.job === job) fillPersonaPicker($("job-persona"), job?.persona); };
+    if (state.personaData) fillPersonaPicker($("job-persona"), job?.persona);
+    else { $("job-persona").replaceChildren(); loadPersonas().then(fill).catch(error => report(error, scope)); }
+  }
+  updateJobKind();
   $("job-deliver").value = job ? (jobValue(job, "deliver") || "local") : "local";
   show("job-management", Boolean(job));
   $("job-dialog").showModal();
@@ -2288,7 +2330,10 @@ async function saveJob(event) {
   const buttons = [...$("job-form").querySelectorAll("button")];
   buttons.forEach((button) => { button.disabled = true; });
   const data = { name: $("job-name").value.trim(), prompt: $("job-prompt").value.trim(),
-                 schedule: $("job-schedule").value.trim(), deliver: $("job-deliver").value.trim() };
+                 ...(isNative() ? {schedule: nativeJobSchedule(), time_zone: $("job-zone").value,
+                   notify: $("job-changed").checked ? "changed" : "always", allow_memory: $("job-memory").checked,
+                   web: $("job-web").checked, model: $("job-model").value || null, persona: $("job-persona").value || null}
+                   : {schedule: $("job-schedule").value.trim(), deliver: $("job-deliver").value.trim()}) };
   const id = state.job?.id;
   try {
     const result = await api(id ? `/jobs/${encodeURIComponent(id)}` : "/jobs", { method: id ? "PUT" : "POST", body: JSON.stringify(data) });
@@ -2734,8 +2779,8 @@ function renderServer(detail, role) {
 
 function settingsGroups() {
   return [["appearance", "Appearance", "Theme and accent colour"], ["time", "Time zone", "How times are shown"],
-          ["models", "Models", "Backend and model server"], ...(isNative() ? [["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", isNative() ? "Delete conversations" : "Delete conversations or jobs"],
-          ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", isNative() ? "Replies on your devices" : "Replies and job reports on your devices"],
+          ["models", "Models", "Backend and model server"], ...(isNative() ? [["voice", "Voice", "Speech server and voice"], ["web", "Web search", "SearXNG connection"], ["personas", "Persona", "Your assistant presets"], ["memory", "Memory", "Facts kept across chats"]] : [["agent", agent(), "Name and instructions"]]), ["data", "Data", "Delete conversations or jobs"],
+          ["service", "Service", isNative() ? "Restart Roost" : `Restart Roost or ${agent()}`], ["notifications", "Notifications", "Replies and job reports on your devices"],
           ["account", "Account", "Passkeys and sign out"],
           ["about", "About", "Version, live status and credits"]];
 }
@@ -2891,7 +2936,7 @@ function renderMemory(detail) {
         const result = await api(`/memory/${fact.id}`, {method: "DELETE"});
         if (scope.alive()) { state.memoryData = result; if (state.editMemory?.id === fact.id) state.editMemory = null; }
       })));
-    head.append(el("span", "memory-origin", fact.origin === "model" ? "Model" : "You"), actions);
+    head.append(el("span", "memory-origin", fact.job_name ? `Job: ${fact.job_name}` : fact.origin === "model" ? "Model" : "You"), actions);
     const text = el("p", "memory-text clamped", fact.text); row.append(head, text);
     if (fact.text.length > 160 || fact.text.split("\n").length > 3) {
       const more = el("button", "memory-more", "Show all"); more.type = "button"; more.setAttribute("aria-expanded", "false");
@@ -2993,6 +3038,7 @@ function deviceTimeZone() {
 
 function renderTimeSettings(detail) {
   const section = settingsSection(detail, "Time zone",
+    isNative() ? "Conversation and run times show in this zone. New jobs default to this zone; existing jobs keep their own time zone." :
     `Conversation, message and job run times show in this zone on every device you sign in on. It doesn’t change when jobs run; ${agent()}’s scheduler keeps its own clock.`);
   const label = el("label", "", "Show times in"); label.htmlFor = "settings-time-zone";
   const select = el("select"); select.id = "settings-time-zone"; select.disabled = state.settingsBusy;
@@ -3133,8 +3179,7 @@ function renderDataSettings(detail) {
   for (const [kind, heading, text] of [
     ["conversations", "Delete all conversations", `Removes every conversation in Messages, whatever started it, from ${agent()}’s history for good. Job run history stays with its jobs.`],
     ["jobs", "Delete all jobs", `Removes every scheduled job and stops it running. This can’t be undone.`]]) {
-    if (isNative() && kind === "jobs") continue;
-    const section = settingsSection(detail, heading, isNative() ? "Removes all native conversations for good." : text);
+    const section = settingsSection(detail, heading, isNative() && kind === "conversations" ? "Removes conversations in Messages for good. Job run history stays with its jobs." : text);
     // The operation's own name is the phrase to type, shown in the empty field; capitals and spacing don't matter.
     const phrase = heading.toLowerCase(), prompt = `Type “${phrase}” to confirm`;
     const input = el("input"); input.id = "confirm-" + kind; input.autocomplete = "off"; input.autocapitalize = "off";
@@ -3720,6 +3765,7 @@ $("message").addEventListener("input", () => {
 $("message").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); $("composer").requestSubmit(); } });
 $("job-form").addEventListener("submit", saveJob);
 $("job-schedule").addEventListener("input", updateSchedulePreview);
+$("job-kind").addEventListener("change", updateJobKind);
 $("close-dialog").addEventListener("click", () => $("job-dialog").close());
 $("cancel-job").addEventListener("click", () => $("job-dialog").close());
 $("delete-job").addEventListener("click", () => state.job && deleteJob(state.job));

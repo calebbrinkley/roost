@@ -463,7 +463,7 @@ class AttachmentStoreTests(unittest.TestCase):
         with self.assertRaises(StoreError):
             self.store.migrate(5)  # a rollback never discards attachments
         self.assertEqual(self.store.get_message(new.message_id).attachments, files)
-        self.assertEqual(self.store.db.execute("SELECT version FROM schema_version").fetchone()[0], 6)
+        self.assertEqual(self.store.db.execute("SELECT version FROM schema_version").fetchone()[0], 7)  # the refused rollback left every migration in place
         self.store.cancel_queued(new.turn_id)
         self.store.migrate(5)
         self.assertEqual(self.store.get_message(old.message_id).content, 'Typed before')

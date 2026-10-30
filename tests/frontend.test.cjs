@@ -2483,8 +2483,9 @@ test('native controls follow turn state and latest reply', async () => {
 test('native surfaces hide Hermes features while Hermes keeps them', async () => {
   const f = fixture(); await tick();
   assert.ok(Object.values(f.run(`backendSurfaces('hermes')`)).every(Boolean));
+  assert.equal(f.run(`backendSurfaces('native').jobs`), true);
   assert.equal(f.run(`backendSurfaces('native').voice`), true);
-  assert.ok(Object.entries(f.run(`backendSurfaces('native')`)).filter(([key]) => key !== 'voice').every(([, value]) => !value));
+  assert.ok(Object.entries(f.run(`backendSurfaces('native')`)).filter(([key]) => key !== 'jobs' && key !== 'voice').every(([, value]) => !value));
   f.run(`state.backend='native'; state.settings={agent_name:''}; state.push={devices:[]}; state.about={
     roost:{},runtime:{},stats:{},at:new Date(),hermes:{reachable:false}};
     renderAgentSettings($('settings-detail')); renderServiceSettings($('settings-detail')); renderNotifications($('settings-detail')); renderAbout($('settings-detail'));`);
@@ -3148,6 +3149,89 @@ test('the fallback trace item shows its sentence while running and after an inte
     assert.equal(tool.children.length, 1);
     assert.equal(tool.children[0].textContent, result);
   }
+});
+
+
+test('native job editor keeps schedules, overrides and safe memory defaults', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.settings={time_zone:'America/New_York'};
+    state.models=[{id:'example-model',display_name:'Example',enabled:true}];
+    state.personaData={personas:[{id:'guide',name:'Guide'}],default_persona_id:'guide'};
+    openJob();`);
+  assert.equal(f.get('native-job-fields').classList.contains('hidden'), false);
+  assert.equal(f.get('job-delivery-fields').classList.contains('hidden'), true);
+  assert.equal(f.get('job-deliver').required, false);
+  assert.equal(f.get('job-memory').checked, false);
+  assert.equal(f.get('job-web').checked, true);
+  assert.equal(f.get('job-zone').value, 'America/New_York');
+  f.get('job-kind').value = 'every'; f.get('job-every').value = '3'; f.get('job-unit').value = 'hours';
+  f.run('updateJobKind()');
+  assert.equal(f.get('job-cron-fields').classList.contains('hidden'), true);
+  assert.equal(f.get('job-every-fields').classList.contains('hidden'), false);
+  assert.equal(f.get('job-schedule').required, false);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(nativeJobSchedule())')), {kind:'every',value:3,unit:'hours'});
+  f.get('job-kind').value = 'once'; f.get('job-once').value = '2026-11-01T08:00';
+  f.run('updateJobKind()');
+  assert.equal(f.get('job-every-fields').classList.contains('hidden'), true);
+  assert.equal(f.get('job-once-fields').classList.contains('hidden'), false);
+  assert.equal(f.get('job-once').required, true);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(nativeJobSchedule())')), {kind:'once',at:'2026-11-01T08:00'});
+  f.get('job-kind').value = 'cron'; f.get('job-schedule').value = '0 8 * * *';
+  f.get('job-changed').checked = true; f.get('job-memory').checked = true;
+  f.get('job-model').value = 'example-model'; f.get('job-persona').value = 'guide';
+  f.get('job-name').value = 'Report'; f.get('job-prompt').value = 'Summarize';
+  f.run(`globalThis.saved=null; api=async (path, options) => { saved=JSON.parse(options.body); return {id:'new-job'}; };
+    loadJobs=async()=>{}; applyJob=()=>{}; selectJob=()=>{};`);
+  await f.run('saveJob({preventDefault(){}})');
+  const saved = JSON.parse(f.run('JSON.stringify(saved)'));
+  assert.equal(saved.notify, 'changed'); assert.equal(saved.allow_memory, true);
+  assert.equal(saved.model, 'example-model'); assert.equal(saved.persona, 'guide');
+  assert.ok(!Object.hasOwn(saved, 'deliver'));
+  assert.deepEqual(saved.schedule, {kind:'cron',expr:'0 8 * * *'});
+});
+
+test('job kind precedes the schedule inputs', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../roost/static/index.html'), 'utf8');
+  assert.ok(html.indexOf('id="job-kind"') < html.indexOf('id="job-schedule"'));
+});
+
+test('three navigation tabs share one row on phone and desktop', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../roost/static/style.css'), 'utf8');
+  for (const selector of ['.mobile-tabbar', '.segmented']) {
+    const grids = [...css.matchAll(/([^{}]+)\{([^{}]*grid-template-columns:[^{}]*)\}/g)]
+      .filter(match => match[1].includes(selector));
+    assert.ok(grids.length);
+    for (const grid of grids) assert.match(grid[2], /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  }
+});
+
+test('native run transcript supplies the job name and run time in the header', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.current='run'; state.timeZone='UTC';
+    renderMessages=()=>{}; api=async()=>({messages:[],job:{id:'job',name:'Garden briefing',scheduled_for:1793260800}});`);
+  await f.run('loadMessages()');
+  assert.match(f.get('chat-title').textContent, /^Garden briefing · Oct 29,? .*8:00 AM$/);
+  f.run(`state.backend='hermes'; api=async()=>({messages:[],job:{name:'Ignored',scheduled_for:1793260800}});`);
+  f.get('chat-title').textContent = 'Existing Hermes title';
+  await f.run('loadMessages()');
+  assert.equal(f.get('chat-title').textContent, 'Existing Hermes title');
+});
+
+test('Hermes job editor retains delivery and schedule strings', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='hermes'; openJob({id:'existing',name:'Report',prompt:'Summarize',schedule:'0 8 * * *',deliver:'local'});`);
+  assert.equal(f.get('native-job-fields').classList.contains('hidden'), true);
+  assert.equal(f.get('job-deliver').required, true);
+  assert.equal(f.get('job-schedule').value, '0 8 * * *');
+});
+
+
+test('native memory facts display job provenance', async () => {
+  const f = fixture(); await tick();
+  f.run(`state.backend='native'; state.memoryData={facts:[{id:1,text:'Garden fact',origin:'model',job_name:'Garden briefing'}],used_tokens:3,budget_tokens:2000};
+    renderMemory($('settings-detail'));`);
+  const texts = node => [node.textContent, ...(node.children || []).flatMap(texts)].join(' ');
+  assert.ok(texts(f.get('settings-detail')).includes('Job: Garden briefing'));
 });
 
 test('native Voice settings save models and a write-only custom key', async () => {
