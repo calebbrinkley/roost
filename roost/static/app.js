@@ -18,7 +18,7 @@ const SLICES = {
   jobs: () => ({ jobs: [], selectedJob: null, job: null, jobBusy: false, jobSearch: "", jobRuns: Object.create(null),
                  jobRunsError: Object.create(null), jobRunsLoading: new Set(), jobPatches: Object.create(null) }),
   settings: () => ({ settings: null, settingsGroup: null, settingsBusy: false, timeZone: "", nameDraft: undefined, soul: undefined,
-                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
+                     soulDraft: undefined, soulLoading: false, about: null, backend: "hermes", models: [], defaultModel: null, primary: null, fallback: null, personaData: null, memoryData: null, editPersona: null, editMemory: null, openModel: null, modelsError: "", modelsLoading: false }),
   account: () => ({ passkeyList: null, passkeyRegister: null, passkeyNameDraft: undefined, removingPasskey: null,
                     push: null, removingPush: null, hermesLink: null, rotatingToken: false }),
 };
@@ -633,6 +633,7 @@ async function openInstructions() {
       fillPersonaPicker($("sheet-persona"), data.persona_id);
       $("sheet-reasoning").value = data.reasoning || "none";
       $("sheet-no-web").checked = Boolean(data.no_web);
+      $("sheet-keep-local").checked = Boolean(data.keep_local);
       updateSheetThinking();
     }
     field.disabled = false; field.focus();
@@ -646,7 +647,7 @@ async function saveInstructions(event) {
   const scope = signInScope();
   state.sheetBusy = true;
   try {
-    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked, persona_id: $("sheet-persona").value || null} : {}) }) });
+    const data = await api(`/conversations/${encodeURIComponent(id)}/settings`, { method: "PUT", body: JSON.stringify({ instructions: field.value, ...(isNative() ? {model: $("sheet-model").value || null, reasoning: $("sheet-reasoning").value, no_web: $("sheet-no-web").checked, keep_local: $("sheet-keep-local").checked, persona_id: $("sheet-persona").value || null} : {}) }) });
     if (isNative() && state.current === id) { state.model = data.model; state.noWeb = Boolean(data.no_web); showReasoning(data.reasoning); await loadMessages(id); }
     $("conversation-sheet").close();
     notice(data.instructions ? `Instructions saved. ${agent()} gets them with your next message.` : "Instructions cleared.");
@@ -1034,6 +1035,9 @@ function fillThoughts(body, items) {
       }
       body.append(tool); continue;
     }
+    if (item.name === "fallback") {
+      const tool = el("div", "thought-tool"); tool.append(el("div", "tool-call tool-call-plain", item.result || "Primary couldn’t start; answered on the fallback server")); body.append(tool); continue;
+    }
     if (item.name === "summarize") {
       const label = item.status === "running" ? "Summarizing earlier messages…" : item.status === "completed" ? "Summarized earlier messages" : item.status === "error" ? "Couldn't summarize earlier messages" : "Summarizing earlier messages was interrupted";
       const tool = el("div", "thought-tool"); tool.append(el("div", "tool-call tool-call-plain", label)); body.append(tool); continue;
@@ -1120,7 +1124,8 @@ function replyUsage(row) {
     const measured = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
     const rate = measured(usage.tokens_per_second) ? usage.tokens_per_second.toFixed(1) : "—";
     const first = measured(usage.time_to_first_token) ? usage.time_to_first_token.toFixed(2) + " s" : "—";
-    return `${input} in / ${output} out · ${rate} TPS · ${first} to first token`;
+    const via = row.served_by && row.served_by.server === "fallback" ? ` · via ${row.served_by.display_name || row.served_by.model} · fallback` : "";
+    return `${input} in / ${output} out · ${rate} TPS · ${first} to first token${via}`;
   }
   const duration = usage.model_seconds;
   const rate = count(usage.output_tokens) && typeof duration === "number" && Number.isFinite(duration) && duration > 0
@@ -1352,7 +1357,7 @@ function renderMessages(rows) {
   const all = view.rows, live = view.live, liveAfter = view.liveAfter;
   const signature = JSON.stringify([state.current, state.viewEpoch,
     all.map((row, index) => [row, index]).filter(([row]) => ["user", "assistant"].includes(row.role) && row.display_kind !== "hidden")
-      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.attachments?.map((file) => file.name), row.timestamp, row.roost_usage, row.state, row.revision,
+      .map(([row, index]) => [row.id ?? `at ${index}`, row.role, messageText(row), reasoningText(row), row.trace, row.sources, row.memories, row.persona_name, row.attachments?.map((file) => file.name), row.timestamp, row.roost_usage, row.served_by, row.state, row.revision,
         row.local_sent, row.local_failed, row.local_pending]),
     live, view.working, view.after, state.turn?.after, state.turn?.started,
     view.sent.filter((item) => item.id === state.current).map((item) => [item.key, item.failed, item.pending, item.retrying]),
@@ -2472,6 +2477,7 @@ async function loadPrimary() {
   try {
     const data = await api("/settings/servers");
     state.primary = data.servers.find(server => server.id === "primary") || {base_url: "", models: [], default_model: null, has_key: false};
+    state.fallback = data.servers.find(server => server.id === "fallback") || {base_url: "", models: [], default_model: null, has_key: false};
   } catch (error) { if (scope.alive()) state.modelsError = error.message; }
   finally { if (scope.alive()) { state.modelsLoading = false; renderSettings(); } }
 }
@@ -2484,9 +2490,10 @@ function modelInput(value, type = "text") {
   const input = el("input"); input.type = type; input.value = value; return input;
 }
 
-function renderModelList(parent, server) {
-  const redraw = focus => { parent.replaceChildren(); renderModelList(parent, server); $(focus).focus(); };
-  const defaultModel = el("select"); defaultModel.id = "settings-default-model";
+function renderModelList(parent, server, role = "primary") {
+  const prefix = role === "primary" ? "settings" : `settings-${role}`, openKey = model => role === "primary" ? model.id : `${role}:${model.id}`;
+  const redraw = focus => { parent.replaceChildren(); renderModelList(parent, server, role); $(focus).focus(); };
+  const defaultModel = el("select"); defaultModel.id = `${prefix}-default-model`;
   const enabledModels = server.models.filter(model => model.enabled);
   if (!enabledModels.length) {
     const option = el("option", "", "No enabled models"); option.value = ""; defaultModel.append(option);
@@ -2501,9 +2508,9 @@ function renderModelList(parent, server) {
   if (!server.models.length) parent.append(el("p", "", "No models yet. Discover models or add one by name."));
   for (const [index, model] of server.models.entries()) {
     const row = el("div", "model-row"), heading = el("div", "model-row-heading");
-    const expanded = state.openModel === model.id, label = model.display_name || model.id;
-    const expand = el("button", "model-expand"); expand.type = "button"; expand.id = `settings-model-${index}`;
-    expand.setAttribute("aria-expanded", String(expanded)); expand.setAttribute("aria-controls", `settings-model-details-${index}`);
+    const expanded = state.openModel === openKey(model), label = model.display_name || model.id;
+    const expand = el("button", "model-expand"); expand.type = "button"; expand.id = `${prefix}-model-${index}`;
+    expand.setAttribute("aria-expanded", String(expanded)); expand.setAttribute("aria-controls", `${prefix}-model-details-${index}`);
     expand.setAttribute("aria-label", `Model settings for ${label}`);
     const copy = el("span", "model-copy"), title = el("span", "model-name", label);
     const id = el("small", "model-id" + (label === model.id ? " hidden" : ""), model.id);
@@ -2511,10 +2518,10 @@ function renderModelList(parent, server) {
     const chevron = el("span", "model-chevron", "›"); chevron.setAttribute("aria-hidden", "true");
     expand.append(copy, chevron);
     expand.addEventListener("click", () => {
-      state.openModel = expanded ? null : model.id; redraw(expand.id);
+      state.openModel = expanded ? null : openKey(model); redraw(expand.id);
     });
     const enabled = el("button", "job-toggle" + (model.enabled ? "" : " off"));
-    enabled.type = "button"; enabled.id = `settings-model-enabled-${index}`; enabled.disabled = state.settingsBusy;
+    enabled.type = "button"; enabled.id = `${prefix}-model-enabled-${index}`; enabled.disabled = state.settingsBusy;
     enabled.setAttribute("role", "switch"); enabled.setAttribute("aria-checked", String(model.enabled));
     enabled.setAttribute("aria-label", `${label} enabled`);
     enabled.addEventListener("click", () => {
@@ -2526,7 +2533,7 @@ function renderModelList(parent, server) {
     });
     const toggle = el("span", "model-enabled"); toggle.append(el("span", "", "Enabled"), enabled);
     heading.append(expand, toggle); row.append(heading);
-    const fields = el("div", "model-details" + (expanded ? "" : " hidden")); fields.id = `settings-model-details-${index}`;
+    const fields = el("div", "model-details" + (expanded ? "" : " hidden")); fields.id = `${prefix}-model-details-${index}`;
     if (expanded) {
       const name = modelField(fields, "Display name", modelInput(model.display_name)); name.maxLength = 80;
       name.addEventListener("input", () => {
@@ -2584,15 +2591,42 @@ function renderModels(detail) {
     if (await saveSettings({backend: select.value}, "Backend saved.")) location.reload();
   });
   if (!isNative()) return;
-  const section = settingsSection(detail, "Primary server", "An OpenAI-compatible model server. Keys stay on the server.");
+  renderServer(detail, "primary");
+  renderServer(detail, "fallback");
+  renderFallbackSwitch(detail);
+}
+
+const SERVER_TEXT = {
+  primary: ["Primary server", "An OpenAI-compatible model server. Keys stay on the server.", "Models", "Enable models for the chat picker and choose a default. Save models when you’re done."],
+  fallback: ["Fallback server", "A second OpenAI-compatible server for when the primary can’t start a reply. Keys stay on the server.", "Fallback models", "Enable models and choose the one the fallback answers with. Save models when you’re done."]
+};
+
+function renderFallbackSwitch(detail) {
+  const section = settingsSection(detail, "Use the fallback", "Replies on the fallback leave this server, if that server is hosted elsewhere. Turn on Keep this chat local in a chat’s settings to keep one chat off it.");
+  const fallback = state.fallback, on = Boolean(state.settings.use_fallback);
+  const ready = Boolean(fallback && fallback.base_url && fallback.default_model);
+  const row = el("div", "model-enabled fallback-switch"), toggle = el("button", "job-toggle" + (on ? "" : " off"));
+  toggle.type = "button"; toggle.id = "settings-use-fallback"; toggle.disabled = state.settingsBusy || (!on && !ready);
+  toggle.setAttribute("role", "switch"); toggle.setAttribute("aria-checked", String(on));
+  toggle.setAttribute("aria-labelledby", "settings-use-fallback-label");
+  toggle.addEventListener("click", () => saveSettings({use_fallback: !on}, on ? "Fallback turned off." : "Fallback turned on."));
+  const label = el("span", "", "Use the fallback when the primary can’t start a reply"); label.id = "settings-use-fallback-label";
+  row.append(label, toggle); section.append(row);
+  if (!on && !ready) section.append(el("p", "sheet-note", "Save a fallback server and choose its default model first."));
+}
+
+function renderServer(detail, role) {
+  const [serverTitle, serverText, modelsTitle, modelsText] = SERVER_TEXT[role];
+  const prefix = role === "primary" ? "settings" : `settings-${role}`;
+  const section = settingsSection(detail, serverTitle, serverText);
   if (state.modelsError) { const error = el("p", "error", state.modelsError); error.setAttribute("role", "alert"); section.append(error); }
   if (state.modelsLoading) { section.append(el("p", "", "Loading models…")); return; }
-  const server = state.primary;
+  const server = state[role];
   if (!server) { section.append(settingsButton("secondary", "Load server", loadPrimary)); return; }
-  const url = modelField(section, "Base URL", modelInput(server.base_url, "url"));
+  const url = modelField(section, "Base URL", modelInput(server.base_url, "url")); url.id = `${prefix}-base-url`;
   url.placeholder = "https://models.example.com/v1"; url.spellcheck = false; url.autocapitalize = "off"; url.autocomplete = "off";
   url.addEventListener("input", () => { server.base_url = url.value; });
-  const key = modelField(section, "API key", modelInput("", "password"));
+  const key = modelField(section, "API key", modelInput("", "password")); key.id = `${prefix}-api-key`;
   key.maxLength = 4096;
   key.autocomplete = "new-password"; key.placeholder = server.has_key ? "Key saved" : "Optional";
   section.append(el("p", "", server.has_key ? "Key saved. Enter a new key to replace it." : "No key saved."));
@@ -2601,8 +2635,8 @@ function renderModels(detail) {
     const changes = {base_url: url.value, ...(clear ? {clear_key: true} : key.value ? {key: key.value} : {})};
     key.value = "";
     return withSettingsBusy(async () => {
-      const saved = await api("/settings/servers/primary", {method: "PUT", body: JSON.stringify(changes)});
-      state.primary = {...server, base_url: saved.base_url, has_key: saved.has_key}; notice(clear ? "Key cleared." : "Server saved.");
+      const saved = await api(`/settings/servers/${role}`, {method: "PUT", body: JSON.stringify(changes)});
+      state[role] = {...server, base_url: saved.base_url, has_key: saved.has_key}; notice(clear ? "Key cleared." : "Server saved.");
     });
   };
   actions.append(settingsButton("primary", "Save server", () => saveServer(false)));
@@ -2610,24 +2644,25 @@ function renderModels(detail) {
   actions.append(settingsButton("secondary", "Discover", async () => {
     if (!await saveServer(false)) return;
     await withSettingsBusy(async () => {
-      const data = await api("/settings/servers/primary/discover", {method: "POST"});
+      const data = await api(`/settings/servers/${role}/discover`, {method: "POST"});
       const drafts = new Map(server.models.map(model => [model.id, model]));
-      state.primary.models = data.models.map(model => drafts.get(model.id) || model); notice("Models discovered. Choose which to enable, then save models.");
+      state[role].models = data.models.map(model => drafts.get(model.id) || model); notice("Models discovered. Choose which to enable, then save models.");
     });
   }));
   section.append(actions);
-  const curated = settingsSection(detail, "Models", "Enable models for the chat picker and choose a default. Save models when you’re done.");
-  const list = el("div", "model-list"); renderModelList(list, server); curated.append(list);
-  const add = modelField(curated, "Add model by name", modelInput("")); add.autocapitalize = "off"; add.spellcheck = false; add.placeholder = "model-id";
+  const curated = settingsSection(detail, modelsTitle, modelsText);
+  const list = el("div", "model-list"); renderModelList(list, server, role); curated.append(list);
+  const add = modelField(curated, "Add model by name", modelInput("")); add.id = `${prefix}-add-model`; add.autocapitalize = "off"; add.spellcheck = false; add.placeholder = "model-id";
   const buttons = el("div", "settings-actions");
   buttons.append(settingsButton("secondary", "Add model", () => {
     const id = add.value.trim(); if (!id) return;
     if (server.models.some(model => model.id === id)) { notice("That model is already listed."); return; }
     server.models.push({id, display_name: id, enabled: false, thinking_mode: "unsupported", tools: true});
-    list.replaceChildren(); renderModelList(list, server); add.value = "";
+    list.replaceChildren(); renderModelList(list, server, role); add.value = "";
   }), settingsButton("primary", "Save models", () => withSettingsBusy(async () => {
-    await api("/settings/servers/primary/models", {method: "PUT", body: JSON.stringify({models: server.models, default_model: server.default_model})});
-    await loadModels(); notice("Models saved.");
+    await api(`/settings/servers/${role}/models`, {method: "PUT", body: JSON.stringify({models: server.models, default_model: server.default_model})});
+    if (role === "primary") await loadModels();
+    notice("Models saved.");
   })));
   curated.append(buttons);
 }

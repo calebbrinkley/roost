@@ -489,6 +489,9 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
 .model-expand[aria-expanded="true"] .model-chevron { transform: rotate(90deg); }
 .model-expand:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: 8px; }
 .model-enabled .job-toggle::before { content: ""; position: absolute; inset: -7px 0; }
+.fallback-switch { max-width: 520px; justify-content: space-between; gap: 16px; min-height: 44px; color: var(--ink); font-size: calc(15px * var(--text-scale)); }
+.fallback-switch .job-toggle:disabled { opacity: .5; }
+.settings-detail .fallback-switch + .sheet-note { margin-top: 8px; }
 .model-details { padding: 0 0 14px; }
 .settings-detail .model-field { margin-top: 12px; }
 .model-field input, .model-field select { display: block; margin-top: 6px; }
@@ -560,7 +563,7 @@ a.sheet-action { display: block; text-align: center; text-decoration: none; }
   .summary-read { min-width: 44px; }
   #summary-sheet button { min-height: 44px; min-width: 44px; }
   .persona-add, .preset-row button, .memory-more, .preset-editor button, .preset-editor input, .memory-forget, .used-memories summary,
-  #sheet-persona, #remember-sheet button { min-height: 44px; min-width: 44px; }
+  #sheet-persona, #remember-sheet button, #sheet-instructions-form .check-row { min-height: 44px; min-width: 44px; }
 }
 
 /* Attachments (native): one chip shape in the composer tray, sent messages and the edit form. */

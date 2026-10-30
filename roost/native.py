@@ -12,6 +12,7 @@ from aiohttp import web
 
 from . import attachments as files
 from . import server as http
+from .servers import ServerError
 from .store import payload_fingerprint
 
 
@@ -37,7 +38,24 @@ def turn_context(turn):
             'memories': turn.memories}
 
 
-def row(app, message):
+def display_names(app):
+    """Primary model names, read once per request; an unreadable config just means ids are shown."""
+    try:
+        return {m['id']: m['display_name'] for m in app['servers'].get('primary')['models']}
+    except ServerError:
+        return {}
+
+
+def served_by(app, turn, names):
+    """Which server role and model answered (or is answering) this turn."""
+    step = app['store'].fallback_step(turn.id)
+    if step:
+        return {'server': 'fallback', 'model': step['model'], 'display_name': step['display_name']}
+    return {'server': 'primary', 'model': turn.model, 'display_name': names.get(turn.model, turn.model)}
+
+
+def row(app, message, names=None):
+    names = display_names(app) if names is None else names
     turn = app['store'].get_turn(message.turn_id)
     stats, usage = turn.stats, turn.stats.get('usage', {})
     return {'id': message.id, 'role': message.role, 'content': message.content, 'reasoning': message.reasoning,
@@ -48,7 +66,8 @@ def row(app, message):
                                 'model_seconds': stats.get('model_seconds'),
                                 'time_to_first_token': stats.get('time_to_first_token'),
                                 'tokens_per_second': stats.get('tokens_per_second')}, 'stats': stats,
-                'trace': app['store'].trace(turn.id), 'sources': app['store'].sources(turn.id), **turn_context(turn)}
+                'trace': app['store'].trace(turn.id), 'sources': app['store'].sources(turn.id), **turn_context(turn),
+                'served_by': served_by(app, turn, names)}
                if message.role == 'assistant' else {})}
 
 
@@ -83,8 +102,9 @@ async def conversation(request):
     running = next((t for t in ordered if t.state == 'running'), None)
     working = any(t.state in ('queued', 'running') for t in ordered)
     last = next((t for t in reversed(ordered) if t.stats), None)
-    context_tokens = last.settings.get('context_tokens') if last else None
-    result = {'session_id': c.id, 'persona_name': store.effective_persona(c)['name'], 'messages': [row(request.app, m) for m in messages], 'has_older': older,
+    context_tokens = (last.stats['context_tokens'] if 'context_tokens' in last.stats else last.settings.get('context_tokens')) if last else None
+    names = display_names(request.app)
+    result = {'session_id': c.id, 'persona_name': store.effective_persona(c)['name'], 'messages': [row(request.app, m, names) for m in messages], 'has_older': older,
               'live': running is not None, 'working': working,
               'after': request.app['runner'].messages(running.id)[0].id - 1 if running else None,
               'started': running.created_at if running else None, 'turn_id': running.id if running else None,
@@ -112,6 +132,10 @@ def fields(data):
         if type(data['no_web']) is not bool:
             raise http.bad('no_web must be a boolean.')
         changes['no_web'] = data['no_web']
+    if 'keep_local' in data:
+        if type(data['keep_local']) is not bool:
+            raise http.bad('keep_local must be a boolean.')
+        changes['keep_local'] = data['keep_local']
     if 'persona_id' in data:
         if data['persona_id'] is not None and (not isinstance(data['persona_id'], str) or not http.plain_id(data['persona_id'])):
             raise http.bad('Invalid persona identifier.')
@@ -212,7 +236,7 @@ async def delete_all_conversations(request):
 
 
 def chat_settings(c):
-    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model, 'no_web': c.no_web, 'persona_id': c.persona_id}
+    return {'instructions': c.instructions, 'reasoning': 'none' if c.thinking == 'off' else c.thinking, 'model': c.model, 'no_web': c.no_web, 'keep_local': c.keep_local, 'persona_id': c.persona_id}
 
 
 async def get_chat_settings(request):
@@ -221,8 +245,8 @@ async def get_chat_settings(request):
 
 async def update_chat_settings(request):
     c, data = chat(request), await http.json_body(request)
-    if not data or set(data) - {'instructions', 'reasoning', 'model', 'no_web', 'persona_id'}:
-        raise http.bad('Only instructions, reasoning, model, no_web and persona_id can be changed.')
+    if not data or set(data) - {'instructions', 'reasoning', 'model', 'no_web', 'keep_local', 'persona_id'}:
+        raise http.bad('Only instructions, reasoning, model, no_web, keep_local and persona_id can be changed.')
     changes = fields(data)
     if changes.get('model') is not None:
         request.app['runner'].selected(changes['model'])
@@ -232,7 +256,8 @@ async def update_chat_settings(request):
 
 async def export_conversation(request):
     c, store = chat(request), request.app['store']
-    messages = [row(request.app, m) for t in store.list_turns(c.id) for m in request.app['runner'].messages(t.id)]
+    names = display_names(request.app)
+    messages = [row(request.app, m, names) for t in store.list_turns(c.id) for m in request.app['runner'].messages(t.id)]
     body = {'conversation': c.id, 'exported': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             **chat_settings(c), 'messages': messages}
     return web.Response(body=json.dumps(body, ensure_ascii=False, indent=2).encode(), content_type='application/json',
@@ -264,7 +289,8 @@ async def stream(request):
                            'thoughts': assistant.reasoning, 'text': assistant.content, 'approvals': [],
                            'turn_id': turn.id, 'revision': turn.revision, 'state': turn.state,
                            'done': turn.state not in ('running', 'queued'),
-                           'trace': store.trace(turn.id), 'sources': store.sources(turn.id), **turn_context(turn)}
+                           'trace': store.trace(turn.id), 'sources': store.sources(turn.id), **turn_context(turn),
+                           'served_by': served_by(request.app, turn, display_names(request.app))}
                 # Summaries ride on the first frame and whenever they change; a missing field means unchanged.
                 summaries = store.summaries(c.id)
                 if previous is None or summaries != sent_summaries:
